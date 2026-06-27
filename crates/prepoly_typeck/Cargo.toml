@@ -1,0 +1,13 @@
+[package]
+name = "prepoly_typeck"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+prepoly_lexer.workspace = true
+prepoly_parser.workspace = true
+prepoly_hir.workspace = true
+prepoly_solver.workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "prepoly_resolve"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+prepoly_lexer.workspace = true
+prepoly_parser.workspace = true
+prepoly_hir.workspace = true

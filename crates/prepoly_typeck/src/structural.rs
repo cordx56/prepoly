@@ -1,0 +1,217 @@
+//! Structural subtyping (DESIGN.md 5.8): a record type S is usable where T is
+//! required when S has every field and method of T with compatible types.
+//! Sum types are nominal and excluded.
+
+use prepoly_hir::{CallableSignature, NominalType, ParamInfo, Program, Type, TypeKind};
+
+/// Whether `a` and `b` are mutually compatible, i.e. invariant. Mutable record
+/// fields and method parameters use this instead of one-directional
+/// assignability: a value stored in a field can be both read and overwritten,
+/// and a parameter is consumed by the body, so widening either direction is
+/// unsound (DESIGN.md 4.2.3, 5.8). Unknowns stay flexible because
+/// `types_compatible` accepts them in both directions, which preserves
+/// interface constraint propagation.
+pub fn types_invariant(program: &Program, a: &Type, b: &Type) -> bool {
+    types_compatible(program, a, b) && types_compatible(program, b, a)
+}
+
+/// Whether a value of `have` can be used where `want` is required.
+pub fn types_compatible(program: &Program, have: &Type, want: &Type) -> bool {
+    if let (Some((h_ok, h_err)), Some((w_ok, w_err))) =
+        (have.result_payloads(), want.result_payloads())
+    {
+        return types_compatible(program, h_ok, w_ok) && types_compatible(program, h_err, w_err);
+    }
+    if have.is_result_type() && want.is_result_type() {
+        return true;
+    }
+    match (have, want) {
+        (Type::Unknown(_), _) | (_, Type::Unknown(_)) => true,
+        (Type::ConstOf(h), Type::ConstOf(w)) => types_compatible(program, h, w),
+        (Type::ConstOf(h), other) => types_compatible(program, h, other),
+        (other, Type::ConstOf(w)) => types_compatible(program, other, w),
+        (Type::Never, Type::Nullable(_)) => true,
+        (Type::Nullable(h), Type::Nullable(w))
+            if matches!(h.as_ref(), Type::Never) || matches!(w.as_ref(), Type::Never) =>
+        {
+            true
+        }
+        (Type::Nullable(h), Type::Nullable(w)) => types_compatible(program, h, w),
+        (Type::Array(h, hn), Type::Array(w, wn)) if hn == wn => types_compatible(program, h, w),
+        (Type::Slice(h), Type::Slice(w)) => types_compatible(program, h, w),
+        (Type::Fun(hp, hr), Type::Fun(wp, wr)) if hp.len() == wp.len() => {
+            hp.iter()
+                .zip(wp)
+                .all(|(h, w)| types_compatible(program, h, w))
+                && types_compatible(program, hr, wr)
+        }
+        (Type::Record(sub), Type::Record(sup)) if !sub.same_nominal(sup) => {
+            record_satisfies(program, sub.name(), sup.name()).is_empty()
+        }
+        (Type::Sum(a), Type::Sum(b)) => sum_assignable(program, a, b),
+        _ => have == want,
+    }
+}
+
+/// Whether a value of sum `have` is usable where sum `want` is required. A sum is
+/// nominal, but a value's substitution may *refine* it with the concrete types of
+/// unannotated variant fields (recorded at construction, e.g. `S<B.value=string>`).
+/// A more refined value is usable where a less refined -- in particular the bare --
+/// nominal is required: dropping refinement is sound because a sum is read by
+/// matching a variant, and bare common-field access on an unannotated variant field
+/// is rejected. The required type may not demand a refinement the value lacks.
+fn sum_assignable(program: &Program, have: &NominalType, want: &NominalType) -> bool {
+    have.id == want.id
+        && (have.id >= 0 || have.name() == want.name())
+        && want.substitution.iter().all(|(key, wt)| {
+            have.substitution
+                .get(key)
+                .is_some_and(|ht| types_compatible(program, ht, wt))
+        })
+}
+
+/// Whether callable signature `have` can stand in for signature `want`.
+pub fn signature_satisfies(
+    program: &Program,
+    have: &CallableSignature,
+    want: &CallableSignature,
+) -> bool {
+    same_self_kind(&have.params, &want.params)
+        && have.params.len() == want.params.len()
+        && have
+            .params
+            .iter()
+            .zip(&want.params)
+            .all(|(h, w)| param_satisfies(program, h, w))
+        && annotated_type_satisfies(
+            program,
+            have.ret.is_some(),
+            have.ret_ty.as_ref(),
+            want.ret.is_some(),
+            want.ret_ty.as_ref(),
+        )
+}
+
+fn same_self_kind(have: &[ParamInfo], want: &[ParamInfo]) -> bool {
+    have.first().is_some_and(|p| p.name == "self") == want.first().is_some_and(|p| p.name == "self")
+}
+
+fn param_satisfies(program: &Program, have: &ParamInfo, want: &ParamInfo) -> bool {
+    // Method parameters are invariant: accepting a narrower parameter than the
+    // interface declares would let a caller pass a value the implementation
+    // cannot handle.
+    annotated_type_invariant(
+        program,
+        have.ty.is_some(),
+        have.resolved_ty.as_ref(),
+        want.ty.is_some(),
+        want.resolved_ty.as_ref(),
+    )
+}
+
+fn annotated_type_satisfies(
+    program: &Program,
+    have_annotation: bool,
+    have: Option<&Type>,
+    want_annotation: bool,
+    want: Option<&Type>,
+) -> bool {
+    annotated_type_relates(
+        have_annotation,
+        have,
+        want_annotation,
+        want,
+        |have, want| types_compatible(program, have, want),
+    )
+}
+
+fn annotated_type_invariant(
+    program: &Program,
+    have_annotation: bool,
+    have: Option<&Type>,
+    want_annotation: bool,
+    want: Option<&Type>,
+) -> bool {
+    annotated_type_relates(
+        have_annotation,
+        have,
+        want_annotation,
+        want,
+        |have, want| types_invariant(program, have, want),
+    )
+}
+
+/// Shared annotation-presence handling for member compatibility. An absent
+/// annotation behaves as a fresh unknown and stays flexible; two present
+/// annotations are compared with `relate` (assignable or invariant).
+fn annotated_type_relates(
+    have_annotation: bool,
+    have: Option<&Type>,
+    want_annotation: bool,
+    want: Option<&Type>,
+    relate: impl Fn(&Type, &Type) -> bool,
+) -> bool {
+    if !want_annotation && want.is_none() {
+        return true;
+    }
+    if !have_annotation && have.is_none() {
+        return true;
+    }
+    match (have, want) {
+        (Some(have), Some(want)) => relate(have, want),
+        (_, None) => true,
+        (None, Some(want)) => want.is_unknown(),
+    }
+}
+
+/// Check that record `sub` structurally satisfies record `sup` (every field /
+/// method of `sup` exists in `sub`). Returns the list of incompatible members.
+pub fn record_satisfies(program: &Program, sub: &str, sup: &str) -> Vec<String> {
+    let mut issues = Vec::new();
+    let (Some(s), Some(t)) = (program.types.get(sub), program.types.get(sup)) else {
+        return issues;
+    };
+    let (
+        TypeKind::Record {
+            fields: sf,
+            methods: sm,
+        },
+        TypeKind::Record {
+            fields: tf,
+            methods: tm,
+        },
+    ) = (&s.kind, &t.kind)
+    else {
+        return issues;
+    };
+    for f in tf {
+        match sf.iter().find(|x| x.name == f.name) {
+            None => issues.push(format!("field `{}`", f.name)),
+            Some(have) => {
+                // Fields are mutable, so they are invariant: a covariant field
+                // would let writes through one alias install a value the other
+                // alias's type forbids.
+                if !annotated_type_invariant(
+                    program,
+                    have.ty.is_some(),
+                    have.resolved_ty.as_ref(),
+                    f.ty.is_some(),
+                    f.resolved_ty.as_ref(),
+                ) {
+                    issues.push(format!("field `{}`", f.name));
+                }
+            }
+        }
+    }
+    for (name, want) in tm {
+        match sm.get(name) {
+            None => issues.push(format!("method `{name}`")),
+            Some(have) => {
+                if !signature_satisfies(program, &have.signature, &want.signature) {
+                    issues.push(format!("method `{name}`"));
+                }
+            }
+        }
+    }
+    issues
+}

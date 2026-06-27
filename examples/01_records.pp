@@ -1,0 +1,43 @@
+// Record types: fields, static and instance methods, `Self`, mutation, const.
+// Records have reference semantics; mutating through one binding is visible
+// through any other that shares the object.
+
+type Account = {
+    owner: string
+    balance: int32
+
+    // A static method has no `self` parameter and is called as `Type.method`.
+    open(owner: string) -> Account {
+        return Self { owner: owner, balance: 0 }
+    }
+
+    // Instance methods take `self` first and are called as `value.method`.
+    deposit(self, amount: int32) {
+        self.balance += amount
+    }
+
+    withdraw(self, amount: int32) -> bool {
+        if amount > self.balance {
+            return false
+        }
+        self.balance -= amount
+        return true
+    }
+
+    describe(self) -> string {
+        return "{self.owner}: {self.balance}"
+    }
+}
+
+fun main() {
+    let acc = Account.open("Alice")
+    acc.deposit(100)
+    acc.deposit(50)
+    let ok = acc.withdraw(30)
+    println(acc.describe())
+    println("withdraw ok = {ok}")
+
+    // `const` makes the whole value immutable; reassigning it is a compile error.
+    const pi = 3.14159
+    println("pi = {pi}")
+}

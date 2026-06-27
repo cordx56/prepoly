@@ -1,0 +1,200 @@
+//! Module-level name resolution: validate that every imported name exists and
+//! is public (DESIGN.md 2.3, 2.7). The file-system module graph is resolved by
+//! the driver; this checks the resulting program for import errors.
+
+use std::collections::{HashMap, HashSet};
+
+use prepoly_hir::{LoadedModule, Program};
+use prepoly_lexer::Span;
+use prepoly_parser::ast::TopLevel;
+
+use crate::visibility::is_public;
+
+#[derive(Clone, Debug)]
+pub struct ResolveError {
+    pub message: String,
+    pub span: Span,
+}
+
+/// Check each import against the loaded modules: the name must be public and
+/// exported by the named module. When the module is not a loaded file (a
+/// prelude or builtin reference, which the file resolver does not load under the
+/// import path), fall back to accepting any name that exists somewhere in the
+/// program, since prelude symbols are globally available.
+pub fn check_imports(program: &Program, modules: &[LoadedModule]) -> Vec<ResolveError> {
+    let exports = collect_exports(modules);
+    let mut errors = Vec::new();
+    for m in modules {
+        // The same local name imported from two different modules is a local
+        // ambiguity in the importing module (DESIGN.md 2; PLAN.md R2): neither
+        // origin wins, so a bare use cannot be resolved.
+        let mut origins: HashMap<&str, Vec<String>> = HashMap::new();
+        for imp in &m.ast.imports {
+            let key = imp.path.join(".");
+            for name in &imp.names {
+                let seen = origins.entry(name.as_str()).or_default();
+                if !seen.contains(&key) {
+                    seen.push(key.clone());
+                }
+            }
+        }
+        for imp in &m.ast.imports {
+            for name in &imp.names {
+                if let Some(paths) = origins.get(name.as_str())
+                    && paths.len() > 1
+                    && paths.first() == Some(&imp.path.join("."))
+                {
+                    errors.push(ResolveError {
+                        message: format!(
+                            "`{name}` is imported from multiple modules (`{}`); \
+                                 the import is ambiguous",
+                            paths.join("`, `")
+                        ),
+                        span: imp.span,
+                    });
+                }
+            }
+        }
+        for imp in &m.ast.imports {
+            let key = imp.path.join(".");
+            for name in &imp.names {
+                if !is_public(name) {
+                    errors.push(ResolveError {
+                        message: format!("cannot import private name `{name}`"),
+                        span: imp.span,
+                    });
+                    continue;
+                }
+                match exports.get(&key) {
+                    Some(names) if !names.contains(name) => errors.push(ResolveError {
+                        message: format!("module `{key}` has no exported name `{name}`"),
+                        span: imp.span,
+                    }),
+                    Some(_) => {}
+                    None => {
+                        // Not a loaded file module: accept only names that
+                        // resolve to a program-wide (prelude/builtin) symbol.
+                        let known = program.types.contains_key(name)
+                            || program.functions.contains_key(name);
+                        if !known {
+                            errors.push(ResolveError {
+                                message: format!(
+                                    "cannot import unknown name `{name}` from `{key}`"
+                                ),
+                                span: imp.span,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    errors
+}
+
+/// Public top-level type and function names exported by each loaded module,
+/// keyed by the module's dotted path.
+fn collect_exports(modules: &[LoadedModule]) -> HashMap<String, HashSet<String>> {
+    let mut exports: HashMap<String, HashSet<String>> = HashMap::new();
+    for m in modules {
+        let names = exports.entry(m.path.join(".")).or_default();
+        for item in &m.ast.items {
+            match item {
+                TopLevel::Type(t) if is_public(&t.name) => {
+                    names.insert(t.name.clone());
+                }
+                TopLevel::Fun(f) if is_public(&f.name) => {
+                    names.insert(f.name.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    exports
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prepoly_hir::lower;
+    use prepoly_parser::parse;
+
+    fn module(path: &[&str], src: &str) -> LoadedModule {
+        LoadedModule {
+            path: path.iter().map(|s| s.to_string()).collect(),
+            ast: parse(src).expect("parse"),
+        }
+    }
+
+    fn import_errors(modules: Vec<LoadedModule>) -> Vec<String> {
+        let (program, lerr) = lower(&modules);
+        assert!(lerr.is_empty(), "lower errors: {lerr:?}");
+        check_imports(&program, &modules)
+            .into_iter()
+            .map(|e| e.message)
+            .collect()
+    }
+
+    #[test]
+    fn unknown_imported_name_is_reported() {
+        let lib = module(&["geometry", "vec"], "type Vec2 = { x: float64 }\n");
+        let main = module(&["main"], "import geometry.vec.{ Vec2, missing }\n");
+        let errors = import_errors(vec![lib, main]);
+        assert!(
+            errors
+                .iter()
+                .any(|m| m.contains("module `geometry.vec` has no exported name `missing`")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn exported_name_is_accepted() {
+        let lib = module(&["geometry", "vec"], "type Vec2 = { x: float64 }\n");
+        let main = module(&["main"], "import geometry.vec.{ Vec2 }\n");
+        assert!(import_errors(vec![lib, main]).is_empty());
+    }
+
+    #[test]
+    fn same_name_imported_from_two_modules_is_ambiguous() {
+        // PLAN.md R2: importing `helper` from two different modules into one
+        // module is a local ambiguity, reported once and naming both origins.
+        // The flat-namespace lower collision is ignored here so the import check
+        // is tested in isolation (it is the diagnostic that survives once
+        // coexistence lands).
+        let a = module(&["a", "util"], "fun helper() -> int32 { return 1 }\n");
+        let b = module(&["b", "util"], "fun helper() -> int32 { return 2 }\n");
+        let main = module(
+            &["main"],
+            "import a.util.{ helper }\nimport b.util.{ helper }\n",
+        );
+        let modules = vec![a, b, main];
+        let (program, _lerr) = lower(&modules);
+        let errors: Vec<String> = check_imports(&program, &modules)
+            .into_iter()
+            .map(|e| e.message)
+            .collect();
+        let ambiguous: Vec<_> = errors
+            .iter()
+            .filter(|m| m.contains("imported from multiple modules"))
+            .collect();
+        assert_eq!(ambiguous.len(), 1, "reported once: {errors:?}");
+        assert!(
+            ambiguous[0].contains("`a.util`") && ambiguous[0].contains("`b.util`"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn private_name_import_is_reported() {
+        let lib = module(&["geometry", "vec"], "type _Hidden = { x: float64 }\n");
+        let main = module(&["main"], "import geometry.vec.{ _Hidden }\n");
+        let errors = import_errors(vec![lib, main]);
+        assert!(
+            errors
+                .iter()
+                .any(|m| m.contains("cannot import private name `_Hidden`")),
+            "{errors:?}"
+        );
+    }
+}

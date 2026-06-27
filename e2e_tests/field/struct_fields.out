@@ -1,0 +1,5 @@
+Alice: 150
+Account {
+    owner: Alice,
+    balance: 150,
+}

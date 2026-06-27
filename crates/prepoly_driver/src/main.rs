@@ -1,0 +1,638 @@
+//! Prepoly command-line driver.
+//!
+//! Pipeline (DESIGN.md 6): resolve the module graph, parse, lower to HIR, check
+//! (resolve + typeck), then run the checked program. The standard library is an
+//! embedded prelude.
+//!
+//! Two execution back ends share the same front end. When the JIT back end is
+//! available, `prepoly run` compiles and runs through the LLVM JIT
+//! (`prepoly_jit_llvm`); otherwise the default runtime is the REPL interpreter
+//! (`prepoly_repl`). The JIT is available when the default `jit` feature is on AND
+//! the target is not wasm (LLVM cannot link for wasm), so a wasm build
+//! automatically disables it and falls back to the interpreter -- this is the
+//! `jit_backend` cfg from `build.rs`. `prepoly repl [file]` always uses the
+//! interpreter: with a file it runs the file, with none it starts an interactive
+//! session. Argument parsing is `clap`'s derive interface.
+
+use std::collections::{HashMap, HashSet};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use clap::{Parser, Subcommand};
+
+use prepoly_hir::{LoadedModule, Program, lower};
+use prepoly_lexer::{Span, line_col};
+use prepoly_parser::ast::{Module, Stmt, TopLevel};
+use prepoly_parser::{ParseError, parse};
+
+/// Embedded standard-library modules (implicit prelude).
+const STDLIB: &[(&str, &str)] = &[
+    ("io", include_str!("../../../std/io.pp")),
+    ("array", include_str!("../../../std/array.pp")),
+    ("string", include_str!("../../../std/string.pp")),
+    ("math", include_str!("../../../std/math.pp")),
+    ("conv", include_str!("../../../std/conv.pp")),
+    ("assert", include_str!("../../../std/assert.pp")),
+];
+
+/// The Prepoly toolchain driver.
+#[derive(Parser)]
+#[command(name = "prepoly", version, about = "The Prepoly compiler and REPL")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Compile and run a program with the default runtime (the LLVM JIT when it is
+    /// available -- the `jit` feature on a non-wasm target -- otherwise the REPL
+    /// interpreter).
+    Run { file: String },
+    /// Type-check a program without running it.
+    Check { file: String },
+    /// Start the interactive REPL, or run a file through the REPL interpreter.
+    Repl { file: Option<String> },
+}
+
+/// Which back end / phase `drive` runs after the front end produces a checked
+/// program.
+enum Mode {
+    Run,
+    Check,
+    Repl,
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match cli.command {
+        // No subcommand, or `repl` with no file: an interactive session.
+        None | Some(Command::Repl { file: None }) => repl_interactive(),
+        Some(Command::Repl { file: Some(file) }) => exit_code(drive(Mode::Repl, &file)),
+        Some(Command::Run { file }) => exit_code(drive(Mode::Run, &file)),
+        Some(Command::Check { file }) => exit_code(drive(Mode::Check, &file)),
+    }
+}
+
+fn exit_code(r: Result<(), u8>) -> ExitCode {
+    match r {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(code) => ExitCode::from(code),
+    }
+}
+
+/// Apply the spawn auto-acquire transform (DESIGN.md 12.9) to every function and
+/// method body in each module, before lowering. This rewrites a `spawn` closure
+/// that mutates a captured cown to acquire it with `with`, so the source needs no
+/// ownership annotations yet concurrent mutation is serialized by the cown lock.
+#[cfg(jit_backend)]
+fn auto_acquire_modules(modules: &mut [LoadedModule]) {
+    use prepoly_jit_llvm::ownership::auto_acquire;
+    use prepoly_parser::ast::{Member, TypeBody};
+
+    let names = |params: &[prepoly_parser::ast::Param]| -> HashSet<String> {
+        params.iter().map(|p| p.name.clone()).collect()
+    };
+    for m in modules {
+        for item in &mut m.ast.items {
+            match item {
+                TopLevel::Fun(f) => {
+                    let params = names(&f.params);
+                    auto_acquire(&mut f.body.stmts, &params);
+                }
+                TopLevel::Type(t) => {
+                    let members = match &mut t.body {
+                        TypeBody::Record(members) => members,
+                        TypeBody::Sum(_) => continue,
+                    };
+                    for member in members {
+                        if let Member::Method(method) = member
+                            && let Some(body) = &mut method.body
+                        {
+                            let params = names(&method.params);
+                            auto_acquire(&mut body.stmts, &params);
+                        }
+                    }
+                }
+                TopLevel::Stmt(_) => {}
+            }
+        }
+    }
+}
+
+/// Emit a warning for every `spawn` capture the compiler auto-cowns (DESIGN.md
+/// 12.9.2). The shared ownership analysis (`prepoly_jit_llvm::ownership`) decides
+/// move/freeze/cown from liveness and mutation; a `Cown` decision means the capture
+/// is mutated and still live, so the compiler wraps it for safe concurrent access.
+///
+/// Runs on the original module ASTs *before* `auto_acquire_modules` rewrites the
+/// mutated captures into explicit `with` scopes: the warning must reflect what
+/// auto-acquire is about to do, so it has to see the pre-transform source.
+#[cfg(jit_backend)]
+fn report_spawn_ownership(modules: &[LoadedModule]) {
+    use prepoly_jit_llvm::ownership::{CaptureDecision, Ownership, analyze_spawns_stmts};
+    use prepoly_parser::ast::{Member, TypeBody};
+
+    fn warn(decisions: Vec<CaptureDecision>, ctx: &str) {
+        for d in decisions {
+            if d.ownership == Ownership::Cown {
+                eprintln!(
+                    "warning: variable '{}' is auto-wrapped in cown with \
+                     function-level acquire{ctx}",
+                    d.var
+                );
+                eprintln!(
+                    "  = note: for finer-grained concurrency, use explicit \
+                     'with(cown, (c) -> {{ ... }})'"
+                );
+            }
+        }
+    }
+
+    fn param_names(params: &[prepoly_parser::ast::Param]) -> HashSet<String> {
+        params.iter().map(|p| p.name.clone()).collect()
+    }
+
+    for m in modules {
+        let mut init_stmts: Vec<Stmt> = Vec::new();
+        for item in &m.ast.items {
+            match item {
+                TopLevel::Fun(f) => warn(
+                    analyze_spawns_stmts(&f.body.stmts, &param_names(&f.params)),
+                    &format!(" in `{}`", f.name),
+                ),
+                TopLevel::Type(t) => {
+                    let members = match &t.body {
+                        TypeBody::Record(members) => members,
+                        TypeBody::Sum(_) => continue,
+                    };
+                    for member in members {
+                        if let Member::Method(method) = member
+                            && let Some(body) = &method.body
+                        {
+                            warn(
+                                analyze_spawns_stmts(&body.stmts, &param_names(&method.params)),
+                                &format!(" in `{}.{}`", t.name, method.name),
+                            );
+                        }
+                    }
+                }
+                TopLevel::Stmt(s) => init_stmts.push(s.clone()),
+            }
+        }
+        if !init_stmts.is_empty() {
+            warn(
+                analyze_spawns_stmts(&init_stmts, &HashSet::new()),
+                &format!(" in module `{}`", m.path.join(".")),
+            );
+        }
+    }
+}
+
+/// Run a checked program through the default runtime: the LLVM JIT, used when the
+/// JIT back end is available (the `jit` feature on a non-wasm target).
+#[cfg(jit_backend)]
+fn execute(
+    program: &Program,
+    int_lit_types: &HashMap<Span, prepoly_hir::IntKind>,
+) -> Result<(), String> {
+    prepoly_jit_llvm::run(program, int_lit_types)
+}
+
+/// Run a checked program through the default runtime: the REPL interpreter, used
+/// when the JIT back end is unavailable (no `jit` feature, or a wasm target).
+#[cfg(not(jit_backend))]
+fn execute(
+    program: &Program,
+    _int_lit_types: &HashMap<Span, prepoly_hir::IntKind>,
+) -> Result<(), String> {
+    prepoly_repl::run(program, &mut io::stdout())
+}
+
+/// Run a checked program through the REPL interpreter (the `repl` subcommand),
+/// regardless of the `jit` feature.
+fn execute_repl(program: &Program) -> Result<(), String> {
+    prepoly_repl::run(program, &mut io::stdout())
+}
+
+/// Resolve each integer literal's source span to its inferred integer kind when
+/// that kind is unambiguous across all (re-)inferences, for typed-literal codegen
+/// (PLAN.md R4). A span recorded with more than one integer kind (a literal in a
+/// polymorphic context) is left out, so codegen defaults it.
+fn int_literal_types(typed: &prepoly_hir::TypedProgram) -> HashMap<Span, prepoly_hir::IntKind> {
+    use prepoly_hir::{Type, TypedExprKind};
+    let mut per_span: HashMap<Span, Option<prepoly_hir::IntKind>> = HashMap::new();
+    for e in &typed.expressions {
+        if e.kind != TypedExprKind::Int {
+            continue;
+        }
+        let kind = match &e.ty {
+            Type::Int(k) => Some(*k),
+            Type::ConstOf(inner) => match inner.as_ref() {
+                Type::Int(k) => Some(*k),
+                _ => None,
+            },
+            _ => None,
+        };
+        match (per_span.get(&e.span), kind) {
+            (None, k) => {
+                per_span.insert(e.span, k);
+            }
+            (Some(prev), k) if *prev != k => {
+                per_span.insert(e.span, None);
+            }
+            _ => {}
+        }
+    }
+    per_span
+        .into_iter()
+        .filter_map(|(span, k)| k.map(|k| (span, k)))
+        .collect()
+}
+
+/// A program that passed every front-end check, ready to run.
+struct Checked {
+    program: Program,
+    int_lit_types: HashMap<Span, prepoly_hir::IntKind>,
+}
+
+/// Drive the front end on a source file, then act per `mode`. Front-end
+/// diagnostics are printed to stderr; an error returns a non-zero exit code.
+fn drive(mode: Mode, file: &str) -> Result<(), u8> {
+    let main_path = PathBuf::from(file);
+    let main_src = std::fs::read_to_string(&main_path).map_err(|e| {
+        eprintln!("error: cannot read `{file}`: {e}");
+        1u8
+    })?;
+    let root = main_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+
+    let checked = match analyze(file, &main_src, &root) {
+        Ok(c) => c,
+        Err(diagnostics) => {
+            for d in diagnostics {
+                eprintln!("{d}");
+            }
+            return Err(1);
+        }
+    };
+
+    match mode {
+        Mode::Check => {
+            println!("ok");
+            Ok(())
+        }
+        Mode::Run => execute(&checked.program, &checked.int_lit_types).map_err(|e| {
+            eprintln!("error: {e}");
+            1
+        }),
+        Mode::Repl => execute_repl(&checked.program).map_err(|e| {
+            eprintln!("error: {e}");
+            1
+        }),
+    }
+}
+
+/// Parse, resolve the module graph, lower, and statically check `main_src` (a
+/// program whose label is `main_label`, imports resolved relative to `root`).
+/// Returns the checked program or the rendered diagnostics. Shared by file
+/// execution and the interactive REPL, so both report identical errors.
+fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec<String>> {
+    let mut sources: HashMap<String, (PathBuf, String)> = HashMap::new();
+    #[allow(unused_mut)]
+    let mut modules: Vec<LoadedModule> = Vec::new();
+
+    for (name, src) in STDLIB {
+        let ast = parse_module(src, &format!("<std/{name}>")).map_err(|m| vec![m])?;
+        modules.push(LoadedModule {
+            path: vec!["std".into(), (*name).into()],
+            ast,
+        });
+    }
+
+    let main_ast = parse_module(main_src, main_label).map_err(|m| vec![m])?;
+    sources.insert(
+        "main".into(),
+        (PathBuf::from(main_label), main_src.to_string()),
+    );
+
+    let mut visited = HashSet::new();
+    let mut stack = HashSet::new();
+    let mut deps = Vec::new();
+    for imp in &main_ast.imports {
+        load_module(
+            &imp.path,
+            root,
+            &mut sources,
+            &mut visited,
+            &mut stack,
+            &mut deps,
+        )
+        .map_err(|m| vec![m])?;
+    }
+    modules.extend(deps);
+    modules.push(LoadedModule {
+        path: vec!["main".into()],
+        ast: main_ast,
+    });
+
+    // The spawn-ownership pass only matters for the JIT runtime (the REPL does not
+    // execute concurrency); it lives in the LLVM crate, so it is feature-gated.
+    #[cfg(jit_backend)]
+    {
+        report_spawn_ownership(&modules);
+        auto_acquire_modules(&mut modules);
+    }
+
+    let (program, lower_errors) = lower(&modules);
+    let mut errors: Vec<(String, Span)> = Vec::new();
+    for e in lower_errors {
+        errors.push((e.message, e.span));
+    }
+    for e in prepoly_resolve::check_imports(&program, &modules) {
+        errors.push((e.message, e.span));
+    }
+    let analysis = prepoly_typeck::analyze(&program);
+    for e in &analysis.errors {
+        errors.push((e.message.clone(), e.span));
+    }
+    if !errors.is_empty() {
+        errors.sort_by_key(|(_, s)| s.lo);
+        return Err(render_errors(&errors, &sources));
+    }
+
+    let int_lit_types = int_literal_types(&analysis.typed);
+    Ok(Checked {
+        program,
+        int_lit_types,
+    })
+}
+
+fn load_module(
+    path: &[String],
+    root: &Path,
+    sources: &mut HashMap<String, (PathBuf, String)>,
+    visited: &mut HashSet<String>,
+    stack: &mut HashSet<String>,
+    out: &mut Vec<LoadedModule>,
+) -> Result<(), String> {
+    if path.first().map(|s| s == "std").unwrap_or(false) {
+        return Ok(());
+    }
+    let key = path.join(".");
+    // A module file whose name begins with `_` is private and cannot be imported
+    // from another module (DESIGN.md 2.7).
+    if prepoly_resolve::is_private_module(path) {
+        return Err(format!("error: cannot import private module `{key}`"));
+    }
+    if visited.contains(&key) {
+        return Ok(());
+    }
+    if !stack.insert(key.clone()) {
+        return Err(format!("error: circular import involving `{key}`"));
+    }
+    let mut file = root.to_path_buf();
+    for seg in path {
+        file.push(seg);
+    }
+    file.set_extension("pp");
+    let src = match std::fs::read_to_string(&file) {
+        Ok(s) => s,
+        Err(_) => {
+            stack.remove(&key);
+            visited.insert(key.clone());
+            // A single-segment path may name a prelude module (io, string, ...)
+            // injected as STDLIB rather than read from disk; tolerate those.
+            if is_prelude_path(path) {
+                return Ok(());
+            }
+            return Err(format!(
+                "error: cannot find module `{key}` (expected `{}`)",
+                file.display()
+            ));
+        }
+    };
+    let ast = parse_module(&src, &file.display().to_string())?;
+    for imp in &ast.imports {
+        load_module(&imp.path, root, sources, visited, stack, out)?;
+    }
+    stack.remove(&key);
+    visited.insert(key.clone());
+    sources.insert(key, (file, src));
+    out.push(LoadedModule {
+        path: path.to_vec(),
+        ast,
+    });
+    Ok(())
+}
+
+/// Whether an import path refers to a prelude module supplied as STDLIB rather
+/// than a file on disk.
+fn is_prelude_path(path: &[String]) -> bool {
+    matches!(path, [single] if STDLIB.iter().any(|(name, _)| name == single))
+}
+
+fn parse_module(src: &str, name: &str) -> Result<Module, String> {
+    parse(src).map_err(|e: ParseError| {
+        let (line, col) = line_col(src, e.span.lo);
+        format!("{name}:{line}:{col}: parse error: {}", e.message)
+    })
+}
+
+/// Render each `(message, span)` diagnostic as `path:line:col: error: message`,
+/// locating the span in whichever source contains it (or a bare `error:` line when
+/// none does).
+fn render_errors(
+    errors: &[(String, Span)],
+    sources: &HashMap<String, (PathBuf, String)>,
+) -> Vec<String> {
+    let mut out = Vec::with_capacity(errors.len());
+    for (msg, span) in errors {
+        let mut located = false;
+        for (path, src) in sources.values() {
+            if span.hi <= src.len() {
+                let (line, col) = line_col(src, span.lo);
+                out.push(format!("{}:{line}:{col}: error: {msg}", path.display()));
+                located = true;
+                break;
+            }
+        }
+        if !located {
+            out.push(format!("error: {msg}"));
+        }
+    }
+    out
+}
+
+// ===== interactive REPL =====
+
+/// Run an interactive REPL session. Top-level definitions (functions, types,
+/// imports) accumulate; statements and expressions execute in an implicit `main`
+/// whose history re-runs each turn so earlier bindings stay visible. Because the
+/// program is deterministic and history-prefixed, only the new output suffix is
+/// shown. A bare expression is echoed by wrapping it in `println`.
+fn repl_interactive() -> ExitCode {
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let stdin = io::stdin();
+    eprintln!("prepoly REPL -- enter definitions or statements; Ctrl-D to exit.");
+
+    let mut defs: Vec<String> = Vec::new();
+    let mut body: Vec<String> = Vec::new();
+    let mut last_output = String::new();
+
+    loop {
+        eprint!("> ");
+        let _ = io::stderr().flush();
+        let Some(item) = read_item(&stdin) else {
+            eprintln!();
+            break;
+        };
+        let item = item.trim().to_string();
+        if item.is_empty() {
+            continue;
+        }
+
+        if is_definition(&item) {
+            defs.push(item);
+            match run_capture(&defs, &body, &root) {
+                Ok(_) => {}
+                Err(e) => {
+                    defs.pop();
+                    eprintln!("{e}");
+                }
+            }
+            continue;
+        }
+
+        // A bare expression is echoed: try `println(expr)`, then fall back to the
+        // raw statement (e.g. a void-valued call that cannot be wrapped).
+        let candidates: Vec<String> = if is_bare_expr(&item) {
+            vec![format!("println({item})"), item.clone()]
+        } else {
+            vec![item.clone()]
+        };
+        let mut committed = false;
+        let mut last_err = String::new();
+        for cand in candidates {
+            body.push(cand);
+            match run_capture(&defs, &body, &root) {
+                Ok(out) => {
+                    print_new_output(&out, &last_output);
+                    last_output = out;
+                    committed = true;
+                    break;
+                }
+                Err(e) => {
+                    body.pop();
+                    last_err = e;
+                }
+            }
+        }
+        if !committed {
+            eprintln!("{last_err}");
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// Print the portion of `out` past the already-shown `prev` prefix (history
+/// re-runs, so `out` extends `prev`); fall back to the whole output if the prefix
+/// no longer matches.
+fn print_new_output(out: &str, prev: &str) {
+    let suffix = out.strip_prefix(prev).unwrap_or(out);
+    print!("{suffix}");
+    let _ = io::stdout().flush();
+}
+
+/// Assemble the accumulated definitions and `main` body, check, and interpret it,
+/// capturing `print`/`println` output. Returns the captured output or the error.
+fn run_capture(defs: &[String], body: &[String], root: &Path) -> Result<String, String> {
+    let src = assemble(defs, body);
+    let checked = analyze("<repl>", &src, root).map_err(|d| d.join("\n"))?;
+    let mut buf: Vec<u8> = Vec::new();
+    prepoly_repl::run(&checked.program, &mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Build a single source unit from accumulated top-level definitions and an
+/// implicit `main` holding the entered statements.
+fn assemble(defs: &[String], body: &[String]) -> String {
+    let mut s = String::new();
+    for d in defs {
+        s.push_str(d);
+        s.push('\n');
+    }
+    s.push_str("fun main() {\n");
+    for b in body {
+        s.push_str(b);
+        s.push('\n');
+    }
+    s.push_str("}\n");
+    s
+}
+
+/// Whether an entered item is a top-level definition (a function/type definition
+/// or an import) rather than a statement to execute in `main`.
+fn is_definition(item: &str) -> bool {
+    match parse(item) {
+        Ok(m) => {
+            !m.imports.is_empty()
+                || m.items
+                    .iter()
+                    .any(|i| matches!(i, TopLevel::Fun(_) | TopLevel::Type(_)))
+        }
+        Err(_) => false,
+    }
+}
+
+/// Whether an entered item is a single bare expression (eligible for value echo).
+fn is_bare_expr(item: &str) -> bool {
+    match parse(item) {
+        Ok(m) => {
+            m.imports.is_empty()
+                && m.items.len() == 1
+                && matches!(m.items.first(), Some(TopLevel::Stmt(Stmt::Expr(_))))
+        }
+        Err(_) => false,
+    }
+}
+
+/// Read one REPL item: keep reading lines until the braces balance (so a
+/// multi-line definition can be entered) or EOF. Returns `None` at end of input
+/// with nothing pending.
+fn read_item(stdin: &io::Stdin) -> Option<String> {
+    let mut buf = String::new();
+    loop {
+        let mut line = String::new();
+        let n = stdin.read_line(&mut line).ok()?;
+        if n == 0 {
+            return if buf.trim().is_empty() {
+                None
+            } else {
+                Some(buf)
+            };
+        }
+        buf.push_str(&line);
+        if brace_balanced(&buf) {
+            return Some(buf);
+        }
+        // Continuation prompt for an unfinished multi-line item.
+        eprint!(". ");
+        let _ = io::stderr().flush();
+    }
+}
+
+/// Whether every `{` in `s` has a matching `}` (a coarse multi-line continuation
+/// check; string/comment contents are not excluded, which is acceptable for an
+/// interactive prompt).
+fn brace_balanced(s: &str) -> bool {
+    let mut depth: i32 = 0;
+    for c in s.chars() {
+        match c {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth <= 0
+}

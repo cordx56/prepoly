@@ -1,0 +1,8 @@
+Shape.Circle {
+    center: Point {
+        x: 3,
+        y: 4,
+    },
+    radius: 5,
+}
+Shape.Dot

@@ -1,0 +1,32 @@
+[package]
+name = "prepoly_driver"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "prepoly"
+path = "src/main.rs"
+
+[dependencies]
+prepoly_lexer.workspace = true
+prepoly_parser.workspace = true
+prepoly_hir.workspace = true
+prepoly_resolve.workspace = true
+prepoly_typeck.workspace = true
+prepoly_repl.workspace = true
+
+clap = { version = "4", features = ["derive"] }
+
+# The LLVM JIT back end is native-only -- LLVM cannot link for wasm -- so its
+# optional dependencies are declared only for non-wasm targets. The default `jit`
+# feature activates them there; on a wasm target the deps are absent, so `jit` is
+# automatically inert and the driver falls back to the REPL interpreter
+# (`prepoly_repl`, no LLVM). `build.rs` mirrors this as the `jit_backend` cfg the
+# code selects on. Without the feature, the JIT is also skipped on native.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+prepoly_jit_llvm = { workspace = true, optional = true }
+inkwell = { workspace = true, optional = true }
+
+[features]
+default = ["jit"]
+jit = ["dep:prepoly_jit_llvm", "dep:inkwell"]

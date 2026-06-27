@@ -1,0 +1,403 @@
+//! The typed codegen dispatch is exercised end to end with an in-memory backend
+//! (no LLVM): a program is parsed, lowered to MIR, monomorphized, and "compiled"
+//! by a backend that renders each typed leaf operation to text. This proves the
+//! engine monomorphizes and walks the instances, resolving concrete types and
+//! calling the leaves, independent of any target.
+
+use prepoly_engine::{Codegen, Engine, MonoFunction, MonoProgram, monomorphize};
+use prepoly_hir::{LoadedModule, Type};
+use prepoly_mir::{BlockId, LocalId, lower_program};
+use prepoly_parser::ast::{BinOp, UnaryOp};
+
+/// A backend whose `Value` is an SSA id and whose every operation appends a line
+/// to a transcript. It implements only the leaf methods; all dispatch is the
+/// trait's default.
+#[derive(Default)]
+struct TextBackend {
+    out: String,
+    next: usize,
+}
+
+impl TextBackend {
+    fn val(&mut self, s: String) -> usize {
+        let id = self.next;
+        self.next += 1;
+        self.out.push_str(&format!("  v{id} = {s}\n"));
+        id
+    }
+    fn line(&mut self, s: String) {
+        self.out.push_str(&format!("  {s}\n"));
+    }
+}
+
+impl Codegen for TextBackend {
+    type Value = usize;
+
+    fn begin_program(&mut self, p: &MonoProgram) {
+        self.out
+            .push_str(&format!("; program ({} instances)\n", p.functions.len()));
+    }
+    fn finalize(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+    fn execute(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn begin_body(&mut self, func: &MonoFunction) {
+        let params: Vec<String> = func.type_args.iter().map(|t| t.display()).collect();
+        self.out.push_str(&format!(
+            "fn {}({}) -> {}\n",
+            func.symbol,
+            params.join(", "),
+            func.ret.display()
+        ));
+    }
+    fn end_body(&mut self) {}
+    fn begin_block(&mut self, id: BlockId) {
+        self.out.push_str(&format!(" {id}:\n"));
+    }
+
+    fn load_local(&mut self, id: LocalId) -> usize {
+        self.val(format!("load {id}"))
+    }
+    fn store_local(&mut self, id: LocalId, v: usize) {
+        self.line(format!("{id} = v{v}"));
+    }
+
+    fn const_int(&mut self, v: i64, ty: &Type) -> usize {
+        self.val(format!("{}:{}", v, ty.display()))
+    }
+    fn const_float(&mut self, v: f64, ty: &Type) -> usize {
+        self.val(format!("{}:{}", v, ty.display()))
+    }
+    fn const_bool(&mut self, v: bool) -> usize {
+        self.val(format!("{v}:bool"))
+    }
+    fn const_str(&mut self, s: &str) -> usize {
+        self.val(format!("{s:?}:string"))
+    }
+    fn coerce(&mut self, v: usize, from: &Type, to: &Type) -> usize {
+        if from == to {
+            v
+        } else {
+            self.val(format!("coerce v{v} {}->{}", from.display(), to.display()))
+        }
+    }
+    fn const_null(&mut self) -> usize {
+        self.val("null".into())
+    }
+    fn truthy(&mut self, v: usize, ty: &Type) -> usize {
+        self.val(format!("truthy v{v}:{}", ty.display()))
+    }
+    fn unit(&mut self) -> usize {
+        self.val("unit".into())
+    }
+
+    fn string_len(&mut self, s: usize) -> usize {
+        self.val(format!("len v{s}"))
+    }
+    fn to_string(&mut self, v: usize, ty: &Type) -> usize {
+        self.val(format!("to_string v{v}:{}", ty.display()))
+    }
+    fn string_slice(&mut self, s: usize, start: usize, end: usize) -> usize {
+        self.val(format!("slice v{s}[v{start}..v{end}]"))
+    }
+    fn string_to_bytes(&mut self, s: usize) -> usize {
+        self.val(format!("bytes v{s}"))
+    }
+    fn string_find(&mut self, s: usize, sub: usize) -> usize {
+        self.val(format!("find v{s} v{sub}"))
+    }
+    fn string_concat(&mut self, a: usize, b: usize) -> usize {
+        self.val(format!("concat v{a} v{b}"))
+    }
+    fn string_cmp(&mut self, a: usize, b: usize) -> usize {
+        self.val(format!("strcmp v{a} v{b}"))
+    }
+    fn string_char_at(&mut self, s: usize, i: usize) -> usize {
+        self.val(format!("char_at v{s} v{i}"))
+    }
+    fn string_from_bytes(&mut self, bytes: usize) -> usize {
+        self.val(format!("from_bytes v{bytes}"))
+    }
+    fn insert(&mut self, arr: usize, _elem_ty: &Type, idx: usize, v: usize) {
+        self.line(format!("insert v{arr}[v{idx}] = v{v}"));
+    }
+    fn remove(&mut self, arr: usize, _elem_ty: &Type, idx: usize) -> usize {
+        self.val(format!("remove v{arr}[v{idx}]"))
+    }
+    fn pop(&mut self, arr: usize, _elem_ty: &Type) -> usize {
+        self.val(format!("pop v{arr}"))
+    }
+    fn int_widen(&mut self, x: usize, from: usize, to: usize, signed: usize) -> usize {
+        self.val(format!("int_widen v{x} v{from} v{to} v{signed}"))
+    }
+    fn int_narrow(&mut self, x: usize, from: usize, to: usize, signed: usize) -> usize {
+        self.val(format!("int_narrow v{x} v{from} v{to} v{signed}"))
+    }
+    fn file_open(&mut self, path: usize, mode: usize) -> usize {
+        self.val(format!("file_open v{path} v{mode}"))
+    }
+    fn file_std(&mut self, which: u8) -> usize {
+        self.val(format!("file_std {which}"))
+    }
+    fn file_read(&mut self, file: usize, n: usize) -> usize {
+        self.val(format!("file_read v{file} v{n}"))
+    }
+    fn file_write(&mut self, file: usize, bytes: usize) -> usize {
+        self.val(format!("file_write v{file} v{bytes}"))
+    }
+    fn file_size(&mut self, file: usize) -> usize {
+        self.val(format!("file_size v{file}"))
+    }
+    fn file_seek(&mut self, file: usize, pos: usize) -> usize {
+        self.val(format!("file_seek v{file} v{pos}"))
+    }
+    fn file_close(&mut self, file: usize) -> usize {
+        self.val(format!("file_close v{file}"))
+    }
+    fn convert(&mut self, target: &Type, method: &str, _arg_ty: &Type, arg: usize) -> usize {
+        self.val(format!("{}.{method}(v{arg})", target.display()))
+    }
+
+    fn bin_op(&mut self, op: BinOp, a: usize, b: usize, operand_ty: &Type) -> usize {
+        self.val(format!("{op:?}:{} v{a} v{b}", operand_ty.display()))
+    }
+    fn un_op(&mut self, op: UnaryOp, a: usize, operand_ty: &Type) -> usize {
+        self.val(format!("{op:?}:{} v{a}", operand_ty.display()))
+    }
+
+    fn call(&mut self, symbol: &str, args: &[usize], ret: &Type) -> usize {
+        self.val(format!("call {symbol} {args:?} -> {}", ret.display()))
+    }
+
+    fn deferred_dispatch(&mut self, consumer: &str, type_name: &str, value: usize) -> usize {
+        self.val(format!("dispatch {consumer} type={type_name} v{value}"))
+    }
+
+    fn make_record(&mut self, record_ty: &Type, fields: &[(&str, usize)]) -> usize {
+        let fs: Vec<String> = fields.iter().map(|(n, v)| format!("{n}=v{v}")).collect();
+        self.val(format!(
+            "record {} {{ {} }}",
+            record_ty.display(),
+            fs.join(", ")
+        ))
+    }
+    fn load_field(&mut self, base: usize, _base_ty: &Type, field: &str) -> usize {
+        self.val(format!("field v{base}.{field}"))
+    }
+    fn store_field(&mut self, base: usize, _base_ty: &Type, field: &str, v: usize) {
+        self.line(format!("v{base}.{field} = v{v}"));
+    }
+    fn make_variant(&mut self, sum_ty: &Type, variant: &str, fields: &[(&str, usize)]) -> usize {
+        let fs: Vec<String> = fields.iter().map(|(n, v)| format!("{n}=v{v}")).collect();
+        self.val(format!(
+            "variant {}.{variant} {{ {} }}",
+            sum_ty.display(),
+            fs.join(", ")
+        ))
+    }
+    fn pattern_matches(&mut self, subj: usize, _subj_ty: &Type, variant: &str) -> usize {
+        self.val(format!("matches v{subj} {variant}"))
+    }
+    fn emit_panic(&mut self, msg: &str) {
+        self.line(format!("panic {msg:?}"));
+    }
+    fn runtime_panic(&mut self, msg: usize) {
+        self.line(format!("panic v{msg}"));
+    }
+    fn emit_print(&mut self, s: usize, newline: bool) {
+        self.line(format!("print v{s} nl={newline}"));
+    }
+    fn float_builtin(&mut self, name: &str, args: &[usize]) -> usize {
+        self.val(format!("{name} {args:?}"))
+    }
+    fn store_global(&mut self, name: &str, _ty: &Type, v: usize) {
+        self.line(format!("global {name} = v{v}"));
+    }
+    fn load_global(&mut self, name: &str, ty: &Type) -> usize {
+        self.val(format!("global {name}:{}", ty.display()))
+    }
+    fn make_array(&mut self, elem_ty: &Type, elems: &[usize]) -> usize {
+        self.val(format!("array<{}> {elems:?}", elem_ty.display()))
+    }
+    fn load_index(&mut self, arr: usize, _arr_ty: &Type, idx: usize) -> usize {
+        self.val(format!("v{arr}[v{idx}]"))
+    }
+    fn store_index(&mut self, arr: usize, _arr_ty: &Type, idx: usize, v: usize) {
+        self.line(format!("v{arr}[v{idx}] = v{v}"));
+    }
+    fn array_len(&mut self, arr: usize) -> usize {
+        self.val(format!("array_len v{arr}"))
+    }
+    fn push(&mut self, arr: usize, elem_ty: &Type, v: usize) {
+        self.line(format!("push v{arr} <- v{v}:{}", elem_ty.display()));
+    }
+    fn make_closure(
+        &mut self,
+        fun_ty: &Type,
+        id: prepoly_mir::ClosureId,
+        captures: &[(Type, usize)],
+    ) -> usize {
+        let cs: Vec<String> = captures.iter().map(|(_, v)| format!("v{v}")).collect();
+        self.val(format!(
+            "closure#{}:{} [{}]",
+            id.index(),
+            fun_ty.display(),
+            cs.join(", ")
+        ))
+    }
+    fn call_indirect(&mut self, callee: usize, _callee_ty: &Type, args: &[usize]) -> usize {
+        self.val(format!("call_indirect v{callee} {args:?}"))
+    }
+
+    fn spawn(&mut self, closure: usize) {
+        self.line(format!("spawn v{closure}"));
+    }
+    fn thread_join_all(&mut self) {
+        self.line("sync".into());
+    }
+    fn retain(&mut self, value: usize) {
+        self.line(format!("retain v{value}"));
+    }
+    fn release(&mut self, value: usize) {
+        self.line(format!("release v{value}"));
+    }
+    fn release_obj(&mut self, value: usize, ty: &Type) {
+        self.line(format!("drop {} v{value}", ty.display()));
+    }
+    fn release_closure(&mut self, value: usize) {
+        self.line(format!("drop_closure v{value}"));
+    }
+    fn cown_lock(&mut self, obj: usize) {
+        self.line(format!("lock v{obj}"));
+    }
+    fn cown_unlock(&mut self, obj: usize) {
+        self.line(format!("unlock v{obj}"));
+    }
+    fn cown_lock_all(&mut self, arr: usize) {
+        self.line(format!("lock_all v{arr}"));
+    }
+    fn cown_unlock_all(&mut self, arr: usize) {
+        self.line(format!("unlock_all v{arr}"));
+    }
+    fn region_open(&mut self, bridge: usize) -> usize {
+        self.val(format!("region_open v{bridge}"))
+    }
+    fn region_close(&mut self, region_id: usize) {
+        self.line(format!("region_close v{region_id}"));
+    }
+    fn region_write(&mut self, container: usize, value: usize) {
+        self.line(format!("region_write v{container} v{value}"));
+    }
+
+    fn emit_return(&mut self, v: Option<usize>) {
+        match v {
+            Some(v) => self.line(format!("return v{v}")),
+            None => self.line("return".into()),
+        }
+    }
+    fn emit_goto(&mut self, target: BlockId) {
+        self.line(format!("goto {target}"));
+    }
+    fn emit_cond_branch(&mut self, cond: usize, then: BlockId, els: BlockId) {
+        self.line(format!("br v{cond} -> {then} {els}"));
+    }
+    fn emit_unreachable(&mut self) {
+        self.line("unreachable".into());
+    }
+}
+
+/// Lower a single-module program through HIR + MIR, monomorphize, and render it
+/// with the text backend via the engine.
+fn render(src: &str) -> String {
+    let ast = prepoly_parser::parse(src).expect("parse");
+    let modules = [LoadedModule {
+        path: vec!["main".into()],
+        ast,
+    }];
+    let (program, _errors) = prepoly_hir::lower(&modules);
+    let mir = lower_program(&program);
+    let mono = monomorphize(&mir, &program).expect("monomorphize");
+    let mut backend = TextBackend::default();
+    Engine::compile(&mut backend, &mono).expect("compile");
+    backend.out
+}
+
+#[test]
+fn dispatch_monomorphizes_and_types_a_recursive_program() {
+    // `answer` (a zero-arg root) calls `fact(5)`, which instantiates `fact` for
+    // int32; the recursion resolves to the same instance.
+    let out = render(
+        "fun fact(n) {\n  if n < 2 {\n    return 1\n  }\n  return n * fact(n - 1)\n}\n\
+         fun answer() {\n  return fact(5) + 10\n}\n",
+    );
+    // The int32 instance of `fact` is named and typed.
+    assert!(out.contains("fn fact__int32(int32) -> int32"), "{out}");
+    // `answer` is a zero-arg instance returning int32.
+    assert!(out.contains("fn answer() -> int32"), "{out}");
+    // Operations carry their concrete operand type.
+    assert!(out.contains("Lt:int32"), "{out}");
+    assert!(out.contains("Mul:int32"), "{out}");
+    // The call targets the int32 instance.
+    assert!(out.contains("call fact__int32"), "{out}");
+    // Constants are typed at their contextual type, not boxed.
+    assert!(out.contains("5:int32") || out.contains("10:int32"), "{out}");
+}
+
+#[test]
+fn dispatch_specializes_one_function_for_two_types() {
+    // `id` is used at both int32 and float64, producing two distinct instances.
+    let out = render(
+        "fun id(x) {\n  return x\n}\n\
+         fun use_int() {\n  return id(1)\n}\n\
+         fun use_flt() {\n  return id(2.0)\n}\n",
+    );
+    assert!(out.contains("fn id__int32(int32) -> int32"), "{out}");
+    assert!(out.contains("fn id__float64(float64) -> float64"), "{out}");
+    assert!(out.contains("call id__int32"), "{out}");
+    assert!(out.contains("call id__float64"), "{out}");
+}
+
+#[test]
+fn monomorphize_skips_unsupported_roots() {
+    // Monomorphization is best effort: a root outside the typed subset (here a
+    // function using the unsupported `input` builtin) is skipped, not fatal, so
+    // the rest of the program still types. The skipped root is simply absent.
+    let src = "fun does_io() {\n  let s = input()\n  return s\n}\n\
+               fun pure() {\n  return 6 * 7\n}\n";
+    let ast = prepoly_parser::parse(src).expect("parse");
+    let modules = [LoadedModule {
+        path: vec!["main".into()],
+        ast,
+    }];
+    let (program, _errors) = prepoly_hir::lower(&modules);
+    let mir = lower_program(&program);
+    let mono = monomorphize(&mir, &program).expect("best-effort monomorphize");
+    assert!(
+        mono.lookup("does_io").is_none(),
+        "I/O root should be skipped"
+    );
+    assert!(mono.lookup("pure").is_some(), "pure root should be typed");
+}
+
+#[test]
+fn monomorphize_types_module_globals() {
+    // A top-level `let` types as a global from its initializer, and a function
+    // reading it monomorphizes against that type.
+    let src = "let counter = 7\nfun get() {\n  return counter\n}\n";
+    let ast = prepoly_parser::parse(src).expect("parse");
+    let modules = [LoadedModule {
+        path: vec!["main".into()],
+        ast,
+    }];
+    let (program, _errors) = prepoly_hir::lower(&modules);
+    let mir = lower_program(&program);
+    let mono = monomorphize(&mir, &program).expect("monomorphize");
+    assert_eq!(
+        mono.global_type("counter").map(|t| t.display()),
+        Some("int32".to_string())
+    );
+    assert!(mono.lookup("get").is_some());
+}
