@@ -246,4 +246,33 @@ mod tests {
             _ => panic!(),
         }
     }
+
+    #[test]
+    fn fallible_and_infer_types() {
+        // `T!` is a fallible suffix; `infer` is a plain type word; suffixes stack
+        // with the array/nullable suffixes (`infer[]`, `int32[]!`).
+        let m = module(
+            "fun f(a: infer, b: infer[]) -> string! {\n}\n\
+             fun g(c: int32[]!) {\n}\n",
+        );
+        let (TopLevel::Fun(f), TopLevel::Fun(g)) = (&m.items[0], &m.items[1]) else {
+            panic!("expected two functions");
+        };
+        assert!(matches!(f.params[0].ty, Some(TypeExpr::Named(ref n, _)) if n == "infer"));
+        // `infer[]` is a slice of the `infer` word.
+        match &f.params[1].ty {
+            Some(TypeExpr::Array(inner, None, _)) => {
+                assert!(matches!(**inner, TypeExpr::Named(ref n, _) if n == "infer"));
+            }
+            other => panic!("expected infer[], got {other:?}"),
+        }
+        assert!(matches!(f.ret, Some(TypeExpr::Fallible(..))));
+        // `int32[]!` is a fallible wrapping a slice.
+        match &g.params[0].ty {
+            Some(TypeExpr::Fallible(inner, _)) => {
+                assert!(matches!(**inner, TypeExpr::Array(_, None, _)));
+            }
+            other => panic!("expected int32[]!, got {other:?}"),
+        }
+    }
 }

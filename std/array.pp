@@ -3,8 +3,10 @@
 // here through UFCS (DESIGN.md 9.4). These functions are part of the implicit
 // prelude and need no import.
 
-// Apply `f` to each element, returning a new array of the results.
-fun map(arr, f) {
+// Apply `f` to each element, returning a new array of the results. `infer[]`
+// requires an array while leaving the element type to inference, so `map` stays
+// generic over it.
+fun map(arr: infer[], f) {
     let result = []
     for item in arr {
         result.push(f(item))
@@ -13,7 +15,7 @@ fun map(arr, f) {
 }
 
 // Keep the elements for which `pred` returns true.
-fun filter(arr, pred) {
+fun filter(arr: infer[], pred) {
     let result = []
     for item in arr {
         if pred(item) {
@@ -24,7 +26,7 @@ fun filter(arr, pred) {
 }
 
 // Left fold: combine elements into a single accumulator starting from `init`.
-fun fold(arr, init, f) {
+fun fold(arr: infer[], init, f) {
     let acc = init
     for item in arr {
         acc = f(acc, item)
@@ -33,7 +35,7 @@ fun fold(arr, init, f) {
 }
 
 // Run `f` for its side effects on each element.
-fun each(arr, f) {
+fun each(arr: infer[], f) {
     for item in arr {
         f(item)
     }
@@ -42,7 +44,7 @@ fun each(arr, f) {
 // A copy of `arr[start..end]`. Bounds are `int64` (the type of `len`), so both
 // `arr.slice(1, 4)` and `arr.slice(1, arr.len())` work and the loop counter stays
 // `int64` (Prepoly has no implicit conversion between integer widths).
-fun slice(arr, start: int64, end: int64) {
+fun slice(arr: infer[], start: int64, end: int64) {
     let one: int64 = 1
     let result = []
     let i = start
@@ -54,7 +56,7 @@ fun slice(arr, start: int64, end: int64) {
 }
 
 // The elements of `arr` in reverse order.
-fun reverse(arr) {
+fun reverse(arr: infer[]) {
     let one: int64 = 1
     let result = []
     let i = len(arr) - one
@@ -80,7 +82,7 @@ fun contains(coll, x) {
 }
 
 // Insertion sort returning a new ascending array, ordering with `<`/`>`.
-fun sort(arr) {
+fun sort(arr: infer[]) {
     let one: int64 = 1
     let result = []
     for item in arr {

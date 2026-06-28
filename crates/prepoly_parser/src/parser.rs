@@ -1061,9 +1061,19 @@ impl Parser {
             let hi = self.close(TokenKind::RBracket, "']'")?;
             base = TypeExpr::Array(Box::new(base.clone()), len, base.span().merge(hi));
         }
-        if self.at_p(TokenKind::Question) {
-            let hi = self.bump().span;
-            base = TypeExpr::Nullable(Box::new(base.clone()), base.span().merge(hi));
+        // Trailing `?` (nullable) and `!` (fallible Result) suffixes, in any order
+        // (`T?`, `T!`, `T[]?`, ...). Each wraps the type built so far.
+        loop {
+            let lo = base.span();
+            if self.at_p(TokenKind::Question) {
+                let hi = self.bump().span;
+                base = TypeExpr::Nullable(Box::new(base), lo.merge(hi));
+            } else if self.at_p(TokenKind::Bang) {
+                let hi = self.bump().span;
+                base = TypeExpr::Fallible(Box::new(base), lo.merge(hi));
+            } else {
+                break;
+            }
         }
         Ok(base)
     }

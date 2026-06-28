@@ -12,6 +12,14 @@ pub const RESULT_TYPE_NAME: &str = "Result";
 pub const RESULT_OK_VALUE: &str = "Ok.value";
 pub const RESULT_ERR_ERROR: &str = "Err.error";
 
+/// Placeholder `Unknown` id that [`resolve`] emits for the `infer` type word and
+/// for the error payload a `T!` annotation leaves open. It is not a real
+/// inference variable: each occurrence must be replaced with a distinct fresh
+/// variable by [`freshen_infer`], so two `infer` positions are independent rather
+/// than one shared unknown. `u32::MAX` is reserved for this and never minted as a
+/// genuine `Unknown` id.
+pub const INFER_VAR: u32 = u32::MAX;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IntKind {
     I8,
@@ -351,6 +359,13 @@ fn resolve_inner(
             inner,
             nominal_info,
         )?))),
+        // `T!` is the built-in fallible Result: success payload `T`, error payload
+        // left open (an `infer` placeholder the caller freshens, so it is inferred
+        // from the body's `error(...)` sites like an unannotated fallible return).
+        TypeExpr::Fallible(inner, _) => Ok(Type::result(
+            resolve_inner(inner, nominal_info)?,
+            Type::Unknown(INFER_VAR),
+        )),
     }
 }
 
@@ -368,6 +383,10 @@ fn resolve_named(
         "string" => Type::Str,
         "void" => Type::Void,
         "Self" => Type::SelfType,
+        // The built-in `infer` lowers to an unknown so ordinary inference fills it
+        // in (e.g. `infer[]` is an array whose element type is inferred). The
+        // placeholder id is freshened per occurrence by `freshen_infer`.
+        "infer" => Type::Unknown(INFER_VAR),
         _ => match nominal_info(name) {
             Some(info) => match info.kind {
                 NominalKind::Record => Type::Record(NominalType::new(info.id, name)),
@@ -376,6 +395,44 @@ fn resolve_named(
             None => return Err(format!("unknown type `{name}`")),
         },
     })
+}
+
+/// Replace every `infer` placeholder ([`INFER_VAR`]) in a resolved type with a
+/// distinct fresh type from `fresh`, recursing into composite types and into a
+/// `Result`'s payload substitution. So each `infer` (and each `T!` error payload)
+/// becomes its own inference variable -- `(infer, infer) -> infer` has three
+/// independent unknowns -- rather than a single shared one. The caller owns the
+/// fresh-variable source (the HIR unknown counter during lowering, or the solver
+/// during checking), so the freshened ids slot into its inference namespace.
+pub fn freshen_infer(ty: Type, fresh: &mut impl FnMut() -> Type) -> Type {
+    match ty {
+        Type::Unknown(INFER_VAR) => fresh(),
+        Type::Array(t, n) => Type::Array(Box::new(freshen_infer(*t, fresh)), n),
+        Type::Slice(t) => Type::Slice(Box::new(freshen_infer(*t, fresh))),
+        Type::Nullable(t) => Type::Nullable(Box::new(freshen_infer(*t, fresh))),
+        Type::ConstOf(t) => Type::ConstOf(Box::new(freshen_infer(*t, fresh))),
+        Type::Fun(ps, r) => Type::Fun(
+            ps.into_iter().map(|p| freshen_infer(p, fresh)).collect(),
+            Box::new(freshen_infer(*r, fresh)),
+        ),
+        // A nominal's payload substitution (e.g. a `T!` -> `Result`'s open error
+        // type) is rewritten in place; the Record/Sum kind is preserved.
+        Type::Record(n) => Type::Record(freshen_nominal(n, fresh)),
+        Type::Sum(n) => Type::Sum(freshen_nominal(n, fresh)),
+        other => other,
+    }
+}
+
+fn freshen_nominal(mut n: NominalType, fresh: &mut impl FnMut() -> Type) -> NominalType {
+    if n.substitution.is_empty() {
+        return n;
+    }
+    let mut subst = Substitution::empty();
+    for (k, v) in n.substitution.iter() {
+        subst.insert(k.to_string(), freshen_infer(v.clone(), fresh));
+    }
+    n.substitution = subst;
+    n
 }
 
 #[cfg(test)]

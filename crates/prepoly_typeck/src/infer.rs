@@ -980,25 +980,31 @@ impl<'a> Checker<'a> {
         env
     }
 
-    fn resolve_type(&self, te: &TypeExpr) -> Result<Type, String> {
+    fn resolve_type(&mut self, te: &TypeExpr) -> Result<Type, String> {
         match te {
             TypeExpr::Named(name, _) => self.resolve_named(name),
             TypeExpr::Array(inner, Some(n), _) => {
                 Ok(Type::Array(Box::new(self.resolve_type(inner)?), *n))
             }
             TypeExpr::Array(inner, None, _) => Ok(Type::Slice(Box::new(self.resolve_type(inner)?))),
-            TypeExpr::Fun(params, ret, _) => Ok(Type::Fun(
-                params
-                    .iter()
-                    .map(|p| self.resolve_type(p))
-                    .collect::<Result<_, _>>()?,
-                Box::new(self.resolve_type(ret)?),
-            )),
+            TypeExpr::Fun(params, ret, _) => {
+                let mut ps = Vec::with_capacity(params.len());
+                for p in params {
+                    ps.push(self.resolve_type(p)?);
+                }
+                Ok(Type::Fun(ps, Box::new(self.resolve_type(ret)?)))
+            }
             TypeExpr::Nullable(inner, _) => Ok(Type::Nullable(Box::new(self.resolve_type(inner)?))),
+            // `T!` is the fallible Result; the error payload is a fresh unknown so
+            // it is inferred from the body's error sites (like `infer`).
+            TypeExpr::Fallible(inner, _) => {
+                let ok = self.resolve_type(inner)?;
+                Ok(Type::result(ok, self.fresh_unknown()))
+            }
         }
     }
 
-    fn resolve_named(&self, name: &str) -> Result<Type, String> {
+    fn resolve_named(&mut self, name: &str) -> Result<Type, String> {
         if let Some(k) = IntKind::from_name(name) {
             return Ok(Type::Int(k));
         }
@@ -1008,6 +1014,8 @@ impl<'a> Checker<'a> {
             "float64" => Ok(Type::Float(FloatKind::F64)),
             "string" => Ok(Type::Str),
             "void" => Ok(Type::Void),
+            // `infer` is an unknown filled in by inference (for `infer[]` etc.).
+            "infer" => Ok(self.fresh_unknown()),
             "Self" => self
                 .self_type
                 .as_ref()
@@ -1103,7 +1111,22 @@ impl<'a> Checker<'a> {
         match self.return_contexts.last().cloned() {
             Some(ReturnContext::Explicit(want)) => match value {
                 Some(e) => {
-                    self.check_expr_against(e, &want, scopes);
+                    // A fallible return type (`-> T!`, or any `Result`) auto-wraps a
+                    // bare value as `Ok { value }`: check it against the Ok payload.
+                    // A `Result`-typed value flows whole. This mirrors the inferred
+                    // fallible path and the HM checker (`hm::Stmt::Return`).
+                    let resolved = self.resolve(&want);
+                    if let Some((ok, _err)) = resolved.result_payloads() {
+                        let ok = ok.clone();
+                        let got = self.check_expr(e, scopes);
+                        if self.resolve(&got).is_result_type() {
+                            self.expect_assignable(&got, &want, span);
+                        } else {
+                            self.expect_assignable(&got, &ok, span);
+                        }
+                    } else {
+                        self.check_expr_against(e, &want, scopes);
+                    }
                 }
                 None => self.expect_assignable(&Type::Void, &want, span),
             },

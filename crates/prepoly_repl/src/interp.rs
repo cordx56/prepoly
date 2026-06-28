@@ -374,7 +374,8 @@ impl<'p, 'm> Interp<'p, 'm> {
             // Growable-array methods are runtime operations on the slice, not user
             // methods (DESIGN.md 9.1).
             Callee::Method(name)
-                if name == "push" && matches!(arg_types.first(), Some(Type::Slice(_))) =>
+                if name == "push"
+                    && matches!(arg_types.first().map(unwrap_nullable), Some(Type::Slice(_))) =>
             {
                 let elem = element_type(&arg_types[0]);
                 let arr = self.eval_operand(f, frame, &args[0], &arg_types[0])?;
@@ -385,7 +386,8 @@ impl<'p, 'm> Interp<'p, 'm> {
                 return Ok(Value::Void);
             }
             Callee::Method(name)
-                if name == "insert" && matches!(arg_types.first(), Some(Type::Slice(_))) =>
+                if name == "insert"
+                    && matches!(arg_types.first().map(unwrap_nullable), Some(Type::Slice(_))) =>
             {
                 let elem = element_type(&arg_types[0]);
                 let arr = self.eval_operand(f, frame, &args[0], &arg_types[0])?;
@@ -401,7 +403,8 @@ impl<'p, 'm> Interp<'p, 'm> {
                 return Ok(Value::Void);
             }
             Callee::Method(name)
-                if name == "remove" && matches!(arg_types.first(), Some(Type::Slice(_))) =>
+                if name == "remove"
+                    && matches!(arg_types.first().map(unwrap_nullable), Some(Type::Slice(_))) =>
             {
                 let arr = self.eval_operand(f, frame, &args[0], &arg_types[0])?;
                 let idx = self
@@ -417,7 +420,8 @@ impl<'p, 'm> Interp<'p, 'm> {
                 return Ok(Value::Void);
             }
             Callee::Method(name)
-                if name == "pop" && matches!(arg_types.first(), Some(Type::Slice(_))) =>
+                if name == "pop"
+                    && matches!(arg_types.first().map(unwrap_nullable), Some(Type::Slice(_))) =>
             {
                 let arr = self.eval_operand(f, frame, &args[0], &arg_types[0])?;
                 if let Value::Array(a) = arr {
@@ -428,7 +432,7 @@ impl<'p, 'm> Interp<'p, 'm> {
             Callee::Method(name)
                 if name == "len"
                     && matches!(
-                        arg_types.first(),
+                        arg_types.first().map(unwrap_nullable),
                         Some(Type::Slice(_) | Type::Array(..) | Type::Str)
                     ) =>
             {
@@ -1176,15 +1180,27 @@ fn float_kind_of(ty: &Type) -> FloatKind {
     }
 }
 
-fn element_type(ty: &Type) -> Type {
+/// Strip one level of nullable: the inner type of a `T?`, else `ty` unchanged.
+/// A guard (`if a`) proves a nullable non-null without retyping the MIR local,
+/// so a narrowed aggregate still carries the declared nullable; this unwraps it
+/// for the dispatch and element/field typing (the interpreter's runtime value of
+/// a present nullable is already the inner value, so no value conversion needed).
+fn unwrap_nullable(ty: &Type) -> &Type {
     match ty {
+        Type::Nullable(inner) => inner,
+        other => other,
+    }
+}
+
+fn element_type(ty: &Type) -> Type {
+    match unwrap_nullable(ty) {
         Type::Slice(e) | Type::Array(e, _) => (**e).clone(),
         _ => Type::Void,
     }
 }
 
 fn record_field_type(record_ty: &Type, name: &str) -> Type {
-    match record_ty {
+    match unwrap_nullable(record_ty) {
         Type::Record(n) => n.substitution.get(name).cloned().unwrap_or(Type::Void),
         _ => Type::Void,
     }

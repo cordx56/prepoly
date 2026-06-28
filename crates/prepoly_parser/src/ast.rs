@@ -304,6 +304,9 @@ pub enum TypeExpr {
     Fun(Vec<TypeExpr>, Box<TypeExpr>, Span),
     /// `T?` nullable.
     Nullable(Box<TypeExpr>, Span),
+    /// `T!` fallible: the built-in `Result` with success payload `T` and an
+    /// inferred error payload (`Result.Ok { value: T } | Result.Err`).
+    Fallible(Box<TypeExpr>, Span),
 }
 
 impl TypeExpr {
@@ -312,7 +315,8 @@ impl TypeExpr {
             TypeExpr::Named(_, s)
             | TypeExpr::Array(_, _, s)
             | TypeExpr::Fun(_, _, s)
-            | TypeExpr::Nullable(_, s) => *s,
+            | TypeExpr::Nullable(_, s)
+            | TypeExpr::Fallible(_, s) => *s,
         }
     }
 }

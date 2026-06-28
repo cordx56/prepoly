@@ -45,19 +45,13 @@ pub fn hover(doc: &Document, full: &FullAnalysis, pos: Position) -> Option<Hover
                 return Some(markup(value, local_range(doc, full, expr.span)));
             }
             _ => {
-                // The tightest typed node is a compound expression (e.g. a call).
-                // If the cursor is on a callee name, prefer that function's
-                // signature; otherwise show the whole expression's type.
-                if let Some((name, span)) = nav::ident_at(&doc.text, local) {
-                    if let Some(f) = full.program.resolve_function(&module, &name) {
-                        return Some(markup(
-                            render_signature(&f.signature),
-                            Some(doc.range_of(span)),
-                        ));
-                    }
-                    if let Some(t) = full.program.resolve_type(&module, &name) {
-                        return Some(markup(render_type_def(t), Some(doc.range_of(span))));
-                    }
+                // The tightest typed node is a compound expression (call, match,
+                // if-let, block, ...). If the cursor is on an identifier within
+                // it -- a callee, a constructor, or a pattern binding that has no
+                // typed node of its own -- resolve that identifier; otherwise
+                // show the whole expression's type.
+                if let Some(h) = ident_hover(doc, full, local, global, &module) {
+                    return Some(h);
                 }
                 let mut namer = UnknownNamer::default();
                 return Some(markup(
@@ -68,17 +62,38 @@ pub fn hover(doc: &Document, full: &FullAnalysis, pos: Position) -> Option<Hover
         }
     }
 
-    // No typed expression here: the cursor may be on a declaration name or a
-    // type annotation. Resolve the identifier against the symbol tables.
+    // No typed expression here: the cursor may be on a local binding's
+    // declaration, a type annotation, or a declaration name.
+    ident_hover(doc, full, local, global, &module)
+}
+
+/// Resolve the identifier under the cursor for hover: a local variable (its
+/// `let`/parameter/loop/pattern binding has no typed node of its own) shows its
+/// inferred type and shadows any same-named symbol; then a function shows its
+/// signature, and a type its definition.
+fn ident_hover(
+    doc: &Document,
+    full: &FullAnalysis,
+    local: usize,
+    global: usize,
+    module: &[String],
+) -> Option<Hover> {
     let (name, span) = nav::ident_at(&doc.text, local)?;
-    if let Some(t) = full.program.resolve_type(&module, &name) {
-        return Some(markup(render_type_def(t), Some(doc.range_of(span))));
+    if let Some(ty) = nav::local_var_type(full, global, &name) {
+        let mut namer = UnknownNamer::default();
+        return Some(markup(
+            format!("{name}: {}", render_type(&ty, &mut namer)),
+            Some(doc.range_of(span)),
+        ));
     }
-    if let Some(f) = full.program.resolve_function(&module, &name) {
+    if let Some(f) = full.program.resolve_function(module, &name) {
         return Some(markup(
             render_signature(&f.signature),
             Some(doc.range_of(span)),
         ));
+    }
+    if let Some(t) = full.program.resolve_type(module, &name) {
+        return Some(markup(render_type_def(t), Some(doc.range_of(span))));
     }
     None
 }

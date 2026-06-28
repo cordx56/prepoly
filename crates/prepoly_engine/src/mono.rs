@@ -176,9 +176,11 @@ fn is_result(ty: &Type) -> bool {
     matches!(ty, Type::Sum(n) if n.id == RESULT_TYPE_ID)
 }
 
-/// A nullable's element type (for narrowing in arithmetic/comparison); other
-/// types are returned unchanged.
-fn unwrap_nullable(ty: &Type) -> &Type {
+/// Strip one level of nullable: the inner type of a `T?`, else `ty` unchanged.
+/// Used to narrow a value proven non-null by a guard (`if a`) -- the MIR local
+/// still carries the declared nullable -- in arithmetic/comparison and as the
+/// receiver of an aggregate operation (field/element/`len`/`push`/...).
+pub(crate) fn unwrap_nullable(ty: &Type) -> &Type {
     match ty {
         Type::Nullable(inner) => inner,
         other => other,
@@ -356,25 +358,34 @@ pub fn monomorphize<'m>(mir: &'m MirProgram, program: &Program) -> Result<MonoPr
     // everything reachable that *is* typeable. The driver decides per program
     // whether to run the typed path (when `main` typed) or fall back. `in_progress`
     // is cleared after each root so a skipped root leaves no stale recursion mark.
+    //
+    // The one exception is the main module's init: its top-level statements are the
+    // program's entry point, the same role as a `main` function (which both back
+    // ends already reject when it falls outside the typed subset). Dropping it
+    // silently let a type-checked program run to a clean exit with no output, so a
+    // failure there is surfaced rather than swallowed. Other modules' inits (stdlib
+    // and imports) stay best-effort.
     let mut init_symbols = Vec::with_capacity(mir.inits.len());
     for (i, init) in mir.inits.iter().enumerate() {
         let sym = format!("{SYNTH_SIGIL}init{i}");
-        let ok = mono
-            .type_and_store(
-                sym.clone(),
-                &init.body,
-                &init.module,
-                Vec::new(),
-                Some(Type::Void),
-                &[],
-                Vec::new(),
-                false,
-                false,
-            )
-            .is_ok();
+        let res = mono.type_and_store(
+            sym.clone(),
+            &init.body,
+            &init.module,
+            Vec::new(),
+            Some(Type::Void),
+            &[],
+            Vec::new(),
+            false,
+            false,
+        );
         mono.in_progress.clear();
-        if ok {
-            init_symbols.push(sym);
+        match res {
+            Ok(_) => init_symbols.push(sym),
+            Err(e) if matches!(init.module.as_slice(), [m] if m == "main") => {
+                return Err(format!("top-level code is outside the typed subset: {e}"));
+            }
+            Err(_) => {}
         }
     }
 
@@ -930,18 +941,26 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             }
             // `arr.push(v)`/`arr.insert(i, v)` are growable-array mutations (void),
             // not user methods.
+            // The receiver may be a narrowed nullable array (`int32[]?` proven
+            // non-null by an `if a` / `if a != null` guard). A guard does not retype
+            // the MIR local, so it still carries the declared nullable; strip the
+            // top-level nullable here, exactly as the back end unwraps the cell.
             Rvalue::Call(Callee::Method(name), args) if name == "push" || name == "insert" => {
                 match self.operand_type(args.first().unwrap_or(&Operand::void()), local_types)? {
-                    Some(Type::Slice(_)) => Ok(Some(Type::Void)),
-                    Some(other) => Err(format!("{name} on non-array `{}`", other.display())),
+                    Some(t) => match unwrap_nullable(&t) {
+                        Type::Slice(_) => Ok(Some(Type::Void)),
+                        other => Err(format!("{name} on non-array `{}`", other.display())),
+                    },
                     None => Ok(None),
                 }
             }
             // `arr.remove(i) -> T` returns the removed element (DESIGN.md 9.1).
             Rvalue::Call(Callee::Method(name), args) if name == "remove" => {
                 match self.operand_type(args.first().unwrap_or(&Operand::void()), local_types)? {
-                    Some(Type::Slice(inner)) => Ok(Some(*inner)),
-                    Some(other) => Err(format!("remove on non-array `{}`", other.display())),
+                    Some(t) => match unwrap_nullable(&t) {
+                        Type::Slice(inner) => Ok(Some((**inner).clone())),
+                        other => Err(format!("remove on non-array `{}`", other.display())),
+                    },
                     None => Ok(None),
                 }
             }
@@ -949,8 +968,10 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             // 9.1 `_array_pop`).
             Rvalue::Call(Callee::Method(name), args) if name == "pop" => {
                 match self.operand_type(args.first().unwrap_or(&Operand::void()), local_types)? {
-                    Some(Type::Slice(inner)) => Ok(Some(Type::Nullable(inner))),
-                    Some(other) => Err(format!("pop on non-array `{}`", other.display())),
+                    Some(t) => match unwrap_nullable(&t) {
+                        Type::Slice(inner) => Ok(Some(Type::Nullable(inner.clone()))),
+                        other => Err(format!("pop on non-array `{}`", other.display())),
+                    },
                     None => Ok(None),
                 }
             }
@@ -958,13 +979,15 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             // form (`len(x)` and `x.len()` are equivalent), an `int64`.
             Rvalue::Call(Callee::Method(name), args) if name == "len" => {
                 match self.operand_type(args.first().unwrap_or(&Operand::void()), local_types)? {
-                    Some(Type::Slice(_) | Type::Array(..) | Type::Str) => {
-                        Ok(Some(Type::Int(IntKind::I64)))
-                    }
-                    Some(other) => Err(format!(
-                        "len on `{}` (expected an array or string)",
-                        other.display()
-                    )),
+                    Some(t) => match unwrap_nullable(&t) {
+                        Type::Slice(_) | Type::Array(..) | Type::Str => {
+                            Ok(Some(Type::Int(IntKind::I64)))
+                        }
+                        other => Err(format!(
+                            "len on `{}` (expected an array or string)",
+                            other.display()
+                        )),
+                    },
                     None => Ok(None),
                 }
             }
@@ -1065,22 +1088,37 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                     None => Ok(None),
                 }
             }
+            // A narrowed nullable aggregate (`p: P?` / `a: int32[]?` proven non-null
+            // by a guard) keeps its declared nullable on the MIR local, so strip the
+            // top-level nullable before reading a field or element.
             Rvalue::Load(place) => match place.proj.as_slice() {
-                [Projection::Field(field)] => match &local_types[place.local.index()] {
-                    Some(Type::Record(n)) => self.record_field_type(n, field),
-                    Some(Type::Sum(n)) => self.sum_field_type(n, field),
-                    Some(other) => Err(format!(
-                        "field access `.{field}` on non-aggregate `{}`",
-                        other.display()
-                    )),
-                    None => Ok(None),
-                },
+                [Projection::Field(field)] => {
+                    match local_types[place.local.index()]
+                        .as_ref()
+                        .map(unwrap_nullable)
+                    {
+                        Some(Type::Record(n)) => self.record_field_type(n, field),
+                        Some(Type::Sum(n)) => self.sum_field_type(n, field),
+                        Some(other) => Err(format!(
+                            "field access `.{field}` on non-aggregate `{}`",
+                            other.display()
+                        )),
+                        None => Ok(None),
+                    }
+                }
                 // Array/slice element read: the element type is the sequence's.
-                [Projection::Index(_)] => match &local_types[place.local.index()] {
-                    Some(Type::Slice(elem) | Type::Array(elem, _)) => Ok(Some((**elem).clone())),
-                    Some(other) => Err(format!("indexing non-array `{}`", other.display())),
-                    None => Ok(None),
-                },
+                [Projection::Index(_)] => {
+                    match local_types[place.local.index()]
+                        .as_ref()
+                        .map(unwrap_nullable)
+                    {
+                        Some(Type::Slice(elem) | Type::Array(elem, _)) => {
+                            Ok(Some((**elem).clone()))
+                        }
+                        Some(other) => Err(format!("indexing non-array `{}`", other.display())),
+                        None => Ok(None),
+                    }
+                }
                 _ => Err("nested projections are unsupported on the typed backend".into()),
             },
             Rvalue::Record { ty, fields } => self.record_type(module, ty, fields, local_types),
@@ -1601,15 +1639,19 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             }
             Rvalue::Bin(_, a, b) => self.binary_operand_type(a, b, lt).ok().flatten(),
             Rvalue::Load(place) => match place.proj.as_slice() {
-                [Projection::Field(field)] => match lt.get(place.local.index())?.as_ref()? {
-                    Type::Record(n) => self.record_field_type(n, field).ok().flatten(),
-                    Type::Sum(n) => self.sum_field_type(n, field).ok().flatten(),
-                    _ => None,
-                },
-                [Projection::Index(_)] => match lt.get(place.local.index())?.as_ref()? {
-                    Type::Slice(elem) | Type::Array(elem, _) => Some((**elem).clone()),
-                    _ => None,
-                },
+                [Projection::Field(field)] => {
+                    match unwrap_nullable(lt.get(place.local.index())?.as_ref()?) {
+                        Type::Record(n) => self.record_field_type(n, field).ok().flatten(),
+                        Type::Sum(n) => self.sum_field_type(n, field).ok().flatten(),
+                        _ => None,
+                    }
+                }
+                [Projection::Index(_)] => {
+                    match unwrap_nullable(lt.get(place.local.index())?.as_ref()?) {
+                        Type::Slice(elem) | Type::Array(elem, _) => Some((**elem).clone()),
+                        _ => None,
+                    }
+                }
                 _ => None,
             },
             _ => None,
@@ -1858,9 +1900,24 @@ fn is_supported_rec(ty: &Type, visiting: &mut HashSet<i32>) -> bool {
             visiting.remove(&n.id);
             ok
         }
-        // A sum's per-variant field concreteness is checked at construction
-        // (`variant_type`); the layout comes from the HIR type.
-        Type::Sum(_) => true,
+        // A bare sum reference (empty substitution) is a supported heap pointer
+        // whose per-variant field concreteness is checked at construction
+        // (`variant_type`). A substituted sum -- a constructed `Result<T, E>` --
+        // additionally requires its payload types to be supported, so an open `T!`
+        // error payload (an unresolved `Unknown`) is rejected here. That makes a
+        // `-> T!` signature's annotation unsupported, so `instantiate_fn` drops it
+        // and the engine infers the concrete `Result` from the body instead.
+        Type::Sum(n) => {
+            if !visiting.insert(n.id) {
+                return true; // already on the path: a self-reference, finite layout
+            }
+            let ok = n.substitution.is_empty()
+                || n.substitution
+                    .iter()
+                    .all(|(_, t)| is_supported_rec(t, visiting));
+            visiting.remove(&n.id);
+            ok
+        }
         Type::Slice(elem) | Type::Array(elem, _) => is_supported_rec(elem, visiting),
         // A closure value (a typed environment + function pointer).
         Type::Fun(params, ret) => {

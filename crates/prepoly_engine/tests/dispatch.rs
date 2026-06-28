@@ -407,3 +407,72 @@ fn monomorphize_types_module_globals() {
     );
     assert!(mono.lookup("get").is_some());
 }
+
+#[test]
+fn main_module_top_level_failure_is_surfaced_not_dropped() {
+    // A `main` module init that falls outside the typed subset (here mutual
+    // recursion) is the program's entry point, so monomorphization fails loudly
+    // rather than silently dropping it -- which had let a type-checked program run
+    // to a clean exit with no output. (A `main` function in the same shape is
+    // already rejected by both back ends.)
+    let src = "fun a(n: int32) -> int32 {\n  if n <= 0 { return 0 }\n  return b(n - 1)\n}\n\
+               fun b(n: int32) -> int32 {\n  if n <= 0 { return 0 }\n  return a(n - 1)\n}\n\
+               println(a(5))\n";
+    let ast = prepoly_parser::parse(src).expect("parse");
+    let modules = [LoadedModule {
+        path: vec!["main".into()],
+        ast,
+    }];
+    let (program, _errors) = prepoly_hir::lower(&modules);
+    let mir = lower_program(&program);
+    let err = monomorphize(&mir, &program)
+        .map(|_| ())
+        .expect_err("main-init failure must surface");
+    assert!(
+        err.contains("top-level code") && err.contains("mutual recursion"),
+        "error should name the top-level cause, got: {err}"
+    );
+}
+
+#[test]
+fn narrowed_nullable_array_ops_type_and_keep_the_init() {
+    // An `if a` guard does not retype the MIR local, so `a` stays `int32[]?` while
+    // used as `int32[]` inside the guard. Each op below once made `type_and_store`
+    // fail, and because init bodies monomorphize best-effort, the whole init was
+    // silently dropped -- a type-checked program produced no output. The init must
+    // survive (a non-empty `init_symbols`) and the typed program must compile.
+    for (label, body) in [
+        ("len", "let n = a.len()"),
+        ("for", "for e in a {\n      println(e)\n    }"),
+        ("index", "println(a[0])"),
+        ("index_store", "a[0] = 9"),
+        ("push", "a.push(9)"),
+        ("pop", "let last = a.pop()"),
+    ] {
+        let src = format!("fun f(a: int32[]?) {{\n  if a {{\n    {body}\n  }}\n}}\nf([1, 2, 3])\n");
+        let ast = prepoly_parser::parse(&src).expect("parse");
+        let modules = [LoadedModule {
+            path: vec!["main".into()],
+            ast,
+        }];
+        let (program, _errors) = prepoly_hir::lower(&modules);
+        let mir = lower_program(&program);
+        let mono = monomorphize(&mir, &program).expect("monomorphize");
+        assert!(
+            !mono.init_symbols.is_empty(),
+            "init dropped for narrowed nullable `{label}`"
+        );
+        // The instance still carries the declared nullable parameter; the back end
+        // strips it at each use.
+        let f = mono
+            .functions
+            .iter()
+            .find(|f| f.symbol.starts_with("f__"))
+            .unwrap_or_else(|| panic!("no `f` instance for `{label}`"));
+        assert!(
+            matches!(f.local_types.first(), Some(prepoly_hir::Type::Nullable(_))),
+            "param should stay nullable for `{label}`, got {:?}",
+            f.local_types.first().map(|t| t.display())
+        );
+    }
+}

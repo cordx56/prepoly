@@ -989,15 +989,16 @@ impl<'p> Hm<'p> {
     // ----- annotations -----
 
     fn resolve_annotation_opt(
-        &self,
+        &mut self,
         annot: &Option<prepoly_parser::ast::TypeExpr>,
     ) -> Option<Type> {
-        annot.as_ref().and_then(|a| self.resolve_annotation(a))
+        let annot = annot.as_ref()?;
+        self.resolve_annotation(annot)
     }
 
-    fn resolve_annotation(&self, annot: &prepoly_parser::ast::TypeExpr) -> Option<Type> {
+    fn resolve_annotation(&mut self, annot: &prepoly_parser::ast::TypeExpr) -> Option<Type> {
         let module = self.module.clone();
-        prepoly_hir::resolve(annot, |name| {
+        let resolved = prepoly_hir::resolve(annot, |name| {
             self.program.resolve_type(&module, name).map(|t| {
                 if t.is_sum() {
                     prepoly_hir::NominalInfo::sum(t.id)
@@ -1006,7 +1007,12 @@ impl<'p> Hm<'p> {
                 }
             })
         })
-        .ok()
+        .ok()?;
+        // `infer` / `T!` left `INFER_VAR` placeholders; mint a fresh solver variable
+        // for each so they participate in inference like an unannotated position.
+        Some(prepoly_hir::freshen_infer(resolved, &mut || {
+            self.solver.fresh(InferenceVarKind::Source)
+        }))
     }
 
     // ----- type definitions (records, sums, methods) -----

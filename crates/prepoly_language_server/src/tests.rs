@@ -119,6 +119,56 @@ fn hover_shows_variable_type() {
     assert!(text.contains("v:"), "should show `v: <type>`: {text}");
 }
 
+/// Hovering a variable at its `let` declaration (which has no typed node of its
+/// own) still shows the type, recovered from the bound value.
+#[test]
+fn hover_shows_type_at_declaration() {
+    let src = "fun main() {\n    let count = 5\n    println(count)\n}\n";
+    let full = full_analysis(src);
+    // First occurrence of `count` is the `let count` binding site.
+    let (doc, pos) = position(src, "count", false);
+    let h = hover::hover(&doc, &full, pos).expect("hover over a let binding");
+    let text = hover_text(&h);
+    assert!(
+        text.contains("count:"),
+        "should show `count: <type>`: {text}"
+    );
+}
+
+/// Variables introduced by a match-arm pattern show their type both at the
+/// binding site (which has no typed node of its own) and at their uses.
+#[test]
+fn hover_shows_pattern_bound_variable_type() {
+    let src = concat!(
+        "type Shape =\n",
+        "    | Circle { radius: float64 }\n",
+        "    | Square\n",
+        "\n",
+        "fun area(s: Shape) -> float64 {\n",
+        "    return match s {\n",
+        "        Circle { radius } => radius * radius,\n",
+        "        Square => 0.0,\n",
+        "    }\n",
+        "}\n",
+    );
+    let full = full_analysis(src);
+
+    // Binding site `Circle { radius }` (the `radius` just before `} =>`).
+    let (doc, pos) = position(src, "radius } =>", false);
+    let h = hover::hover(&doc, &full, pos).expect("hover over a pattern binding");
+    let text = hover_text(&h);
+    assert!(text.contains("radius:"), "binding shows the name: {text}");
+    assert!(
+        text.contains("float64"),
+        "binding shows the field type: {text}"
+    );
+
+    // Use site `radius * radius`.
+    let (doc2, pos2) = position(src, "radius * radius", false);
+    let h2 = hover::hover(&doc2, &full, pos2).expect("hover over a pattern use");
+    assert!(hover_text(&h2).contains("float64"), "use shows the type");
+}
+
 /// Go-to-definition on a call jumps to the called function's declaration.
 #[test]
 fn definition_jumps_to_function() {

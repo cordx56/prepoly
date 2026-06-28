@@ -315,7 +315,9 @@ fn refs_type(ty: &TypeExpr, out: &mut HashSet<String>) {
         TypeExpr::Named(name, _) => {
             out.insert(name.clone());
         }
-        TypeExpr::Array(inner, _, _) | TypeExpr::Nullable(inner, _) => refs_type(inner, out),
+        TypeExpr::Array(inner, _, _)
+        | TypeExpr::Nullable(inner, _)
+        | TypeExpr::Fallible(inner, _) => refs_type(inner, out),
         TypeExpr::Fun(params, ret, _) => {
             for p in params {
                 refs_type(p, out);

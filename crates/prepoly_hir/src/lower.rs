@@ -373,7 +373,9 @@ fn resolve_field_annotation(
     next_unknown: &mut u32,
 ) {
     field.resolved_ty = match &field.ty {
-        Some(ty) => resolve(ty, nominal).ok(),
+        Some(ty) => resolve(ty, nominal)
+            .ok()
+            .map(|t| crate::freshen_infer(t, &mut || fresh_unknown(next_unknown))),
         None => {
             let id = *next_unknown;
             *next_unknown += 1;
@@ -391,7 +393,9 @@ fn resolve_signature_annotations(
 ) {
     for param in &mut signature.params {
         param.resolved_ty = match &param.ty {
-            Some(ty) => resolve(ty, nominal).ok(),
+            Some(ty) => resolve(ty, nominal)
+                .ok()
+                .map(|t| crate::freshen_infer(t, &mut || fresh_unknown(next_unknown))),
             None if assign_param_unknowns && param.name != "self" => {
                 Some(fresh_unknown(next_unknown))
             }
@@ -399,7 +403,9 @@ fn resolve_signature_annotations(
         };
     }
     signature.ret_ty = match &signature.ret {
-        Some(ty) => resolve(ty, nominal).ok(),
+        Some(ty) => resolve(ty, nominal)
+            .ok()
+            .map(|t| crate::freshen_infer(t, &mut || fresh_unknown(next_unknown))),
         None if assign_ret_unknown => Some(fresh_unknown(next_unknown)),
         None => None,
     };

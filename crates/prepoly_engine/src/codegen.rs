@@ -27,6 +27,7 @@ use prepoly_parser::ast::{BinOp, UnaryOp};
 use crate::mono::{
     MonoFunction, MonoProgram, binary_operand_type, float_kind_name, instance_symbol,
     int_kind_name, is_comparison, method_symbol, numeric_conv_ret, operand_type_of, static_symbol,
+    unwrap_nullable,
 };
 
 /// Whether a type is a reference-counted heap object the back end tracks with
@@ -519,11 +520,12 @@ pub trait Codegen {
             // reference to the stored value, so a managed value is retained.
             MirStmt::Store(place, op) => match place.proj.as_slice() {
                 [Projection::Field(field)] => {
-                    let base_ty = f.local_type(place.local).clone();
+                    let raw_ty = f.local_type(place.local).clone();
+                    let base = self.load_local(place.local);
+                    let (base, base_ty) = self.unwrap_narrowed(base, &raw_ty);
                     let fty = record_field_type(&base_ty, field);
                     let op_ty = operand_type_of(op, &f.local_types);
                     let v = self.codegen_operand(program, f, op, &fty);
-                    let base = self.load_local(place.local);
                     self.store_field(base, &base_ty, field, v);
                     // Retain an aliased managed value (a second reference). A fresh
                     // constant is owned at 1, and a coerced nullable wrap is a fresh
@@ -538,11 +540,12 @@ pub trait Codegen {
                     }
                 }
                 [Projection::Index(idx)] => {
-                    let arr_ty = f.local_type(place.local).clone();
+                    let raw_ty = f.local_type(place.local).clone();
+                    let arr = self.load_local(place.local);
+                    let (arr, arr_ty) = self.unwrap_narrowed(arr, &raw_ty);
                     let elem_ty = element_type(&arr_ty);
                     let op_ty = operand_type_of(op, &f.local_types);
                     let v = self.codegen_operand(program, f, op, &elem_ty);
-                    let arr = self.load_local(place.local);
                     let iv = self.codegen_operand(program, f, idx, &index_type(idx, f));
                     self.store_index(arr, &arr_ty, iv, v);
                     if rc_managed(&elem_ty)
@@ -782,16 +785,19 @@ pub trait Codegen {
                 }
                 arr
             }
-            // Read an aggregate field or an array element.
+            // Read an aggregate field or an array element. A narrowed nullable base
+            // (`a: T?` proven non-null by a guard) is unwrapped to its inner value.
             Rvalue::Load(place) => match place.proj.as_slice() {
                 [Projection::Field(field)] => {
                     let base = self.load_local(place.local);
-                    let base_ty = f.local_type(place.local).clone();
+                    let raw_ty = f.local_type(place.local).clone();
+                    let (base, base_ty) = self.unwrap_narrowed(base, &raw_ty);
                     self.load_field(base, &base_ty, field)
                 }
                 [Projection::Index(idx)] => {
                     let arr = self.load_local(place.local);
-                    let arr_ty = f.local_type(place.local).clone();
+                    let raw_ty = f.local_type(place.local).clone();
+                    let (arr, arr_ty) = self.unwrap_narrowed(arr, &raw_ty);
                     let iv = self.codegen_operand(program, f, idx, &index_type(idx, f));
                     self.load_index(arr, &arr_ty, iv)
                 }
@@ -820,12 +826,16 @@ pub trait Codegen {
             .map(|a| operand_type_of(a, &f.local_types))
             .collect();
         let target = match callee {
-            // `arr.push(v)`: a growable-array append, not a user method.
+            // `arr.push(v)`: a growable-array append, not a user method. The receiver
+            // type is stripped of a top-level nullable (a narrowed `T[]?`), and the
+            // operand is loaded at that stripped type so the cell is unwrapped.
             Callee::Method(name)
-                if name == "push" && matches!(arg_types.first(), Some(Type::Slice(_))) =>
+                if name == "push"
+                    && matches!(arg_types.first().map(unwrap_nullable), Some(Type::Slice(_))) =>
             {
-                let elem = element_type(&arg_types[0]);
-                let arr = self.codegen_operand(program, f, &args[0], &arg_types[0]);
+                let aty = unwrap_nullable(&arg_types[0]);
+                let elem = element_type(aty);
+                let arr = self.codegen_operand(program, f, &args[0], aty);
                 let v = self.codegen_operand(program, f, &args[1], &elem);
                 self.push(arr, &elem, v);
                 // The array now holds a reference to a managed element, so its count
@@ -838,10 +848,12 @@ pub trait Codegen {
             // `arr.insert(i, v)`: a growable-array insertion (DESIGN.md 9.1
             // `_array_insert`), not a user method.
             Callee::Method(name)
-                if name == "insert" && matches!(arg_types.first(), Some(Type::Slice(_))) =>
+                if name == "insert"
+                    && matches!(arg_types.first().map(unwrap_nullable), Some(Type::Slice(_))) =>
             {
-                let elem = element_type(&arg_types[0]);
-                let arr = self.codegen_operand(program, f, &args[0], &arg_types[0]);
+                let aty = unwrap_nullable(&arg_types[0]);
+                let elem = element_type(aty);
+                let arr = self.codegen_operand(program, f, &args[0], aty);
                 let idx = self.codegen_operand(program, f, &args[1], &arg_types[1]);
                 let v = self.codegen_operand(program, f, &args[2], &elem);
                 self.insert(arr, &elem, idx, v);
@@ -856,10 +868,12 @@ pub trait Codegen {
             // `_array_remove`) returning the removed element. Ownership of a managed
             // element transfers to the caller, so no retain/release is needed.
             Callee::Method(name)
-                if name == "remove" && matches!(arg_types.first(), Some(Type::Slice(_))) =>
+                if name == "remove"
+                    && matches!(arg_types.first().map(unwrap_nullable), Some(Type::Slice(_))) =>
             {
-                let elem = element_type(&arg_types[0]);
-                let arr = self.codegen_operand(program, f, &args[0], &arg_types[0]);
+                let aty = unwrap_nullable(&arg_types[0]);
+                let elem = element_type(aty);
+                let arr = self.codegen_operand(program, f, &args[0], aty);
                 let idx = self.codegen_operand(program, f, &args[1], &arg_types[1]);
                 return self.remove(arr, &elem, idx);
             }
@@ -868,22 +882,25 @@ pub trait Codegen {
             // element transfers to the caller (the nullable cell), so no
             // retain/release is needed.
             Callee::Method(name)
-                if name == "pop" && matches!(arg_types.first(), Some(Type::Slice(_))) =>
+                if name == "pop"
+                    && matches!(arg_types.first().map(unwrap_nullable), Some(Type::Slice(_))) =>
             {
-                let elem = element_type(&arg_types[0]);
-                let arr = self.codegen_operand(program, f, &args[0], &arg_types[0]);
+                let aty = unwrap_nullable(&arg_types[0]);
+                let elem = element_type(aty);
+                let arr = self.codegen_operand(program, f, &args[0], aty);
                 return self.pop(arr, &elem);
             }
             // `arr.len()` / `s.len()`: the length builtin in UFCS method form.
             Callee::Method(name)
                 if name == "len"
                     && matches!(
-                        arg_types.first(),
+                        arg_types.first().map(unwrap_nullable),
                         Some(Type::Slice(_) | Type::Array(..) | Type::Str)
                     ) =>
             {
-                let v = self.codegen_operand(program, f, &args[0], &arg_types[0]);
-                return match &arg_types[0] {
+                let aty = unwrap_nullable(&arg_types[0]);
+                let v = self.codegen_operand(program, f, &args[0], aty);
+                return match aty {
                     Type::Slice(_) | Type::Array(..) => self.array_len(v),
                     _ => self.string_len(v),
                 };
@@ -1020,7 +1037,10 @@ pub trait Codegen {
             // "TypeName", value)`.
             "__rt_dispatch" => self.codegen_deferred_dispatch(program, f, args),
             "len" => {
+                // Strip a top-level nullable (a narrowed `T[]?`/`string?`) so the
+                // operand is loaded at its inner type and the cell is unwrapped.
                 let ty = operand_type_of(&args[0], &f.local_types);
+                let ty = unwrap_nullable(&ty).clone();
                 let v = self.codegen_operand(program, f, &args[0], &ty);
                 // `len` applies to both strings and arrays.
                 match ty {
@@ -1030,6 +1050,7 @@ pub trait Codegen {
             }
             "array_len" => {
                 let ty = operand_type_of(&args[0], &f.local_types);
+                let ty = unwrap_nullable(&ty).clone();
                 let v = self.codegen_operand(program, f, &args[0], &ty);
                 self.array_len(v)
             }
@@ -1302,6 +1323,18 @@ pub trait Codegen {
         }
     }
 
+    /// Resolve an aggregate-operation receiver to its non-null form. An `if a`
+    /// guard proves a nullable non-null but does not retype the MIR local, so a
+    /// narrowed `T?` still carries the declared nullable; unwrap the cell (the
+    /// `Nullable -> inner` `coerce`) and return the stripped type. A non-nullable
+    /// base passes through unchanged, so this is safe to apply to every receiver.
+    fn unwrap_narrowed(&mut self, base: Self::Value, base_ty: &Type) -> (Self::Value, Type) {
+        match base_ty {
+            Type::Nullable(inner) => (self.coerce(base, base_ty, inner), (**inner).clone()),
+            _ => (base, base_ty.clone()),
+        }
+    }
+
     fn codegen_const(&mut self, lit: &Literal, expected_ty: &Type) -> Self::Value {
         // A non-null literal flowing into a nullable position is built at the
         // element type and wrapped into the nullable cell, mirroring the `Local`
@@ -1343,7 +1376,7 @@ fn result_ok_type(ret: &Type) -> Type {
 
 /// The concrete type of field `name` in a record type, or `void` if absent.
 fn record_field_type(record_ty: &Type, name: &str) -> Type {
-    match record_ty {
+    match unwrap_nullable(record_ty) {
         Type::Record(n) => n.substitution.get(name).cloned().unwrap_or(Type::Void),
         _ => Type::Void,
     }
@@ -1358,9 +1391,10 @@ fn str_const(op: &Operand) -> Option<&str> {
     }
 }
 
-/// The element type of an array/slice type, or `void` if not a sequence.
+/// The element type of an array/slice type, or `void` if not a sequence. A
+/// narrowed nullable array (`int32[]?` proven non-null) is unwrapped first.
 fn element_type(ty: &Type) -> Type {
-    match ty {
+    match unwrap_nullable(ty) {
         Type::Slice(e) | Type::Array(e, _) => (**e).clone(),
         _ => Type::Void,
     }

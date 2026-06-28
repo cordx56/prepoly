@@ -15,7 +15,8 @@ pub use hir::{
 pub use lower::{LowerError, lower};
 pub use typed::{Constness, Ownership, RegionId, TypedExpr, TypedExprKind, TypedProgram};
 pub use types::{
-    FloatKind, IntKind, NominalInfo, NominalKind, NominalType, Substitution, Type, resolve,
+    FloatKind, INFER_VAR, IntKind, NominalInfo, NominalKind, NominalType, Substitution, Type,
+    freshen_infer, resolve,
 };
 
 /// Re-exported so back ends can name source spans (e.g. typed-literal codegen

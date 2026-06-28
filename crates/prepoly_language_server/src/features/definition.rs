@@ -9,7 +9,7 @@
 use prepoly_hir::{Type, TypedExprKind};
 use prepoly_lexer::Span;
 use prepoly_parser::ast::{
-    Block, Expr, FieldPat, Member, Param, Pattern, Stmt, StrSeg, TopLevel, TypeBody,
+    Block, Expr, FieldPat, Member, Pattern, Stmt, StrSeg, TopLevel, TypeBody,
 };
 use tower_lsp_server::ls_types::{Location, Position};
 
@@ -102,7 +102,7 @@ fn has_field(info: &prepoly_hir::TypeInfo, name: &str) -> bool {
 /// binding in the function, which is correct in the absence of inner-block
 /// shadowing after the use.
 fn local_binding(full: &FullAnalysis, global_off: usize, name: &str) -> Option<Span> {
-    let (params, body) = enclosing(&full.main_ast, global_off)?;
+    let (params, body) = nav::enclosing(&full.main_ast, global_off)?;
     let mut found: Option<Span> = None;
     let mut consider = |bname: &str, span: Span| {
         if bname == name && span.lo <= global_off && found.map(|f| span.lo > f.lo).unwrap_or(true) {
@@ -114,41 +114,6 @@ fn local_binding(full: &FullAnalysis, global_off: usize, name: &str) -> Option<S
     }
     collect_block_bindings(body, &mut consider);
     found
-}
-
-/// The parameters and body of the function or method whose body contains
-/// `global_off`.
-fn enclosing(
-    main_ast: &prepoly_parser::ast::Module,
-    global_off: usize,
-) -> Option<(Vec<&Param>, &Block)> {
-    for item in &main_ast.items {
-        match item {
-            TopLevel::Fun(f) if contains(f.body.span, global_off) => {
-                return Some((f.params.iter().collect(), &f.body));
-            }
-            TopLevel::Type(t) => {
-                let members = match &t.body {
-                    TypeBody::Record(members) => members,
-                    TypeBody::Sum(_) => continue,
-                };
-                for m in members {
-                    if let Member::Method(method) = m
-                        && let Some(body) = &method.body
-                        && contains(body.span, global_off)
-                    {
-                        return Some((method.params.iter().collect(), body));
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn contains(span: Span, off: usize) -> bool {
-    off >= span.lo && off <= span.hi
 }
 
 /// Walk a block collecting every binding it introduces (let patterns, for-loop

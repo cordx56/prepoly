@@ -38,6 +38,10 @@ pub(crate) fn resolve_simple_type(te: &TypeExpr) -> Option<Type> {
                 .collect::<Option<Vec<_>>>()?;
             Some(Type::Fun(ps, Box::new(resolve_simple_type(ret)?)))
         }
+        // `T!` (a Result) carries no simple, fully-known local hint; the engine
+        // infers the local's type from its initializer/uses. (`infer`/`infer[]`
+        // likewise resolve to no hint via `primitive_type`.)
+        TypeExpr::Fallible(_, _) => None,
     }
 }
 

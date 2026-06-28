@@ -316,7 +316,7 @@ pub fn lower_program(program: &Program) -> MirProgram {
             name: info.decl.name.clone(),
             symbol: info.symbol.clone(),
             module: info.module.clone(),
-            fallible: info.decl.ret.is_none() && fallible_block(&info.decl.body),
+            fallible: function_fallible(info.decl.ret.as_ref(), &info.decl.body),
             body,
         });
     }
@@ -409,6 +409,19 @@ fn lower_method(
 /// return type and its body uses `error`/`expr!` (matches codegen).
 fn method_fallible(_params: &[Param], body: &Block) -> bool {
     fallible_block(body)
+}
+
+/// A free function auto-wraps plain returns in `Result.Ok` (and propagates
+/// errors) when its return type is `T!` (explicitly fallible), or when it has no
+/// return annotation and its body uses `error(...)`/`expr!` (inferred fallible).
+/// An explicit non-`T!` return type means the body builds its own value, so bare
+/// returns are not wrapped.
+fn function_fallible(ret: Option<&prepoly_parser::ast::TypeExpr>, body: &Block) -> bool {
+    match ret {
+        Some(prepoly_parser::ast::TypeExpr::Fallible(..)) => true,
+        Some(_) => false,
+        None => fallible_block(body),
+    }
 }
 
 /// Lower a module init body: top-level `let`/`const` initialize module globals;
