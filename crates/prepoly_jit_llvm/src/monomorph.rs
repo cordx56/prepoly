@@ -67,6 +67,10 @@ pub fn type_mangle(ty: &Type) -> String {
         Type::Sum(n) => format!("s{}", n.id),
         Type::Array(inner, len) => format!("a{len}_{}", type_mangle(inner)),
         Type::Slice(inner) => format!("sl_{}", type_mangle(inner)),
+        Type::Tuple(elems) => {
+            let es: Vec<String> = elems.iter().map(type_mangle).collect();
+            format!("tup{}_{}", elems.len(), es.join("_"))
+        }
         Type::Fun(params, ret) => {
             let ps: Vec<String> = params.iter().map(type_mangle).collect();
             format!("fn{}_{}", ps.join("_"), type_mangle(ret))

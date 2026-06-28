@@ -59,6 +59,13 @@ pub fn render_type(ty: &Type, namer: &mut UnknownNamer) -> String {
         Type::Record(n) | Type::Sum(n) => render_nominal(n, namer),
         Type::Array(t, len) => format!("{}[{}]", render_type(t, namer), len),
         Type::Slice(t) => format!("{}[]", render_type(t, namer)),
+        Type::Tuple(ts) => format!(
+            "[{}]",
+            ts.iter()
+                .map(|t| render_type(t, namer))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Type::Fun(params, ret) => format!(
             "({}) -> {}",
             params

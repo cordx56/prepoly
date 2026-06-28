@@ -275,4 +275,23 @@ mod tests {
             other => panic!("expected int32[]!, got {other:?}"),
         }
     }
+
+    #[test]
+    fn tuple_type_annotation() {
+        // A leading-bracket type `[T0, T1, ...]` is a tuple (distinct from the
+        // postfix array `T[]`).
+        let m = module("fun f(p: [int32, string, bool]) {\n}\n");
+        let TopLevel::Fun(f) = &m.items[0] else {
+            panic!("expected a function");
+        };
+        match &f.params[0].ty {
+            Some(TypeExpr::Tuple(elems, _)) => {
+                assert_eq!(elems.len(), 3);
+                assert!(matches!(elems[0], TypeExpr::Named(ref n, _) if n == "int32"));
+                assert!(matches!(elems[1], TypeExpr::Named(ref n, _) if n == "string"));
+                assert!(matches!(elems[2], TypeExpr::Named(ref n, _) if n == "bool"));
+            }
+            other => panic!("expected a tuple type, got {other:?}"),
+        }
+    }
 }

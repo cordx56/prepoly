@@ -86,6 +86,25 @@ Token groups (`@lsp.type.function`, `@lsp.type.type`, `@lsp.type.enum`,
 `@lsp.type.method`, ...) inherit your colorscheme; override them with
 `:highlight` if you want distinct colors.
 
+## 5. Completion
+
+The server offers completion for types and functions in code, module paths in
+`import a.b.`, and the exported names in `import a.b.{ ... }`. Trigger it
+manually with `<C-x><C-o>` (the omnifunc is set on attach), or auto-complete as
+you type by enabling the built-in client completion in your `LspAttach` (Neovim
+0.11+):
+
+```lua
+vim.api.nvim_create_autocmd("LspAttach", {
+  callback = function(args)
+    local client = vim.lsp.get_client_by_id(args.data.client_id)
+    if client and client:supports_method("textDocument/completion") then
+      vim.lsp.completion.enable(true, client.id, args.buf, { autotrigger = true })
+    end
+  end,
+})
+```
+
 ## Notes
 
 - `.pp` is also Puppet's extension; `ftdetect/prepoly.lua` overrides that.

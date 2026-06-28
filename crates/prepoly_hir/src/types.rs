@@ -106,6 +106,10 @@ pub enum Type {
     Sum(NominalType),
     Array(Box<Type>, usize),
     Slice(Box<Type>),
+    /// A fixed-length, heterogeneous tuple `[T0, T1, ...]` (written `[int32,
+    /// string]`). A bracket literal with elements of differing types is a tuple;
+    /// one whose elements share a type is an `Array`/`Slice`.
+    Tuple(Vec<Type>),
     Fun(Vec<Type>, Box<Type>),
     Nullable(Box<Type>),
     ConstOf(Box<Type>),
@@ -307,6 +311,13 @@ impl Type {
             Type::Record(n) | Type::Sum(n) => n.to_string(),
             Type::Array(t, n) => format!("{}[{}]", t.display(), n),
             Type::Slice(t) => format!("{}[]", t.display()),
+            Type::Tuple(ts) => format!(
+                "[{}]",
+                ts.iter()
+                    .map(|t| t.display())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Type::Fun(ps, r) => format!(
                 "({}) -> {}",
                 ps.iter()
@@ -366,6 +377,12 @@ fn resolve_inner(
             resolve_inner(inner, nominal_info)?,
             Type::Unknown(INFER_VAR),
         )),
+        TypeExpr::Tuple(elems, _) => Ok(Type::Tuple(
+            elems
+                .iter()
+                .map(|e| resolve_inner(e, nominal_info))
+                .collect::<Result<_, _>>()?,
+        )),
     }
 }
 
@@ -415,6 +432,7 @@ pub fn freshen_infer(ty: Type, fresh: &mut impl FnMut() -> Type) -> Type {
             ps.into_iter().map(|p| freshen_infer(p, fresh)).collect(),
             Box::new(freshen_infer(*r, fresh)),
         ),
+        Type::Tuple(ts) => Type::Tuple(ts.into_iter().map(|t| freshen_infer(t, fresh)).collect()),
         // A nominal's payload substitution (e.g. a `T!` -> `Result`'s open error
         // type) is rewritten in place; the Record/Sum kind is preserved.
         Type::Record(n) => Type::Record(freshen_nominal(n, fresh)),

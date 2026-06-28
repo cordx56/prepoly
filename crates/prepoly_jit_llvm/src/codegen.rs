@@ -44,6 +44,7 @@ fn is_managed_heap(ty: &Type) -> bool {
             | Type::Slice(..)
             | Type::Array(..)
             | Type::Fun(..)
+            | Type::Tuple(..)
     )
 }
 
@@ -293,6 +294,17 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
             Type::Nullable(inner) if is_traced(inner) => child_offsets.push(16),
             Type::Slice(e) | Type::Array(e, _) if is_traced(e) => {
                 array_elem = Some(e.as_ref().clone())
+            }
+            Type::Tuple(elems) => {
+                let mut offset = 16u64;
+                for ety in elems {
+                    let (size, align) = type_size_align(ety);
+                    offset = align_up(offset, align);
+                    if is_traced(ety) {
+                        child_offsets.push(offset);
+                    }
+                    offset += size;
+                }
             }
             Type::Sum(n) => {
                 let names: Vec<String> = match self.program.type_by_id(n.id).map(|i| &i.kind) {
@@ -1074,6 +1086,21 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
     /// The byte layout of a record instance: `(field name, LLVM type, byte
     /// offset)` for each declared field (laid out in order after the 16-byte
     /// header, naturally aligned) plus the total object size.
+    /// A tuple's `(llvm element type, byte offset)` layout and total object size:
+    /// the 16-byte header followed by each element at its naturally-aligned offset,
+    /// positionally (mirrors a record's field layout but keyed by position).
+    fn tuple_layout(&self, elem_types: &[Type]) -> (Vec<(BasicTypeEnum<'ctx>, u64)>, u64) {
+        let mut offset = 16u64;
+        let mut out = Vec::with_capacity(elem_types.len());
+        for ety in elem_types {
+            let (size, align) = type_size_align(ety);
+            offset = align_up(offset, align);
+            out.push((self.abi.typed_basic(ety), offset));
+            offset += size;
+        }
+        (out, align_up(offset.max(16), 8))
+    }
+
     fn record_layout(&self, record_ty: &Type) -> Option<(Vec<RecordFieldLayout<'ctx>>, u64)> {
         let Type::Record(n) = record_ty else {
             return None;
@@ -2346,6 +2373,46 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
                     .try_as_basic_value()
                     .unwrap_basic()
             }
+            // A tuple renders as `[e0, e1, ...]`. Its length and element types are
+            // statically known, so the rendering is unrolled: each element is loaded
+            // at its layout offset, rendered with its own type, and joined.
+            Type::Tuple(elems) => {
+                let ptrt = self.abi.ptr();
+                let concat_ty = ptrt.fn_type(&[ptrt.into(), ptrt.into()], false);
+                let concat = self
+                    .abi
+                    .runtime_fn(&self.module, "pp_str_concat", concat_ty);
+                let (layout, _) = self.tuple_layout(elems);
+                let tup = v.into_pointer_value();
+                let mut cur = self.const_str("[");
+                for (i, ety) in elems.iter().enumerate() {
+                    if i > 0 {
+                        let comma = self.const_str(", ");
+                        cur = self
+                            .builder
+                            .build_call(concat, &[cur.into(), comma.into()], "ws")
+                            .unwrap()
+                            .try_as_basic_value()
+                            .unwrap_basic();
+                    }
+                    let (llty, offset) = layout[i];
+                    let fp = self.field_ptr(tup, offset);
+                    let ev = self.builder.build_load(llty, fp, "te").unwrap();
+                    let es = self.to_string(ev, ety);
+                    cur = self
+                        .builder
+                        .build_call(concat, &[cur.into(), es.into()], "ap")
+                        .unwrap()
+                        .try_as_basic_value()
+                        .unwrap_basic();
+                }
+                let close = self.const_str("]");
+                self.builder
+                    .build_call(concat, &[cur.into(), close.into()], "cl")
+                    .unwrap()
+                    .try_as_basic_value()
+                    .unwrap_basic()
+            }
             // A record/sum renders through a memoized per-type formatter so a
             // self-referential type recurses by call rather than inlining forever.
             Type::Record(_) | Type::Sum(_) => {
@@ -2538,6 +2605,45 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
         }
         self.register_for_gc(base.into(), record_ty);
         base.into()
+    }
+
+    fn make_tuple(
+        &mut self,
+        elem_types: &[Type],
+        elems: &[BasicValueEnum<'ctx>],
+    ) -> BasicValueEnum<'ctx> {
+        let (layout, size) = self.tuple_layout(elem_types);
+        let alloc_ty = self.abi.ptr().fn_type(&[self.abi.i64t().into()], false);
+        let alloc = self
+            .abi
+            .runtime_fn(&self.module, "pp_typed_alloc", alloc_ty);
+        let base = self
+            .builder
+            .build_call(alloc, &[self.i64c(size as i64).into()], "tup")
+            .unwrap()
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_pointer_value();
+        for ((_, offset), v) in layout.iter().zip(elems) {
+            let fp = self.field_ptr(base, *offset);
+            self.builder.build_store(fp, *v).unwrap();
+        }
+        self.register_for_gc(base.into(), &Type::Tuple(elem_types.to_vec()));
+        base.into()
+    }
+
+    fn tuple_field(
+        &mut self,
+        tup: BasicValueEnum<'ctx>,
+        elem_types: &[Type],
+        index: usize,
+    ) -> BasicValueEnum<'ctx> {
+        let (layout, _) = self.tuple_layout(elem_types);
+        let Some((llty, offset)) = layout.get(index).copied() else {
+            return self.typed_unit();
+        };
+        let fp = self.field_ptr(tup.into_pointer_value(), offset);
+        self.builder.build_load(llty, fp, "te").unwrap()
     }
 
     fn load_field(

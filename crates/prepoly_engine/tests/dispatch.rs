@@ -222,6 +222,13 @@ impl Codegen for TextBackend {
     fn make_array(&mut self, elem_ty: &Type, elems: &[usize]) -> usize {
         self.val(format!("array<{}> {elems:?}", elem_ty.display()))
     }
+    fn make_tuple(&mut self, elem_types: &[Type], elems: &[usize]) -> usize {
+        let tys: Vec<String> = elem_types.iter().map(|t| t.display()).collect();
+        self.val(format!("tuple<{}> {elems:?}", tys.join(", ")))
+    }
+    fn tuple_field(&mut self, tup: usize, _elem_types: &[Type], index: usize) -> usize {
+        self.val(format!("v{tup}.{index}"))
+    }
     fn load_index(&mut self, arr: usize, _arr_ty: &Type, idx: usize) -> usize {
         self.val(format!("v{arr}[v{idx}]"))
     }

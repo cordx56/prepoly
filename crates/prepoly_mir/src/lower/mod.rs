@@ -451,18 +451,35 @@ fn lower_init(
 }
 
 impl<'a, 'p> FnLower<'a, 'p> {
-    /// Store a top-level binding into module globals. Only the irrefutable forms
-    /// that appear at module top level are handled (a bare name; otherwise the
-    /// value is evaluated for its effects, matching the existing init codegen
-    /// which binds single names and ignores other shapes here).
+    /// Store a top-level binding into module globals. A bare name binds directly;
+    /// an array/tuple pattern destructures by position, storing each element's
+    /// binding into its own global (so `let [i, s] = [1, "s"]` at module level
+    /// makes `i` and `s` globals, matching how it binds locals inside a function).
     fn store_global_pattern(
         &mut self,
         pat: &prepoly_parser::ast::Pattern,
         v: crate::value::Operand,
     ) {
+        use crate::cfg::MirStmt;
+        use crate::value::{Literal, Operand, Place, Projection, Rvalue};
         use prepoly_parser::ast::Pattern;
-        if let Pattern::Binding(name, _) = pat {
-            self.b.push(crate::cfg::MirStmt::SetGlobal(name.clone(), v));
+        match pat {
+            Pattern::Binding(name, _) => {
+                self.b.push(MirStmt::SetGlobal(name.clone(), v));
+            }
+            Pattern::Array(pats, _) => {
+                let subj = self.b.make_local(v);
+                for (i, p) in pats.iter().enumerate() {
+                    let elem = self.b.emit(Rvalue::Load(Place::projected(
+                        subj,
+                        vec![Projection::Index(Operand::Const(Literal::Int(i as i64)))],
+                    )));
+                    self.store_global_pattern(p, elem);
+                }
+            }
+            // A record/variant pattern or a wildcard/literal at module top level is
+            // not a global binding form: the value was already evaluated for effects.
+            Pattern::Record(..) | Pattern::Wildcard(_) | Pattern::Literal(..) => {}
         }
     }
 }

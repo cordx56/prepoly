@@ -66,6 +66,7 @@ impl Subst {
                 params.iter().map(|p| self.resolve_deep(p)).collect(),
                 Box::new(self.resolve_deep(&ret)),
             ),
+            Type::Tuple(elems) => Type::Tuple(elems.iter().map(|t| self.resolve_deep(t)).collect()),
             other => other,
         }
     }
@@ -121,6 +122,12 @@ impl Subst {
                 }
                 self.unify(r1, r2)
             }
+            (Type::Tuple(xs), Type::Tuple(ys)) if xs.len() == ys.len() => {
+                for (x, y) in xs.iter().zip(ys) {
+                    self.unify(x, y)?;
+                }
+                Ok(())
+            }
             (Type::Sum(n1), Type::Sum(n2)) => {
                 if n1.same_nominal(n2) {
                     Ok(())
@@ -154,6 +161,7 @@ impl Subst {
             Type::Fun(params, ret) => {
                 params.iter().any(|p| self.occurs(id, p)) || self.occurs(id, &ret)
             }
+            Type::Tuple(elems) => elems.iter().any(|t| self.occurs(id, t)),
             // Nominal records and sums (including `Result`) carry their component
             // types in the substitution, and a variable can occur there -- e.g.
             // `o = Result<o, e>` arising from `[x, x!]`. Descend so the occurs

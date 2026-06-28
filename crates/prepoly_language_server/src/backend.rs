@@ -10,7 +10,8 @@ use std::path::PathBuf;
 
 use dashmap::DashMap;
 use tower_lsp_server::ls_types::{
-    Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DocumentDiagnosticParams, DocumentDiagnosticReport, DocumentDiagnosticReportResult,
     FullDocumentDiagnosticReport, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
     InitializeParams, InitializeResult, InitializedParams, MessageType, OneOf,
@@ -96,6 +97,13 @@ impl LanguageServer for Backend {
                 )),
                 hover_provider: Some(true.into()),
                 definition_provider: Some(OneOf::Left(true)),
+                // `.` continues an import path (`import math.`) and member
+                // access; `{` opens an import's name list. Identifier typing
+                // triggers completion automatically without a trigger char.
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec![".".to_string(), "{".to_string()]),
+                    ..Default::default()
+                }),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -213,6 +221,22 @@ impl LanguageServer for Backend {
                 },
             }),
         ))
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let pos = params.text_document_position.position;
+        let uri = params.text_document_position.text_document.uri;
+        let Some(entry) = self.docs.get(&uri) else {
+            return Ok(None);
+        };
+        // Import completion is textual and needs no analysis; code completion
+        // uses the analyzed program when the document parses, else a fallback.
+        // The full analysis holds `!Send` data, so it stays a local and is
+        // dropped before this handler awaits.
+        let full = entry.analyzer.analyze_full(&entry.document.text);
+        let path = uri_to_path(&uri);
+        let items = features::completion::completion(&entry.document, full.as_ref(), &path, pos);
+        Ok(Some(CompletionResponse::Array(items)))
     }
 
     async fn semantic_tokens_full(

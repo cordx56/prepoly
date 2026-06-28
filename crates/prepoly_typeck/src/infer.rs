@@ -871,12 +871,18 @@ impl<'a> Checker<'a> {
                 }
             }
             Pattern::Array(pats, _) => {
-                let elem = match ty {
-                    Type::Array(inner, _) | Type::Slice(inner) => &**inner,
-                    _ => ty,
-                };
-                pats.iter()
-                    .for_each(|pat| self.bind_pattern_light(pat, elem, env));
+                if let Type::Tuple(elems) = ty {
+                    for (pat, ety) in pats.iter().zip(elems) {
+                        self.bind_pattern_light(pat, ety, env);
+                    }
+                } else {
+                    let elem = match ty {
+                        Type::Array(inner, _) | Type::Slice(inner) => &**inner,
+                        _ => ty,
+                    };
+                    pats.iter()
+                        .for_each(|pat| self.bind_pattern_light(pat, elem, env));
+                }
             }
             _ => {}
         }
@@ -1000,6 +1006,13 @@ impl<'a> Checker<'a> {
             TypeExpr::Fallible(inner, _) => {
                 let ok = self.resolve_type(inner)?;
                 Ok(Type::result(ok, self.fresh_unknown()))
+            }
+            TypeExpr::Tuple(elems, _) => {
+                let mut ts = Vec::with_capacity(elems.len());
+                for e in elems {
+                    ts.push(self.resolve_type(e)?);
+                }
+                Ok(Type::Tuple(ts))
             }
         }
     }
@@ -1265,6 +1278,27 @@ impl<'a> Checker<'a> {
             self.record_expr_type(expr, &ty);
             return ty;
         }
+        // A bracket literal in a required tuple position: each element flows into
+        // its own expected type, so e.g. an int literal takes the annotated width.
+        if let (Expr::Array(items, span), Type::Tuple(elems)) = (expr, self.resolve(want)) {
+            if items.len() != elems.len() {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "tuple literal has {} elements, but `{}` requires {}",
+                        items.len(),
+                        want.display(),
+                        elems.len()
+                    ),
+                    span: *span,
+                });
+            }
+            for (item, ety) in items.iter().zip(&elems) {
+                self.check_expr_against(item, ety, scopes);
+            }
+            let ty = Type::Tuple(elems);
+            self.record_expr_type(expr, &ty);
+            return ty;
+        }
         let got = self.check_expr(expr, scopes);
         self.expect_expr_assignable(&got, want, expr);
         got
@@ -1436,9 +1470,36 @@ impl<'a> Checker<'a> {
             Expr::Field(base, name, span) => self.check_field(base, name, *span, scopes),
             Expr::Index(base, idx, span) => {
                 let base_ty = self.check_expr(base, scopes);
+                let resolved = self.resolve(&base_ty);
+                // A tuple is indexed by a constant literal, yielding the element
+                // type at that position.
+                if let Type::Tuple(elems) = &resolved {
+                    let _ = self.check_expr(idx, scopes);
+                    return match const_index(idx) {
+                        Some(k) if (k as usize) < elems.len() => elems[k as usize].clone(),
+                        Some(k) => {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "tuple index {k} out of bounds for `{}`",
+                                    resolved.display()
+                                ),
+                                span: *span,
+                            });
+                            self.fresh_unknown()
+                        }
+                        None => {
+                            self.errors.push(TypeError {
+                                message: "a tuple can only be indexed by a constant integer"
+                                    .to_string(),
+                                span: *span,
+                            });
+                            self.fresh_unknown()
+                        }
+                    };
+                }
                 let idx_ty = self.check_expr(idx, scopes);
                 self.expect_int_index(&idx_ty, idx.span());
-                match self.resolve(&base_ty) {
+                match resolved {
                     Type::Array(inner, _) | Type::Slice(inner) => *inner,
                     Type::Str => Type::Str,
                     Type::Nullable(_) => {
@@ -1523,15 +1584,20 @@ impl<'a> Checker<'a> {
                 Type::Fun(param_types, Box::new(ret))
             }
             Expr::Array(es, _) => {
-                let elem_ty = es
-                    .first()
-                    .map(|e| self.check_expr(e, scopes))
-                    .unwrap_or_else(|| self.fresh_empty_array_elem());
-                for e in es.iter().skip(1) {
-                    let got = self.check_expr(e, scopes);
-                    self.expect_expr_assignable(&got, &elem_ty, e);
+                let elem_tys: Vec<Type> = es.iter().map(|e| self.check_expr(e, scopes)).collect();
+                // Heterogeneous concrete elements form a tuple; otherwise an array.
+                if let Some(tuple) = self.tuple_of_elements(es, &elem_tys) {
+                    Type::Tuple(tuple)
+                } else {
+                    let elem_ty = elem_tys
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| self.fresh_empty_array_elem());
+                    for (got, e) in elem_tys.iter().zip(es).skip(1) {
+                        self.expect_expr_assignable(got, &elem_ty, e);
+                    }
+                    Type::Slice(Box::new(elem_ty))
                 }
-                Type::Slice(Box::new(elem_ty))
             }
             Expr::TypeLit(name, fields, span) => self.check_record_lit(name, fields, *span, scopes),
             Expr::VariantLit(t, variant, fields, span) => {
@@ -3577,6 +3643,31 @@ impl<'a> Checker<'a> {
         self.solver.resolve(ty)
     }
 
+    /// If a bracket literal's elements describe a tuple, return their types; else
+    /// `None` (an array). Mirrors `hm::tuple_of_elements`: a rolled-back probe over
+    /// each element's representative type (a numeric literal stands in as its
+    /// default kind, not its open variable) decides array-vs-tuple, and a tuple
+    /// returns the elements' actual types so an annotation can still fix widths.
+    fn tuple_of_elements(&mut self, elems: &[Expr], elem_tys: &[Type]) -> Option<Vec<Type>> {
+        if elems.len() < 2 {
+            return None;
+        }
+        let reps: Vec<Type> = elems
+            .iter()
+            .zip(elem_tys)
+            .map(|(e, t)| numeric_literal_repr(e).unwrap_or_else(|| self.resolve(t)))
+            .collect();
+        let (first, rest) = reps.split_first()?;
+        let snap = self.solver.snapshot();
+        let unifiable = rest.iter().all(|t| self.solver.unify(first, t).is_ok());
+        self.solver.rollback(snap);
+        if unifiable {
+            None
+        } else {
+            Some(elem_tys.iter().map(|t| self.resolve(t)).collect())
+        }
+    }
+
     fn report_nullable_use(&mut self, span: prepoly_lexer::Span) {
         self.errors.push(TypeError {
             message: "nullable value must be checked for null before use".to_string(),
@@ -3635,12 +3726,19 @@ impl<'a> Checker<'a> {
                 }
             }
             Pattern::Array(pats, _) => {
-                let elem = match self.resolve(ty) {
-                    Type::Array(inner, _) | Type::Slice(inner) => *inner,
-                    _ => self.fresh_unknown(),
-                };
-                pats.iter()
-                    .for_each(|p| self.bind_pattern(p, &elem, scopes));
+                if let Type::Tuple(elems) = self.resolve(ty) {
+                    // Tuple destructuring binds each position to its element type.
+                    for (p, ety) in pats.iter().zip(elems) {
+                        self.bind_pattern(p, &ety, scopes);
+                    }
+                } else {
+                    let elem = match self.resolve(ty) {
+                        Type::Array(inner, _) | Type::Slice(inner) => *inner,
+                        _ => self.fresh_unknown(),
+                    };
+                    pats.iter()
+                        .for_each(|p| self.bind_pattern(p, &elem, scopes));
+                }
             }
             Pattern::Wildcard(_) | Pattern::Literal(_, _) => {}
         }
@@ -3697,6 +3795,24 @@ impl<'a> Checker<'a> {
                 }
             }
             Pattern::Array(pats, _) => {
+                // A tuple pattern checks each position against its element type and
+                // must have exactly the tuple's arity.
+                if let Type::Tuple(elems) = self.resolve(scrutinee) {
+                    if pats.len() != elems.len() {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "tuple pattern has length {}, but the tuple has {} elements",
+                                pats.len(),
+                                elems.len()
+                            ),
+                            span: pat.span(),
+                        });
+                    }
+                    for (pat, ety) in pats.iter().zip(&elems) {
+                        self.check_pattern_against(ety, pat);
+                    }
+                    return;
+                }
                 let elem = match self.resolve(scrutinee) {
                     Type::Array(inner, len) => {
                         if pats.len() != len {
@@ -4324,6 +4440,25 @@ fn is_concrete_primitive(ty: &Type) -> bool {
 /// Whether a (resolved) type is fully concrete: it contains no inference
 /// variable, `Never`, or `Self` placeholder, so it can name a monomorphized
 /// instance (PLAN.md R5 stage 5).
+/// The value of a constant non-negative integer index (a tuple position), or
+/// `None` if the index is not a literal.
+fn const_index(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Int(n, _) if *n >= 0 => Some(*n),
+        _ => None,
+    }
+}
+
+/// The default concrete type of a numeric literal element, for classifying a
+/// bracket literal as array vs tuple (an int literal is `int32`, a float `float64`).
+fn numeric_literal_repr(e: &Expr) -> Option<Type> {
+    match e {
+        Expr::Int(_, _) => Some(Type::Int(IntKind::I32)),
+        Expr::Float(_, _) => Some(Type::Float(FloatKind::F64)),
+        _ => None,
+    }
+}
+
 fn is_concrete_type(ty: &Type) -> bool {
     match ty {
         Type::Unknown(_) | Type::Never | Type::SelfType => false,
@@ -4332,6 +4467,7 @@ fn is_concrete_type(ty: &Type) -> bool {
         | Type::Nullable(inner)
         | Type::ConstOf(inner) => is_concrete_type(inner),
         Type::Fun(params, ret) => params.iter().all(is_concrete_type) && is_concrete_type(ret),
+        Type::Tuple(elems) => elems.iter().all(is_concrete_type),
         _ => true,
     }
 }
@@ -4512,6 +4648,7 @@ fn visit_unknowns(ty: &Type, record: &mut impl FnMut(u32)) {
                 .for_each(|param| visit_unknowns(param, record));
             visit_unknowns(ret, record);
         }
+        Type::Tuple(elems) => elems.iter().for_each(|t| visit_unknowns(t, record)),
         Type::Bool
         | Type::Int(_)
         | Type::Float(_)

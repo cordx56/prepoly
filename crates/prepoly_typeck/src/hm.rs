@@ -126,6 +126,35 @@ impl<'p> Hm<'p> {
         ty.unwrap_or_else(|| self.solver.fresh(InferenceVarKind::Source))
     }
 
+    /// If a bracket literal's elements describe a tuple, return their types; else
+    /// `None` (an array). A rolled-back probe decides: if every element's type can
+    /// be unified to one shared type the literal is an array, and if not the
+    /// differing types make it a fixed-length tuple. The probe uses each element's
+    /// *representative* type -- a numeric literal stands in as its default kind
+    /// rather than its still-open inference variable, so `[1, "s"]` is not misread
+    /// as unifiable (an unconstrained variable unifies with anything). A tuple
+    /// returns the elements' actual types (literals keep their open variable, so an
+    /// annotation can still fix the integer width).
+    fn tuple_of_elements(&mut self, elems: &[Expr], elem_tys: &[Type]) -> Option<Vec<Type>> {
+        if elems.len() < 2 {
+            return None;
+        }
+        let reps: Vec<Type> = elems
+            .iter()
+            .zip(elem_tys)
+            .map(|(e, t)| numeric_literal_repr(e).unwrap_or_else(|| self.solver.resolve(t)))
+            .collect();
+        let (first, rest) = reps.split_first()?;
+        let snap = self.solver.snapshot();
+        let unifiable = rest.iter().all(|t| self.solver.unify(first, t).is_ok());
+        self.solver.rollback(snap);
+        if unifiable {
+            None
+        } else {
+            Some(elem_tys.iter().map(|t| self.solver.resolve(t)).collect())
+        }
+    }
+
     fn check_function(&mut self, symbol: &str) {
         let f = &self.program.functions[symbol];
         let module = f.module.clone();
@@ -549,13 +578,22 @@ impl<'p> Hm<'p> {
                 self.scopes.pop();
                 Type::Fun(param_tys, Box::new(cret))
             }
-            Expr::Array(elems, _) => {
-                let elem = self.solver.fresh(InferenceVarKind::EmptyArrayElem);
-                for e in elems {
-                    let t = self.infer_expr(e);
-                    self.unify(&elem, &t, e.span());
+            Expr::Array(elems, span) => {
+                let elem_tys: Vec<Type> = elems.iter().map(|e| self.infer_expr(e)).collect();
+                // A bracket literal whose elements are all concrete and not all the
+                // same type is a fixed-length tuple; otherwise it is an array whose
+                // single element type is the unification of the elements (the empty
+                // and homogeneous cases, and any element still being inferred).
+                if let Some(tuple) = self.tuple_of_elements(elems, &elem_tys) {
+                    Type::Tuple(tuple)
+                } else {
+                    let elem = self.solver.fresh(InferenceVarKind::EmptyArrayElem);
+                    for (t, e) in elem_tys.iter().zip(elems) {
+                        self.unify(&elem, t, e.span());
+                    }
+                    let _ = span;
+                    Type::Slice(Box::new(elem))
                 }
-                Type::Slice(Box::new(elem))
             }
             Expr::If(cond, then, els, span) => {
                 // A condition may be a bool or a nullable (truthy = non-null), so
@@ -617,22 +655,48 @@ impl<'p> Hm<'p> {
             // Indexing a concrete scalar (not a collection) is an error.
             Expr::Index(base, idx, span) => {
                 let bt = self.infer_expr(base);
-                let it = self.infer_expr(idx);
-                self.unify(&it, &Type::Int(prepoly_hir::IntKind::I64), *span);
                 let resolved = self.solver.resolve(&bt);
-                match array_elem(&resolved) {
-                    Some(elem) => elem,
-                    None => {
-                        if matches!(
-                            resolved,
-                            Type::Int(_) | Type::Float(_) | Type::Bool | Type::Void
-                        ) {
+                // A tuple is indexed by a constant literal, yielding the element
+                // type at that position (the only way to read a heterogeneous tuple).
+                if let Type::Tuple(elems) = &resolved {
+                    let _ = self.infer_expr(idx);
+                    match const_index(idx) {
+                        Some(k) if (k as usize) < elems.len() => elems[k as usize].clone(),
+                        Some(k) => {
                             self.error(
-                                format!("`{}` cannot be indexed", resolved.display()),
+                                format!(
+                                    "tuple index {k} out of bounds for `{}`",
+                                    resolved.display()
+                                ),
                                 *span,
                             );
+                            self.solver.fresh(InferenceVarKind::Source)
                         }
-                        self.solver.fresh(InferenceVarKind::Source)
+                        None => {
+                            self.error(
+                                "a tuple can only be indexed by a constant integer".into(),
+                                *span,
+                            );
+                            self.solver.fresh(InferenceVarKind::Source)
+                        }
+                    }
+                } else {
+                    let it = self.infer_expr(idx);
+                    self.unify(&it, &Type::Int(prepoly_hir::IntKind::I64), *span);
+                    match array_elem(&resolved) {
+                        Some(elem) => elem,
+                        None => {
+                            if matches!(
+                                resolved,
+                                Type::Int(_) | Type::Float(_) | Type::Bool | Type::Void
+                            ) {
+                                self.error(
+                                    format!("`{}` cannot be indexed", resolved.display()),
+                                    *span,
+                                );
+                            }
+                            self.solver.fresh(InferenceVarKind::Source)
+                        }
                     }
                 }
             }
@@ -1150,10 +1214,19 @@ impl<'p> Hm<'p> {
                 }
             }
             Pattern::Array(pats, _) => {
-                let elem = array_elem(&self.solver.resolve(scrut))
-                    .unwrap_or_else(|| self.solver.fresh(InferenceVarKind::Source));
-                for p in pats {
-                    self.bind_pattern(p, &elem);
+                let resolved = self.solver.resolve(scrut);
+                if let Type::Tuple(elems) = &resolved {
+                    // Destructuring a tuple binds each position to its own element
+                    // type (`let [i, s] = [1, "s"]`).
+                    for (p, ety) in pats.iter().zip(elems) {
+                        self.bind_pattern(p, ety);
+                    }
+                } else {
+                    let elem = array_elem(&resolved)
+                        .unwrap_or_else(|| self.solver.fresh(InferenceVarKind::Source));
+                    for p in pats {
+                        self.bind_pattern(p, &elem);
+                    }
                 }
             }
         }
@@ -1263,6 +1336,28 @@ fn strip_nullable(ty: Type) -> Type {
 fn array_elem(ty: &Type) -> Option<Type> {
     match ty {
         Type::Slice(e) | Type::Array(e, _) => Some((**e).clone()),
+        _ => None,
+    }
+}
+
+/// The compile-time value of a constant non-negative integer index expression
+/// (a tuple position), or `None` if it is not a literal. A tuple's element type
+/// at a position is only known when the index is a constant.
+fn const_index(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Int(n, _) if *n >= 0 => Some(*n),
+        _ => None,
+    }
+}
+
+/// The default concrete type of a numeric literal element, used only to classify
+/// a bracket literal as an array or a tuple: an integer literal is `int32` and a
+/// float literal `float64` (its still-open variable would otherwise unify with
+/// any element). `None` for a non-literal element (its inferred type is used).
+fn numeric_literal_repr(e: &Expr) -> Option<Type> {
+    match e {
+        Expr::Int(_, _) => Some(Type::Int(prepoly_hir::IntKind::I32)),
+        Expr::Float(_, _) => Some(Type::Float(prepoly_hir::FloatKind::F64)),
         _ => None,
     }
 }

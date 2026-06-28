@@ -45,6 +45,9 @@ fn rc_managed(ty: &Type) -> bool {
             | Type::Slice(..)
             | Type::Array(..)
             | Type::Fun(..)
+            // A tuple is a fixed heterogeneous heap aggregate (a pointer), tracked
+            // and reclaimed like a record.
+            | Type::Tuple(..)
             // A nullable is a heap cell (a pointer, null = null), so it is
             // reference-counted: retained when aliased, released when dropped. A cell
             // of a managed value also owns that value (its destructor releases it).
@@ -390,6 +393,10 @@ pub trait Codegen {
 
     /// Build a fixed array of element type `elem_ty` from its elements.
     fn make_array(&mut self, elem_ty: &Type, elems: &[Self::Value]) -> Self::Value;
+    /// Build a fixed-length tuple from its element values (each with its own type).
+    fn make_tuple(&mut self, elem_types: &[Type], elems: &[Self::Value]) -> Self::Value;
+    /// Read element `index` of `tup` (a tuple of `elem_types`) at a static position.
+    fn tuple_field(&mut self, tup: Self::Value, elem_types: &[Type], index: usize) -> Self::Value;
     /// Read element `idx` of array `arr` (of type `arr_ty`).
     fn load_index(&mut self, arr: Self::Value, arr_ty: &Type, idx: Self::Value) -> Self::Value;
     /// Store `v` into element `idx` of array `arr` (of type `arr_ty`).
@@ -770,20 +777,37 @@ pub trait Codegen {
                 }
                 clo
             }
-            // A fixed array literal: `dest_ty` is the slice type.
+            // A bracket literal: an array when `dest_ty` is a slice/array, a tuple
+            // when it is a `Tuple` (heterogeneous elements, each at its own type).
             Rvalue::Array(es) => {
-                let elem_ty = element_type(dest_ty);
-                let mut vals: Vec<Self::Value> = Vec::with_capacity(es.len());
-                for op in es {
-                    vals.push(self.codegen_operand(program, f, op, &elem_ty));
-                }
-                let arr = self.make_array(&elem_ty, &vals);
-                if rc_managed(&elem_ty) {
-                    for v in &vals {
-                        self.retain(*v);
+                if let Type::Tuple(elem_types) = dest_ty {
+                    let mut vals: Vec<Self::Value> = Vec::with_capacity(es.len());
+                    for (op, ety) in es.iter().zip(elem_types) {
+                        vals.push(self.codegen_operand(program, f, op, ety));
                     }
+                    let tup = self.make_tuple(elem_types, &vals);
+                    // The tuple references each managed element (its destructor
+                    // releases them), so a managed element's count must rise.
+                    for (v, ety) in vals.iter().zip(elem_types) {
+                        if rc_managed(ety) {
+                            self.retain(*v);
+                        }
+                    }
+                    tup
+                } else {
+                    let elem_ty = element_type(dest_ty);
+                    let mut vals: Vec<Self::Value> = Vec::with_capacity(es.len());
+                    for op in es {
+                        vals.push(self.codegen_operand(program, f, op, &elem_ty));
+                    }
+                    let arr = self.make_array(&elem_ty, &vals);
+                    if rc_managed(&elem_ty) {
+                        for v in &vals {
+                            self.retain(*v);
+                        }
+                    }
+                    arr
                 }
-                arr
             }
             // Read an aggregate field or an array element. A narrowed nullable base
             // (`a: T?` proven non-null by a guard) is unwrapped to its inner value.
@@ -798,8 +822,16 @@ pub trait Codegen {
                     let arr = self.load_local(place.local);
                     let raw_ty = f.local_type(place.local).clone();
                     let (arr, arr_ty) = self.unwrap_narrowed(arr, &raw_ty);
-                    let iv = self.codegen_operand(program, f, idx, &index_type(idx, f));
-                    self.load_index(arr, &arr_ty, iv)
+                    if let Type::Tuple(elem_types) = &arr_ty {
+                        // A tuple is read at a constant position (the type checker
+                        // requires a constant index).
+                        let k = crate::mono::const_operand_index(idx)
+                            .expect("tuple index must be a constant (checked by typeck)");
+                        self.tuple_field(arr, elem_types, k)
+                    } else {
+                        let iv = self.codegen_operand(program, f, idx, &index_type(idx, f));
+                        self.load_index(arr, &arr_ty, iv)
+                    }
                 }
                 _ => self.unit(),
             },

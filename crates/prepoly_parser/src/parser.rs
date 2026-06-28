@@ -1080,7 +1080,20 @@ impl Parser {
 
     fn parse_base_type(&mut self) -> PResult<TypeExpr> {
         let span = self.span();
-        if self.at_p(TokenKind::LParen) {
+        if self.at_p(TokenKind::LBracket) {
+            // Tuple type: `[T0, T1, ...]`. (Array types are the postfix `T[]`/`T[n]`
+            // handled in `parse_type`; a leading `[` is unambiguously a tuple.)
+            self.open(TokenKind::LBracket, "'['")?;
+            let mut elems = Vec::new();
+            while !self.at_p(TokenKind::RBracket) {
+                elems.push(self.parse_type()?);
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            let hi = self.close(TokenKind::RBracket, "']'")?;
+            Ok(TypeExpr::Tuple(elems, span.merge(hi)))
+        } else if self.at_p(TokenKind::LParen) {
             // Function type: (T, ...) -> U
             self.open(TokenKind::LParen, "'('")?;
             let mut params = Vec::new();

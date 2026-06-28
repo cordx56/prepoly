@@ -324,6 +324,11 @@ fn refs_type(ty: &TypeExpr, out: &mut HashSet<String>) {
             }
             refs_type(ret, out);
         }
+        TypeExpr::Tuple(elems, _) => {
+            for e in elems {
+                refs_type(e, out);
+            }
+        }
     }
 }
 

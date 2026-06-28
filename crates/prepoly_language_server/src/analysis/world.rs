@@ -28,6 +28,17 @@ const STDLIB: &[(&str, &str)] = &[
     ("assert", include_str!("../../../../std/assert.pp")),
 ];
 
+/// Names of the embedded prelude modules (`io`, `array`, ...), which are
+/// importable without a file on disk. Used by import completion.
+pub fn prelude_module_names() -> impl Iterator<Item = &'static str> {
+    STDLIB.iter().map(|(name, _)| *name)
+}
+
+/// The source of an embedded prelude module, for listing its public names.
+pub fn prelude_source(name: &str) -> Option<&'static str> {
+    STDLIB.iter().find(|(n, _)| *n == name).map(|(_, src)| *src)
+}
+
 /// Each loaded source with the disjoint byte-offset base its spans were parsed
 /// at, so a global span's offset locates its file (ported from the driver). A
 /// one-byte gap between files keeps an end-of-file span from colliding with the

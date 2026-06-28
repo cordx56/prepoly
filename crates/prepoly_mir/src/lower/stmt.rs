@@ -42,6 +42,13 @@ pub(crate) fn resolve_simple_type(te: &TypeExpr) -> Option<Type> {
         // infers the local's type from its initializer/uses. (`infer`/`infer[]`
         // likewise resolve to no hint via `primitive_type`.)
         TypeExpr::Fallible(_, _) => None,
+        TypeExpr::Tuple(elems, _) => {
+            let ts = elems
+                .iter()
+                .map(resolve_simple_type)
+                .collect::<Option<Vec<_>>>()?;
+            Some(Type::Tuple(ts))
+        }
     }
 }
 

@@ -132,6 +132,7 @@ impl Solver {
                 params.iter().for_each(|p| self.collect_free(p, out));
                 self.collect_free(&ret, out);
             }
+            Type::Tuple(elems) => elems.iter().for_each(|t| self.collect_free(t, out)),
             Type::Record(n) | Type::Sum(n) => {
                 n.substitution
                     .iter()
@@ -222,6 +223,7 @@ fn apply_var_map(ty: &Type, map: &HashMap<u32, Type>) -> Type {
             params.iter().map(|p| apply_var_map(p, map)).collect(),
             Box::new(apply_var_map(ret, map)),
         ),
+        Type::Tuple(elems) => Type::Tuple(elems.iter().map(|t| apply_var_map(t, map)).collect()),
         Type::Record(n) => Type::Record(map_nominal(n, map)),
         Type::Sum(n) => Type::Sum(map_nominal(n, map)),
         other => other.clone(),

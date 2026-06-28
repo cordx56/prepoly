@@ -7,8 +7,8 @@ use prepoly_lexer::Span;
 
 use crate::analysis::{DocAnalyzer, FullAnalysis};
 use crate::document::Document;
-use crate::features::{definition, hover, semantic_tokens};
-use tower_lsp_server::ls_types::{HoverContents, Position};
+use crate::features::{completion, definition, hover, semantic_tokens};
+use tower_lsp_server::ls_types::{CompletionItem, HoverContents, Position};
 
 fn path() -> PathBuf {
     PathBuf::from("/tmp/prepoly_lsp_test/main.pp")
@@ -224,4 +224,70 @@ fn semantic_tokens_classify_keyword() {
     assert!(!data.is_empty());
     // The first token is `fun`, the keyword type (index 8 in the legend).
     assert_eq!(data[0].token_type, 8);
+}
+
+fn labels(items: &[CompletionItem]) -> Vec<String> {
+    items.iter().map(|i| i.label.clone()).collect()
+}
+
+/// Code completion offers the document's own types and functions, the prelude
+/// functions, and the built-in type names.
+#[test]
+fn completion_offers_types_and_functions() {
+    let src = "type Point = {\n    x: int32\n}\n\nfun helper() {\n}\n\nfun main() {\n    h\n}\n";
+    let full = full_analysis(src);
+    let doc = Document::new(src.to_string(), 1);
+    let off = src.rfind("h\n").unwrap() + 1;
+    let items = completion::completion(&doc, Some(&full), &path(), doc.position_at(off));
+    let labels = labels(&items);
+    assert!(
+        labels.contains(&"Point".to_string()),
+        "own type: {labels:?}"
+    );
+    assert!(labels.contains(&"helper".to_string()), "own fn: {labels:?}");
+    assert!(
+        labels.contains(&"println".to_string()),
+        "prelude fn: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"int32".to_string()),
+        "builtin type: {labels:?}"
+    );
+}
+
+/// In `import |`, the prelude module names and the `std` namespace are offered.
+/// Works without analysis, since a bare `import` line does not yet parse.
+#[test]
+fn completion_offers_import_modules() {
+    let src = "import ";
+    let doc = Document::new(src.to_string(), 1);
+    let items = completion::completion(&doc, None, &path(), doc.position_at(src.len()));
+    let labels = labels(&items);
+    assert!(
+        labels.contains(&"math".to_string()),
+        "prelude module: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"io".to_string()),
+        "prelude module: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"std".to_string()),
+        "std namespace: {labels:?}"
+    );
+}
+
+/// In `import math.{ |`, the public names of the `math` module are offered.
+#[test]
+fn completion_offers_imported_names() {
+    let src = "import math.{ ";
+    let doc = Document::new(src.to_string(), 1);
+    let items = completion::completion(&doc, None, &path(), doc.position_at(src.len()));
+    let labels = labels(&items);
+    assert!(
+        labels
+            .iter()
+            .any(|l| l == "sqrt" || l == "abs" || l == "pow"),
+        "math's public functions should be offered: {labels:?}"
+    );
 }

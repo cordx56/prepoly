@@ -307,6 +307,8 @@ pub enum TypeExpr {
     /// `T!` fallible: the built-in `Result` with success payload `T` and an
     /// inferred error payload (`Result.Ok { value: T } | Result.Err`).
     Fallible(Box<TypeExpr>, Span),
+    /// `[T0, T1, ...]` fixed-length heterogeneous tuple.
+    Tuple(Vec<TypeExpr>, Span),
 }
 
 impl TypeExpr {
@@ -316,7 +318,8 @@ impl TypeExpr {
             | TypeExpr::Array(_, _, s)
             | TypeExpr::Fun(_, _, s)
             | TypeExpr::Nullable(_, s)
-            | TypeExpr::Fallible(_, s) => *s,
+            | TypeExpr::Fallible(_, s)
+            | TypeExpr::Tuple(_, s) => *s,
         }
     }
 }

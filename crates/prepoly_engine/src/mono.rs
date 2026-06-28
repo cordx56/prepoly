@@ -187,6 +187,16 @@ pub(crate) fn unwrap_nullable(ty: &Type) -> &Type {
     }
 }
 
+/// The constant non-negative index carried by a tuple-position projection operand
+/// (`t[0]`), or `None` when the index is not an integer constant. A tuple element
+/// type is only known at a statically-known position.
+pub(crate) fn const_operand_index(op: &Operand) -> Option<usize> {
+    match op {
+        Operand::Const(prepoly_mir::Literal::Int(n)) if *n >= 0 => Some(*n as usize),
+        _ => None,
+    }
+}
+
 /// The synthetic `File` record type (DESIGN.md 9.2). `File` is a builtin handle,
 /// not a user-declared type, so it carries no registered id -- matching the type
 /// checker, whose `type_by_name("File")` falls back to the same synthetic record.
@@ -263,6 +273,8 @@ fn is_printable(ty: &Type) -> bool {
         Type::Nullable(inner) => is_printable(inner),
         // An array/slice renders as `[e0, e1, ...]` when its elements are printable.
         Type::Slice(elem) | Type::Array(elem, _) => is_printable(elem),
+        // A tuple renders as `[e0, e1, ...]` when every element is printable.
+        Type::Tuple(elems) => elems.iter().all(is_printable),
         // Records and sums render through a generated per-type formatter
         // (`TypeName { field: value }` / `TypeName.Variant { field: value }`).
         Type::Record(_) | Type::Sum(_) => true,
@@ -1106,8 +1118,9 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                         None => Ok(None),
                     }
                 }
-                // Array/slice element read: the element type is the sequence's.
-                [Projection::Index(_)] => {
+                // Array/slice element read: the element type is the sequence's. A
+                // tuple is read at a constant position, yielding that element's type.
+                [Projection::Index(idx)] => {
                     match local_types[place.local.index()]
                         .as_ref()
                         .map(unwrap_nullable)
@@ -1115,6 +1128,11 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                         Some(Type::Slice(elem) | Type::Array(elem, _)) => {
                             Ok(Some((**elem).clone()))
                         }
+                        Some(Type::Tuple(elems)) => match const_operand_index(idx) {
+                            Some(k) if k < elems.len() => Ok(Some(elems[k].clone())),
+                            Some(k) => Err(format!("tuple index {k} out of bounds")),
+                            None => Err("a tuple must be indexed by a constant integer".into()),
+                        },
                         Some(other) => Err(format!("indexing non-array `{}`", other.display())),
                         None => Ok(None),
                     }
@@ -1472,26 +1490,24 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         es: &[Operand],
         local_types: &[Option<Type>],
     ) -> Result<Option<Type>, String> {
-        let Some(first) = es.first() else {
+        if es.is_empty() {
             return Err("empty array literal has no element type on the typed backend".into());
-        };
-        let Some(elem) = self.operand_type(first, local_types)? else {
-            return Ok(None);
-        };
-        for e in &es[1..] {
+        }
+        let mut tys = Vec::with_capacity(es.len());
+        for e in es {
             match self.operand_type(e, local_types)? {
-                Some(t) if t == elem => {}
-                Some(t) => {
-                    return Err(format!(
-                        "array elements differ: {} vs {}",
-                        elem.display(),
-                        t.display()
-                    ));
-                }
+                Some(t) => tys.push(t),
                 None => return Ok(None),
             }
         }
-        Ok(Some(Type::Slice(Box::new(elem))))
+        // A bracket literal whose elements all share a type is an array; one with
+        // differing element types is a fixed-length tuple (matches the type
+        // checker's classification of `[1, "s"]`).
+        if tys.windows(2).all(|w| w[0] == w[1]) {
+            Ok(Some(Type::Slice(Box::new(tys.into_iter().next().unwrap()))))
+        } else {
+            Ok(Some(Type::Tuple(tys)))
+        }
     }
 
     /// The closure's parameter types from its own annotations, when every parameter
@@ -1919,6 +1935,8 @@ fn is_supported_rec(ty: &Type, visiting: &mut HashSet<i32>) -> bool {
             ok
         }
         Type::Slice(elem) | Type::Array(elem, _) => is_supported_rec(elem, visiting),
+        // A tuple is a fixed heterogeneous aggregate; supported when every element is.
+        Type::Tuple(elems) => elems.iter().all(|t| is_supported_rec(t, visiting)),
         // A closure value (a typed environment + function pointer).
         Type::Fun(params, ret) => {
             params.iter().all(|p| is_supported_rec(p, visiting)) && is_supported_rec(ret, visiting)

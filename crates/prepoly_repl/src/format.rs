@@ -45,6 +45,23 @@ pub fn format_value(program: &Program, v: &Value, ty: &Type) -> String {
                 .collect();
             format!("[{}]", rendered.join(", "))
         }
+        // A tuple holds its (heterogeneous) elements in the array value; each is
+        // rendered with its own element type.
+        Type::Tuple(elems) => {
+            let Value::Array(items) = v else {
+                return "[]".to_string();
+            };
+            let items = items.borrow();
+            let rendered: Vec<String> = elems
+                .iter()
+                .enumerate()
+                .map(|(i, ety)| {
+                    let e = items.get(i).cloned().unwrap_or(Value::Void);
+                    format_value(program, &e, ety)
+                })
+                .collect();
+            format!("[{}]", rendered.join(", "))
+        }
         Type::Record(n) => match v {
             Value::Record(fields) => {
                 let layout = record_field_layout(program, n);
