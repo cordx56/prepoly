@@ -45,6 +45,30 @@ impl ExhaustiveVisitor<'_> {
         None
     }
 
+    /// Whether a record field sub-pattern always matches. Shorthand `{ name }`
+    /// (no sub-pattern) binds the field and is irrefutable.
+    fn field_irrefutable(&self, f: &FieldPat) -> bool {
+        match &f.pat {
+            None => true,
+            Some(p) => self.pattern_irrefutable(p),
+        }
+    }
+
+    /// Whether a pattern matches every value of its type, so an arm built from it
+    /// exhausts what it is matched against. A literal, a fixed-length array
+    /// destructure (refutable on length), a nested variant test, or any compound
+    /// containing one is refutable.
+    fn pattern_irrefutable(&self, p: &Pattern) -> bool {
+        match p {
+            Pattern::Wildcard(_) => true,
+            // A bare name is an irrefutable binding unless it names a variant, in
+            // which case it is a refutable unit-variant test on the field.
+            Pattern::Binding(n, _) => self.owning_sum(n).is_none(),
+            Pattern::Record(_, fields, _) => fields.iter().all(|f| self.field_irrefutable(f)),
+            Pattern::Literal(_, _) | Pattern::Array(_, _) => false,
+        }
+    }
+
     fn check_match(&mut self, arms: &[MatchArm], span: Span) {
         let mut owner = None;
         for a in arms {
@@ -69,8 +93,15 @@ impl ExhaustiveVisitor<'_> {
         for a in arms {
             match &a.pattern {
                 Pattern::Wildcard(_) => catch_all = true,
-                Pattern::Record(n, _, _) => {
-                    covered.insert(n.clone());
+                Pattern::Record(n, fields, _) => {
+                    // A variant pattern covers the variant only when every field
+                    // sub-pattern is irrefutable; a refutable one (e.g. a literal
+                    // `Both { left: 1, .. }`) matches only some of the variant's
+                    // values, so the rest must still be handled by another arm or a
+                    // catch-all -- otherwise an unmatched value reaches `unreachable`.
+                    if fields.iter().all(|f| self.field_irrefutable(f)) {
+                        covered.insert(n.clone());
+                    }
                 }
                 Pattern::Binding(n, _) => {
                     if all.contains(n) {

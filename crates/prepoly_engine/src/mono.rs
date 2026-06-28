@@ -299,6 +299,14 @@ impl<'m> MonoProgram<'m> {
     }
 }
 
+/// Marks a compiler-synthesized instance symbol (a module init, method, static,
+/// or closure) so it occupies a namespace disjoint from user function symbols.
+/// `$` cannot appear in a source identifier, so a user `fun init0` (symbol
+/// `init0`) never collides with the first module init (`$init0`) in the instance
+/// map, and the back end maps the two to distinct LLVM names. Must match the
+/// prefix `prepoly_jit_llvm`'s `mangle_fn` recognizes.
+pub const SYNTH_SIGIL: char = '$';
+
 /// The canonical instance symbol for `base` specialized to `type_args`. Distinct
 /// type tuples yield distinct strings, so instances never collide.
 pub fn instance_symbol(base: &str, type_args: &[Type]) -> String {
@@ -319,12 +327,12 @@ pub fn instance_symbol(base: &str, type_args: &[Type]) -> String {
 /// distinct methods apart. Derivable from types alone (no HIR program), so the
 /// monomorphizer and the back end agree.
 pub fn method_symbol(method: &str, type_args: &[Type]) -> String {
-    instance_symbol(&format!("m_{method}"), type_args)
+    instance_symbol(&format!("{SYNTH_SIGIL}m_{method}"), type_args)
 }
 
 /// Instance symbol of a static call `Type.method(args)`.
 pub fn static_symbol(ty: &str, method: &str, type_args: &[Type]) -> String {
-    instance_symbol(&format!("s_{ty}_{method}"), type_args)
+    instance_symbol(&format!("{SYNTH_SIGIL}s_{ty}_{method}"), type_args)
 }
 
 /// Instance symbol of a closure: distinct per closure id, captured types, and
@@ -333,7 +341,7 @@ pub fn static_symbol(ty: &str, method: &str, type_args: &[Type]) -> String {
 pub fn closure_symbol(id: ClosureId, capture_types: &[Type], param_types: &[Type]) -> String {
     let mut args = capture_types.to_vec();
     args.extend_from_slice(param_types);
-    instance_symbol(&format!("clo{}", id.index()), &args)
+    instance_symbol(&format!("{SYNTH_SIGIL}clo{}", id.index()), &args)
 }
 
 /// Monomorphize a MIR program against its HIR program. Returns one concrete
@@ -350,7 +358,7 @@ pub fn monomorphize<'m>(mir: &'m MirProgram, program: &Program) -> Result<MonoPr
     // is cleared after each root so a skipped root leaves no stale recursion mark.
     let mut init_symbols = Vec::with_capacity(mir.inits.len());
     for (i, init) in mir.inits.iter().enumerate() {
-        let sym = format!("init{i}");
+        let sym = format!("{SYNTH_SIGIL}init{i}");
         let ok = mono
             .type_and_store(
                 sym.clone(),

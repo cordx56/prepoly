@@ -166,14 +166,28 @@ impl<'a, 'p> FnLower<'a, 'p> {
     }
 
     /// Create a freshly named local, copy `op` into it, and bind `name` to it.
-    /// Used for `let` and pattern bindings so a bound name gets its own slot
-    /// (writes to the binding never alias the source value).
+    /// Used for `let`, `for`, and pattern bindings so a bound name gets its own
+    /// slot (writes to the binding never alias the source value).
+    ///
+    /// A captured-and-mutated binding (`is_cell`) is heap-promoted to a
+    /// one-element cell array shared with the closures that capture it, with the
+    /// value stored at element 0 (DESIGN.md 8.4). Routing every binder through
+    /// here applies the wrap uniformly: a `for` variable or a destructured field
+    /// that a closure captures and mutates is promoted exactly like a `let`,
+    /// instead of being stored as a scalar that read/write/capture sites then
+    /// wrongly index as an array.
     pub(crate) fn bind_value(&mut self, name: &str, op: crate::value::Operand) {
-        let local = self.b.fresh_local(Some(name.to_string()));
-        self.b.push(crate::cfg::MirStmt::Assign(
-            local,
-            crate::value::Rvalue::Use(op),
-        ));
+        let local = if self.is_cell(name) {
+            let cell = self.b.emit(crate::value::Rvalue::Array(vec![op]));
+            self.b.make_local(cell)
+        } else {
+            let local = self.b.fresh_local(Some(name.to_string()));
+            self.b.push(crate::cfg::MirStmt::Assign(
+                local,
+                crate::value::Rvalue::Use(op),
+            ));
+            local
+        };
         self.bind(name, local);
     }
 

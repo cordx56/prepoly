@@ -771,6 +771,41 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
             .unwrap();
     }
 
+    /// Branch to a panic block emitting `msg` when `bad` is true, then continue
+    /// in a fresh block. `pp_panic` does not return, so the panic block ends in
+    /// `unreachable`. Used to insert runtime safety checks (division by zero,
+    /// array bounds) ahead of an operation that is otherwise undefined.
+    fn trap_if(&mut self, bad: IntValue<'ctx>, msg: &str) {
+        let func = self.cur_fn.unwrap();
+        let cont = self.ctx.append_basic_block(func, "ok");
+        let trap = self.ctx.append_basic_block(func, "trap");
+        self.builder
+            .build_conditional_branch(bad, trap, cont)
+            .unwrap();
+        self.builder.position_at_end(trap);
+        self.gen_panic(msg);
+        self.builder.build_unreachable().unwrap();
+        self.builder.position_at_end(cont);
+    }
+
+    /// Trap before an array index `idx` that is out of `0..len`. The index is
+    /// widened to i64 and compared unsigned, so a negative index (a huge unsigned
+    /// value) is rejected as well. Mirrors the array length stored at offset 16.
+    fn bounds_check(&mut self, arr: BasicValueEnum<'ctx>, idx: IntValue<'ctx>) {
+        let i64t = self.abi.i64t();
+        let idx64 = if idx.get_type().get_bit_width() < 64 {
+            self.builder.build_int_z_extend(idx, i64t, "idx64").unwrap()
+        } else {
+            idx
+        };
+        let len = self.array_len(arr).into_int_value();
+        let oob = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::UGE, idx64, len, "oob")
+            .unwrap();
+        self.trap_if(oob, "array index out of bounds");
+    }
+
     /// Allocate a typed slot in the current function's entry block.
     fn typed_alloca(&self, ty: BasicTypeEnum<'ctx>, name: &str) -> PointerValue<'ctx> {
         let f = self.cur_fn.unwrap();
@@ -2329,6 +2364,17 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
         b: BasicValueEnum<'ctx>,
         operand_ty: &Type,
     ) -> BasicValueEnum<'ctx> {
+        // Integer division/remainder by zero is undefined in LLVM (it lowers to a
+        // raw sdiv/udiv), so trap on a zero divisor before emitting it. Float
+        // division by zero is defined (inf/nan), so it is left alone.
+        if matches!(operand_ty, Type::Int(_)) && matches!(op, BinOp::Div | BinOp::Rem) {
+            let y = b.into_int_value();
+            let is_zero = self
+                .builder
+                .build_int_compare(inkwell::IntPredicate::EQ, y, y.get_type().const_zero(), "dz")
+                .unwrap();
+            self.trap_if(is_zero, "division by zero");
+        }
         let b_ = &self.builder;
         match operand_ty {
             Type::Int(_) => {
@@ -2962,6 +3008,7 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
     ) -> BasicValueEnum<'ctx> {
         let elem_ty = elem_of(arr_ty);
         let llty = self.abi.typed_basic(&elem_ty);
+        self.bounds_check(arr, idx.into_int_value());
         let ep = self.elem_ptr(arr.into_pointer_value(), llty, idx.into_int_value());
         self.builder.build_load(llty, ep, "e").unwrap()
     }
@@ -2974,6 +3021,7 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
         v: BasicValueEnum<'ctx>,
     ) {
         let llty = self.abi.typed_basic(&elem_of(arr_ty));
+        self.bounds_check(arr, idx.into_int_value());
         let ep = self.elem_ptr(arr.into_pointer_value(), llty, idx.into_int_value());
         self.builder.build_store(ep, v).unwrap();
     }

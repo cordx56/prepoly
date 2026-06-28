@@ -5,7 +5,7 @@
 //! embedded prelude.
 //!
 //! Two execution back ends share the same front end. When the JIT back end is
-//! available, `prepoly run` compiles and runs through the LLVM JIT
+//! available, `prepoly <file>` compiles and runs through the LLVM JIT
 //! (`prepoly_jit_llvm`); otherwise the default runtime is the REPL interpreter
 //! (`prepoly_repl`). The JIT is available when the default `jit` feature is on AND
 //! the target is not wasm (LLVM cannot link for wasm), so a wasm build
@@ -23,8 +23,8 @@ use clap::{Parser, Subcommand};
 
 use prepoly_hir::{LoadedModule, Program, lower};
 use prepoly_lexer::{Span, line_col};
-use prepoly_parser::ast::{Module, Stmt, TopLevel};
-use prepoly_parser::{ParseError, parse};
+use prepoly_parser::ast::{ImportDecl, Module, Stmt, TopLevel};
+use prepoly_parser::{ParseError, parse, parse_with_base};
 
 /// Embedded standard-library modules (implicit prelude).
 const STDLIB: &[(&str, &str)] = &[
@@ -37,19 +37,24 @@ const STDLIB: &[(&str, &str)] = &[
 ];
 
 /// The Prepoly toolchain driver.
+///
+/// The program file is a bare positional argument (`prepoly file.pp`) rather than
+/// a `run` subcommand. A leading `check`/`repl` parses as the subcommand; any
+/// other first argument is taken as the file.
 #[derive(Parser)]
 #[command(name = "prepoly", version, about = "The Prepoly compiler and REPL")]
 struct Cli {
+    /// A program file to type-check and run with the default runtime (the LLVM JIT
+    /// when it is available -- the `jit` feature on a non-wasm target -- otherwise
+    /// the REPL interpreter). With neither a file nor a subcommand, the
+    /// interactive REPL starts instead.
+    file: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Compile and run a program with the default runtime (the LLVM JIT when it is
-    /// available -- the `jit` feature on a non-wasm target -- otherwise the REPL
-    /// interpreter).
-    Run { file: String },
     /// Type-check a program without running it.
     Check { file: String },
     /// Start the interactive REPL, or run a file through the REPL interpreter.
@@ -67,11 +72,15 @@ enum Mode {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        // No subcommand, or `repl` with no file: an interactive session.
-        None | Some(Command::Repl { file: None }) => repl_interactive(),
-        Some(Command::Repl { file: Some(file) }) => exit_code(drive(Mode::Repl, &file)),
-        Some(Command::Run { file }) => exit_code(drive(Mode::Run, &file)),
+        // A bare file argument is type-checked and run; with neither a file nor a
+        // subcommand, start an interactive REPL session.
+        None => match cli.file {
+            Some(file) => exit_code(drive(Mode::Run, &file)),
+            None => repl_interactive(),
+        },
         Some(Command::Check { file }) => exit_code(drive(Mode::Check, &file)),
+        Some(Command::Repl { file: None }) => repl_interactive(),
+        Some(Command::Repl { file: Some(file) }) => exit_code(drive(Mode::Repl, &file)),
     }
 }
 
@@ -298,30 +307,31 @@ fn drive(mode: Mode, file: &str) -> Result<(), u8> {
 /// Returns the checked program or the rendered diagnostics. Shared by file
 /// execution and the interactive REPL, so both report identical errors.
 fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec<String>> {
-    let mut sources: HashMap<String, (PathBuf, String)> = HashMap::new();
+    let mut sources = SourceMap::default();
     #[allow(unused_mut)]
     let mut modules: Vec<LoadedModule> = Vec::new();
 
     for (name, src) in STDLIB {
-        let ast = parse_module(src, &format!("<std/{name}>")).map_err(|m| vec![m])?;
+        let label = format!("<std/{name}>");
+        let base = sources.add(PathBuf::from(&label), (*src).to_string());
+        let ast = parse_module(src, &label, base).map_err(|m| vec![m])?;
         modules.push(LoadedModule {
             path: vec!["std".into(), (*name).into()],
             ast,
         });
     }
 
-    let main_ast = parse_module(main_src, main_label).map_err(|m| vec![m])?;
-    sources.insert(
-        "main".into(),
-        (PathBuf::from(main_label), main_src.to_string()),
-    );
+    let base = sources.add(PathBuf::from(main_label), main_src.to_string());
+    let mut main_ast = parse_module(main_src, main_label, base).map_err(|m| vec![m])?;
 
     let mut visited = HashSet::new();
     let mut stack = HashSet::new();
     let mut deps = Vec::new();
-    for imp in &main_ast.imports {
+    // The main file's imports resolve relative to its own directory (`root`), so
+    // its canonical base is empty.
+    for target in canonicalize_imports(&[], &mut main_ast.imports) {
         load_module(
-            &imp.path,
+            &target,
             root,
             &mut sources,
             &mut visited,
@@ -368,17 +378,50 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
     })
 }
 
+/// Resolve an import path, written relative to the importing file, to the
+/// imported module's canonical (root-relative) path. Imports are relative to the
+/// importing file's own directory `base` (a root-relative path), so `import b`
+/// from `modules/a.pp` refers to `modules/b.pp`. A `std.*` path or a bare prelude
+/// module (`io`, `array`, ...) is global rather than file-relative and returns
+/// `None`, so the caller leaves it untouched and does not load it from disk.
+fn relativize(base: &[String], imp_path: &[String]) -> Option<Vec<String>> {
+    if imp_path.first().map(|s| s == "std").unwrap_or(false) || is_prelude_path(imp_path) {
+        return None;
+    }
+    let mut canonical = base.to_vec();
+    canonical.extend_from_slice(imp_path);
+    Some(canonical)
+}
+
+/// Rewrite each import's path from importer-relative to canonical (root-relative)
+/// form in place -- so the loaded modules and downstream name resolution share one
+/// path per file -- and return the canonical paths of the file modules to load.
+/// `base` is the importing file's canonical directory.
+fn canonicalize_imports(base: &[String], imports: &mut [ImportDecl]) -> Vec<Vec<String>> {
+    let mut targets = Vec::new();
+    for imp in imports.iter_mut() {
+        if let Some(canonical) = relativize(base, &imp.path) {
+            imp.path = canonical.clone();
+            targets.push(canonical);
+        }
+    }
+    targets
+}
+
+/// Load the module at canonical (root-relative) `path` and, transitively, every
+/// module it imports. Each module's own imports are resolved relative to its
+/// directory (`path` without its last segment); `canonicalize_imports` rewrites
+/// them to canonical form before they are loaded, so a file has one identity no
+/// matter how it is reached. `std`/prelude paths never arrive here (they are
+/// filtered out as non-file modules during canonicalization).
 fn load_module(
     path: &[String],
     root: &Path,
-    sources: &mut HashMap<String, (PathBuf, String)>,
+    sources: &mut SourceMap,
     visited: &mut HashSet<String>,
     stack: &mut HashSet<String>,
     out: &mut Vec<LoadedModule>,
 ) -> Result<(), String> {
-    if path.first().map(|s| s == "std").unwrap_or(false) {
-        return Ok(());
-    }
     let key = path.join(".");
     // A module file whose name begins with `_` is private and cannot be imported
     // from another module (DESIGN.md 2.7).
@@ -401,24 +444,22 @@ fn load_module(
         Err(_) => {
             stack.remove(&key);
             visited.insert(key.clone());
-            // A single-segment path may name a prelude module (io, string, ...)
-            // injected as STDLIB rather than read from disk; tolerate those.
-            if is_prelude_path(path) {
-                return Ok(());
-            }
             return Err(format!(
                 "error: cannot find module `{key}` (expected `{}`)",
                 file.display()
             ));
         }
     };
-    let ast = parse_module(&src, &file.display().to_string())?;
-    for imp in &ast.imports {
-        load_module(&imp.path, root, sources, visited, stack, out)?;
+    let label = file.display().to_string();
+    let base = sources.add(file, src.clone());
+    let mut ast = parse_module(&src, &label, base)?;
+    // This module's imports resolve relative to its own directory.
+    let dir = &path[..path.len() - 1];
+    for target in canonicalize_imports(dir, &mut ast.imports) {
+        load_module(&target, root, sources, visited, stack, out)?;
     }
     stack.remove(&key);
     visited.insert(key.clone());
-    sources.insert(key, (file, src));
     out.push(LoadedModule {
         path: path.to_vec(),
         ast,
@@ -432,33 +473,66 @@ fn is_prelude_path(path: &[String]) -> bool {
     matches!(path, [single] if STDLIB.iter().any(|(name, _)| name == single))
 }
 
-fn parse_module(src: &str, name: &str) -> Result<Module, String> {
-    parse(src).map_err(|e: ParseError| {
-        let (line, col) = line_col(src, e.span.lo);
+/// Each loaded source file with the disjoint byte-offset base its spans were
+/// parsed at, so a span's offset locates its file. Every file is lexed from
+/// offset zero, but `parse_with_base` shifts each file's spans by its base, so a
+/// span is globally unique and a diagnostic lands in the right file and line --
+/// where the previous `span.hi <= src.len()` guess could pick the wrong file
+/// non-deterministically, and never located standard-library spans at all.
+#[derive(Default)]
+struct SourceMap {
+    next_base: usize,
+    entries: Vec<SourceEntry>,
+}
+
+struct SourceEntry {
+    base: usize,
+    path: PathBuf,
+    src: String,
+}
+
+impl SourceMap {
+    /// Reserve a disjoint base for `src`, record it, and return the base to parse
+    /// at. The one-byte gap keeps an end-of-file span from colliding with the
+    /// next file's first byte.
+    fn add(&mut self, path: PathBuf, src: String) -> usize {
+        let base = self.next_base;
+        self.next_base = base + src.len() + 1;
+        self.entries.push(SourceEntry { base, path, src });
+        base
+    }
+
+    /// Locate the file containing global byte offset `off`: its path, source, and
+    /// the file-local offset.
+    fn locate(&self, off: usize) -> Option<(&PathBuf, &str, usize)> {
+        self.entries.iter().find_map(|e| {
+            (off >= e.base && off <= e.base + e.src.len())
+                .then_some((&e.path, e.src.as_str(), off - e.base))
+        })
+    }
+}
+
+/// Parse `src` (labelled `name`) at byte-offset `base`, rendering a parse error
+/// with the file-local line/column.
+fn parse_module(src: &str, name: &str, base: usize) -> Result<Module, String> {
+    parse_with_base(src, base).map_err(|e: ParseError| {
+        let (line, col) = line_col(src, e.span.lo - base);
         format!("{name}:{line}:{col}: parse error: {}", e.message)
     })
 }
 
 /// Render each `(message, span)` diagnostic as `path:line:col: error: message`,
-/// locating the span in whichever source contains it (or a bare `error:` line when
-/// none does).
-fn render_errors(
-    errors: &[(String, Span)],
-    sources: &HashMap<String, (PathBuf, String)>,
-) -> Vec<String> {
+/// locating the span's file by its globally-unique offset (or a bare `error:`
+/// line when no source contains it).
+fn render_errors(errors: &[(String, Span)], sources: &SourceMap) -> Vec<String> {
     let mut out = Vec::with_capacity(errors.len());
     for (msg, span) in errors {
-        let mut located = false;
-        for (path, src) in sources.values() {
-            if span.hi <= src.len() {
-                let (line, col) = line_col(src, span.lo);
+        match sources.locate(span.lo) {
+            Some((path, src, off)) => {
+                let (line, col) = line_col(src, off);
                 out.push(format!("{}:{line}:{col}: error: {msg}", path.display()));
-                located = true;
-                break;
             }
-        }
-        if !located {
-            out.push(format!("error: {msg}"));
+            None => out.push(format!("error: {msg}")),
         }
     }
     out

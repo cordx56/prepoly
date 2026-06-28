@@ -552,6 +552,14 @@ fn lower_closure_body(
     for c in cell_captures {
         fl.cells.insert(c.clone());
     }
+    // Parameters are not cells (like `lower_callable`): a parameter has no binder
+    // that wraps it, and inside the closure its name shadows any same-named
+    // captured cell. Leaving a captured-and-mutated parameter in the set would
+    // bind it as a plain scalar that read/write/capture sites then index as a
+    // cell array.
+    for p in params {
+        fl.cells.remove(&p.name);
+    }
     let captures: Vec<_> = capture_names
         .iter()
         .map(|n| {

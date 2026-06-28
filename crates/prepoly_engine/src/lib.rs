@@ -29,7 +29,7 @@ pub use mir_infer::{
     infer_body,
 };
 pub use mono::{
-    MonoFunction, MonoProgram, binary_operand_type, boundary_record_type,
+    MonoFunction, MonoProgram, SYNTH_SIGIL, binary_operand_type, boundary_record_type,
     boundary_record_type_by_id, boundary_record_type_by_name, boundary_record_type_from_fields,
     check_instances, closure_symbol, float_kind_name, instance_symbol, int_kind_name,
     is_comparison, method_symbol, monomorphize, monomorphize_instance, numeric_conv_ret,

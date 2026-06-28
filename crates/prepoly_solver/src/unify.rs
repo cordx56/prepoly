@@ -148,6 +148,15 @@ impl Subst {
             Type::Fun(params, ret) => {
                 params.iter().any(|p| self.occurs(id, p)) || self.occurs(id, &ret)
             }
+            // Nominal records and sums (including `Result`) carry their component
+            // types in the substitution, and a variable can occur there -- e.g.
+            // `o = Result<o, e>` arising from `[x, x!]`. Descend so the occurs
+            // check matches `Solver::collect_free`, which traverses these: without
+            // it a cyclic binding is committed and the later generalization that
+            // walks the substitution recurses until the stack overflows.
+            Type::Record(n) | Type::Sum(n) => {
+                n.substitution.iter().any(|(_, t)| self.occurs(id, t))
+            }
             _ => false,
         }
     }

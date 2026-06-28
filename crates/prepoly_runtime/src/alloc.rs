@@ -107,6 +107,28 @@ pub extern "C-unwind" fn pp_typed_alloc(size: i64) -> *mut Header {
 // separately-allocated element buffer of `cap * elem_size` bytes. Elements are
 // concrete typed values, not boxed `Value`.
 
+/// `count * elem_size` as a byte length, trapping on a negative operand or i64
+/// overflow. Generated code supplies these, so a bad length must fail closed
+/// rather than wrap into an undersized allocation that later element writes
+/// overrun. `pp_panic_str` exits the process (no unwind across the C-ABI).
+fn checked_bytes(count: i64, elem_size: i64) -> i64 {
+    if count < 0 || elem_size < 0 {
+        crate::builtins::pp_panic_str("negative array allocation size");
+    }
+    match count.checked_mul(elem_size) {
+        Some(n) => n,
+        None => crate::builtins::pp_panic_str("array allocation size overflow"),
+    }
+}
+
+/// Double a capacity for growth, trapping on overflow (never below 4).
+fn grow_cap(cap: i64) -> i64 {
+    match cap.checked_mul(2) {
+        Some(c) => c.max(4),
+        None => crate::builtins::pp_panic_str("array capacity overflow"),
+    }
+}
+
 /// A growable array holding `len` elements with spare capacity.
 pub extern "C-unwind" fn pp_arr_new(elem_size: i64, len: i64) -> *mut Header {
     unsafe {
@@ -114,7 +136,7 @@ pub extern "C-unwind" fn pp_arr_new(elem_size: i64, len: i64) -> *mut Header {
         let h = pp_typed_alloc(40);
         *((h as *mut u8).offset(16) as *mut i64) = len;
         *((h as *mut u8).offset(24) as *mut i64) = cap;
-        let data = pp_obj_alloc(cap * elem_size.max(1)) as *mut u8;
+        let data = pp_obj_alloc(checked_bytes(cap, elem_size.max(1))) as *mut u8;
         *((h as *mut u8).offset(32) as *mut *mut u8) = data;
         h
     }
@@ -133,8 +155,8 @@ pub unsafe extern "C-unwind" fn pp_arr_push(arr: *mut Header, elem: *const u8, e
         let data_pp = (arr as *mut u8).offset(32) as *mut *mut u8;
         let (len, cap) = (*len_p, *cap_p);
         if len == cap {
-            let new_cap = (cap * 2).max(4);
-            let new_data = pp_obj_alloc(new_cap * elem_size) as *mut u8;
+            let new_cap = grow_cap(cap);
+            let new_data = pp_obj_alloc(checked_bytes(new_cap, elem_size)) as *mut u8;
             let old = *data_pp;
             std::ptr::copy_nonoverlapping(old, new_data, (len * elem_size) as usize);
             *data_pp = new_data;
@@ -170,8 +192,8 @@ pub unsafe extern "C-unwind" fn pp_arr_insert(
         let data_pp = (arr as *mut u8).offset(32) as *mut *mut u8;
         let (len, cap) = (*len_p, *cap_p);
         if len == cap {
-            let new_cap = (cap * 2).max(4);
-            let new_data = pp_obj_alloc(new_cap * elem_size) as *mut u8;
+            let new_cap = grow_cap(cap);
+            let new_data = pp_obj_alloc(checked_bytes(new_cap, elem_size)) as *mut u8;
             let old = *data_pp;
             std::ptr::copy_nonoverlapping(old, new_data, (len * elem_size) as usize);
             *data_pp = new_data;
@@ -288,7 +310,10 @@ pub(crate) unsafe fn typed_result_err(msg: &str) -> *mut Header {
 /// `ptr` must point to at least `len` readable bytes.
 pub unsafe extern "C-unwind" fn pp_str_const(ptr: *const u8, len: i64) -> *mut Header {
     unsafe {
-        let h = init_header(pp_obj_alloc(24 + len), KIND_STRING, 0);
+        if len < 0 {
+            crate::builtins::pp_panic_str("negative string length");
+        }
+        let h = init_header(pp_obj_alloc(len.saturating_add(24)), KIND_STRING, 0);
         *((h as *mut u8).offset(16) as *mut i64) = len;
         std::ptr::copy_nonoverlapping(ptr, str_bytes_ptr(h) as *mut u8, len as usize);
         h

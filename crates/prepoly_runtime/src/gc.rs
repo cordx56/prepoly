@@ -74,17 +74,11 @@ fn schedule_tick() -> Option<u8> {
         return None;
     }
     ALLOC_TICKS.store(0, Ordering::Relaxed);
-    // Only one scheduled collection at a time; a concurrent allocator thread that
-    // also reached the threshold simply skips and reschedules on its next alloc.
-    if COLLECTING
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
-        return None;
-    }
+    // `pp_gc_collect` self-serializes: if another collection is already running
+    // (a concurrent allocator thread, or a direct call), this one skips and the
+    // in-flight collection covers it; reschedule on the next allocation.
     let g0 = GEN0_RUNS.fetch_add(1, Ordering::Relaxed) + 1;
     pp_gc_collect();
-    COLLECTING.store(false, Ordering::Release);
     Some(generation_for(g0))
 }
 
@@ -279,7 +273,25 @@ extern "C-unwind" fn freeze_child(c: *mut Header) {
 
 /// Run one trial-deletion collection over every registered object. Frees the
 /// members of every garbage cycle (reference cycles unreachable from outside).
+///
+/// Self-serializing: a collection that fires while another is running (a direct
+/// call -- e.g. at program exit -- overlapping a scheduled one, or a second
+/// allocator thread crossing the threshold) skips, because both share the global
+/// registry and pending-free buffer and an overlap would trace or free the same
+/// object twice. The in-flight collection already covers the current garbage.
 pub extern "C-unwind" fn pp_gc_collect() {
+    if COLLECTING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    collect_once();
+    COLLECTING.store(false, Ordering::Release);
+}
+
+/// One trial-deletion pass over the registry. The caller holds `COLLECTING`.
+fn collect_once() {
     let objs: Vec<usize> = registry().lock().unwrap().keys().copied().collect();
     unsafe {
         for &o in &objs {

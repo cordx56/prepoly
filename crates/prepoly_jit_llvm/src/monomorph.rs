@@ -29,6 +29,14 @@ fn sanitize(s: &str) -> String {
 }
 
 pub fn mangle_fn(name: &str) -> String {
+    // Compiler-synthesized instances (module inits, methods, statics, closures)
+    // are tagged by `prepoly_engine` with a reserved sigil that no source
+    // identifier can contain. Route them to a prefix disjoint from `pp_fn_` so a
+    // user `fun init0` and the first module init never produce the same LLVM
+    // symbol. `sanitize` would otherwise fold the sigil to `_`, re-colliding them.
+    if let Some(rest) = name.strip_prefix(prepoly_engine::SYNTH_SIGIL) {
+        return format!("pp_synth_{}", sanitize(rest));
+    }
     format!("pp_fn_{}", sanitize(name))
 }
 

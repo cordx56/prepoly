@@ -4,7 +4,7 @@ pub mod ast;
 pub mod newline;
 mod parser;
 
-pub use parser::{ParseError, parse};
+pub use parser::{ParseError, parse, parse_with_base};
 
 #[cfg(test)]
 mod tests {

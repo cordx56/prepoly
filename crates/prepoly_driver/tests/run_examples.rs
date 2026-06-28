@@ -50,7 +50,6 @@ fn runnable_examples_run_successfully() {
     for ex in RUNNABLE {
         let path = format!("{root}/{ex}");
         let out = Command::new(bin)
-            .arg("run")
             .arg(&path)
             .output()
             .expect("spawn prepoly");

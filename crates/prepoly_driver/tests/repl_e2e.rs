@@ -19,13 +19,15 @@ fn repo_root() -> String {
     format!("{}/../..", env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Run `prepoly <mode> <path>` and return (success, stdout, stderr).
+/// Run a file through a back end and return (success, stdout, stderr). `mode`
+/// `"run"` uses the default runtime via a bare file argument (no subcommand);
+/// any other mode (e.g. `"repl"`) is passed as the subcommand.
 fn run_mode(mode: &str, path: &str) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_prepoly"))
-        .arg(mode)
-        .arg(path)
-        .output()
-        .expect("spawn prepoly");
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_prepoly"));
+    if mode != "run" {
+        cmd.arg(mode);
+    }
+    let out = cmd.arg(path).output().expect("spawn prepoly");
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into_owned(),

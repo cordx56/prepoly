@@ -37,12 +37,21 @@ pub fn types_compatible(program: &Program, have: &Type, want: &Type) -> bool {
             true
         }
         (Type::Nullable(h), Type::Nullable(w)) => types_compatible(program, h, w),
-        (Type::Array(h, hn), Type::Array(w, wn)) if hn == wn => types_compatible(program, h, w),
-        (Type::Slice(h), Type::Slice(w)) => types_compatible(program, h, w),
+        // Arrays and slices are mutable shared storage (`[T]` aliases the same
+        // backing buffer), so their element type is invariant: reading wants
+        // covariance and overwriting wants contravariance, and only invariance is
+        // sound for both. Treating them as covariant would let a `Dog[]` alias as
+        // `Animal[]`, store a bare `Animal`, and then read it back as a `Dog`.
+        (Type::Array(h, hn), Type::Array(w, wn)) if hn == wn => types_invariant(program, h, w),
+        (Type::Slice(h), Type::Slice(w)) => types_invariant(program, h, w),
+        // Function parameters are contravariant and the return type covariant: a
+        // value usable where `(W) -> R` is required must accept every `W` the
+        // caller may pass, so each required parameter `w` must be usable where the
+        // value's parameter `h` is required (the reversed direction).
         (Type::Fun(hp, hr), Type::Fun(wp, wr)) if hp.len() == wp.len() => {
             hp.iter()
                 .zip(wp)
-                .all(|(h, w)| types_compatible(program, h, w))
+                .all(|(h, w)| types_compatible(program, w, h))
                 && types_compatible(program, hr, wr)
         }
         (Type::Record(sub), Type::Record(sup)) if !sub.same_nominal(sup) => {

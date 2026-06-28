@@ -48,6 +48,30 @@ fn valid_cross_module_import_succeeds() {
 }
 
 #[test]
+fn import_is_relative_to_the_importing_file() {
+    // `modules/a.pp` and `modules/b.pp` are siblings; `a.pp` imports `b.pp` as
+    // `import b`, resolved relative to a.pp's own directory rather than the main
+    // file's. (Relative to the main file, `import b` would look for `./b.pp`.)
+    let main = setup(
+        "relative_import",
+        &[
+            ("modules/b.pp", "fun b_val() -> int32 { return 42 }\n"),
+            (
+                "modules/a.pp",
+                "import b.{ b_val }\nfun a_val() -> int32 { return b_val() }\n",
+            ),
+            (
+                "main.pp",
+                "import modules.a.{ a_val }\nfun main() { println(a_val()) }\n",
+            ),
+        ],
+    );
+    let (ok, out) = run(&main);
+    assert!(ok, "expected success, got: {out}");
+    assert_eq!(out.trim(), "42", "{out}");
+}
+
+#[test]
 fn missing_module_file_is_rejected() {
     let main = setup(
         "missing_module",
@@ -73,6 +97,32 @@ fn unknown_imported_name_is_rejected() {
     let (ok, out) = check(&main);
     assert!(!ok, "expected failure");
     assert!(out.contains("has no exported name `missing`"), "{out}");
+}
+
+#[test]
+fn error_is_attributed_to_the_correct_module_file() {
+    // A type error in a non-main module reports that module's file and line.
+    // Each file's spans are parsed at a disjoint base offset, so a diagnostic is
+    // located in the file it came from rather than guessed by length.
+    let main = setup(
+        "error_attribution",
+        &[
+            (
+                "lib/util.pp",
+                "fun helper() -> int32 {\n  return \"not an int\"\n}\n",
+            ),
+            (
+                "main.pp",
+                "import lib.util.{ helper }\nfun main() { println(helper()) }\n",
+            ),
+        ],
+    );
+    let (ok, out) = check(&main);
+    assert!(!ok, "expected failure");
+    assert!(
+        out.contains("lib/util.pp:2:"),
+        "error should point at lib/util.pp line 2: {out}"
+    );
 }
 
 #[test]
@@ -185,10 +235,9 @@ fn a_module_can_call_its_own_private_helper() {
     assert!(ok, "expected success, got: {out}");
 }
 
-/// Run `prepoly run <main>` and return (success, combined output).
+/// Run `prepoly <main>` and return (success, combined output).
 fn run(main: &PathBuf) -> (bool, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_prepoly"))
-        .arg("run")
         .arg(main)
         .output()
         .expect("spawn prepoly");

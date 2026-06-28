@@ -1071,7 +1071,10 @@ fn string_slice(s: &str, start: i64, end: i64) -> String {
 /// The UTF-8 character starting at byte offset `i`, as a one-character string, or
 /// `null` when `i` is out of range or not a character boundary.
 fn char_at(s: &str, i: i64) -> Value {
-    if i < 0 || i as usize >= s.len() {
+    // A mid-character index must return null, not slice `s[i..]` (which would
+    // panic and abort the interpreter). Matches the runtime's `char_at_byte`, so
+    // both back ends agree on out-of-range and non-boundary indices.
+    if i < 0 || i as usize >= s.len() || !s.is_char_boundary(i as usize) {
         return Value::Null;
     }
     match s[i as usize..].chars().next() {

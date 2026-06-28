@@ -23,10 +23,24 @@ pub struct ParseError {
 
 /// Parse one source file into a `Module`.
 pub fn parse(src: &str) -> Result<Module, ParseError> {
-    let tokens = lex(src).map_err(|e| ParseError {
+    parse_with_base(src, 0)
+}
+
+/// Parse `src` with every span shifted by `base`. A multi-file driver assigns
+/// each source a disjoint `base`, so a span's byte offset uniquely identifies the
+/// file it came from -- which lets a diagnostic be attributed to the right file
+/// and line even though each file is lexed from offset zero. Spans are
+/// token-derived (the lexer shift carries through the parser's `merge`s); only an
+/// interpolation sub-expression, re-lexed from its fragment, stays
+/// fragment-relative, which is a pre-existing limitation unaffected here.
+pub fn parse_with_base(src: &str, base: usize) -> Result<Module, ParseError> {
+    let mut tokens = lex(src).map_err(|e| ParseError {
         message: e.message,
-        span: e.span,
+        span: Span::new(e.span.lo + base, e.span.hi + base),
     })?;
+    for t in &mut tokens {
+        t.span = Span::new(t.span.lo + base, t.span.hi + base);
+    }
     let mut p = Parser::new(tokens);
     p.parse_module()
 }

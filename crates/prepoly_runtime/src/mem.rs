@@ -19,14 +19,27 @@ pub fn pp_live_blocks() -> i64 {
 }
 
 /// The block layout for a body of `size` bytes: a 16-byte size prefix followed by
-/// the object. Alloc and free must agree on it.
+/// the object. Alloc and free must agree on it. Traps (rather than wrapping) on an
+/// overflowing total so a bad length from generated code cannot produce an
+/// undersized block; `pp_panic_str` exits the process, so it is safe to call
+/// across the C-ABI boundary (no unwind into JIT frames).
 fn block_layout(size: usize) -> Layout {
-    Layout::from_size_align(size + 16, 16).unwrap()
+    let total = match size.checked_add(16) {
+        Some(t) => t,
+        None => crate::builtins::pp_panic_str("allocation size overflow"),
+    };
+    match Layout::from_size_align(total, 16) {
+        Ok(l) => l,
+        Err(_) => crate::builtins::pp_panic_str("invalid allocation layout"),
+    }
 }
 
 unsafe fn raw_alloc(size: usize) -> *mut u8 {
     unsafe {
         let p = alloc_zeroed(block_layout(size));
+        if p.is_null() {
+            crate::builtins::pp_panic_str("out of memory");
+        }
         *(p as *mut usize) = size;
         LIVE_BLOCKS.fetch_add(1, Ordering::Relaxed);
         p.add(16)
@@ -40,6 +53,10 @@ unsafe fn raw_alloc(size: usize) -> *mut u8 {
 /// `size` must be non-negative; the returned block must be freed with
 /// [`pp_obj_free`].
 pub unsafe fn pp_obj_alloc(size: i64) -> *mut c_void {
+    // A negative size means an overflowing computed length wrapped; fail closed.
+    if size < 0 {
+        crate::builtins::pp_panic_str("negative allocation size");
+    }
     unsafe { raw_alloc(size as usize) as *mut c_void }
 }
 

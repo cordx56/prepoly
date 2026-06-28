@@ -51,7 +51,6 @@ fn e2e_cases_produce_expected_output() {
             )
         });
         let out = Command::new(bin)
-            .arg("run")
             .arg(pp)
             .output()
             .expect("spawn prepoly");

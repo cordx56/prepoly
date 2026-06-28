@@ -9,6 +9,7 @@ authors.workspace = true
 tracing.workspace = true
 tar = "0.4"
 xz = "0.1"
+sha2 = "0.11"
 reqwest = "0.13"
 anyhow = "1"
 indicatif = "0.18"

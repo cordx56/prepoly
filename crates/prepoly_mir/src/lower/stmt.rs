@@ -152,13 +152,11 @@ impl FnLower<'_, '_> {
             // survives into monomorphization.
             Pattern::Binding(name, _) => {
                 let v = self.lower_expr(value);
+                // A captured-and-mutated binding is heap-promoted to a shared cell
+                // by `bind_value`; the scalar type annotation does not apply to the
+                // cell array, so the cell case takes precedence over it.
                 if self.is_cell(name) {
-                    // A captured-and-mutated local is heap-promoted to a shared cell:
-                    // store the initial value as element 0 of a one-element array, and
-                    // bind the name to that array (DESIGN.md 8.4).
-                    let cell = self.b.emit(Rvalue::Array(vec![v]));
-                    let local = self.b.make_local(cell);
-                    self.bind(name, local);
+                    self.bind_value(name, v);
                 } else {
                     match ty.and_then(resolve_simple_type) {
                         Some(t) => {
@@ -203,9 +201,13 @@ impl FnLower<'_, '_> {
     /// exactly once.
     fn lower_place(&mut self, target: &Expr) -> PlaceTarget {
         match target {
-            // A cell-promoted name writes element 0 of its one-element cell array.
-            Expr::Ident(name, _) if self.is_cell(name) => {
-                let local = self.lookup(name).expect("cell binding in scope");
+            // A cell-promoted name writes element 0 of its one-element cell array --
+            // but only when it is actually a local here. A module global that a
+            // closure captures and mutates is in the cell set yet has no local slot;
+            // it is written as a global, mirroring the read path in `lower_ident`
+            // (which is why this must guard on `lookup`, not `expect` it).
+            Expr::Ident(name, _) if self.is_cell(name) && self.lookup(name).is_some() => {
+                let local = self.lookup(name).unwrap();
                 let zero = Operand::Const(Literal::Int(0));
                 PlaceTarget::Projected(Place::projected(local, vec![Projection::Index(zero)]))
             }
