@@ -15,3 +15,11 @@ Features are summarized as follows:
 - Per-function type checking, performed just before each function runs
 - Type inference for most types, resolved at execution time
 - Structural subtyping with interface definitions
+
+## Playground
+
+You can try prepoly on your browser:
+
+<div>
+  {{#include playground/index.html}}
+</div>
