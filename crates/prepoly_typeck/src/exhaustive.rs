@@ -120,6 +120,7 @@ impl ExhaustiveVisitor<'_> {
                 .map(|s| s.as_str())
                 .collect();
             if !missing.is_empty() {
+                tracing::debug!(sum = %owner, missing = ?missing, "non-exhaustive match");
                 self.errors.push(TypeError {
                     message: format!(
                         "non-exhaustive match on `{owner}`: missing variant(s) {}",

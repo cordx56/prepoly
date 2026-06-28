@@ -2374,7 +2374,12 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
             let y = b.into_int_value();
             let is_zero = self
                 .builder
-                .build_int_compare(inkwell::IntPredicate::EQ, y, y.get_type().const_zero(), "dz")
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    y,
+                    y.get_type().const_zero(),
+                    "dz",
+                )
                 .unwrap();
             self.trap_if(is_zero, "division by zero");
         }

@@ -222,5 +222,8 @@ pub fn record_satisfies(program: &Program, sub: &str, sup: &str) -> Vec<String> 
             }
         }
     }
+    if !issues.is_empty() {
+        tracing::debug!(sub, sup, ?issues, "record does not structurally satisfy");
+    }
     issues
 }

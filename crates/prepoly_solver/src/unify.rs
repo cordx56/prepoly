@@ -93,11 +93,13 @@ impl Subst {
                 // (`U = (U) -> U`) that makes `resolve`/`resolve_deep` recurse
                 // forever. Treat the infinite type as a unification failure.
                 if self.occurs(*i, other) {
+                    tracing::debug!(var = *i, ty = %other.display(), "occurs check failed: infinite type");
                     return Err(format!(
                         "cannot construct an infinite type for `{}`",
                         other.display()
                     ));
                 }
+                tracing::debug!(var = *i, bound_to = %other.display(), "binding inference variable");
                 self.table.insert(*i, other.clone());
                 self.trail.push(*i);
                 Ok(())
@@ -123,15 +125,19 @@ impl Subst {
                 if n1.same_nominal(n2) {
                     Ok(())
                 } else {
+                    tracing::debug!(left = %n1, right = %n2, "sum type mismatch");
                     Err(format!("cannot unify sum types `{n1}` and `{n2}`"))
                 }
             }
             _ if a == b => Ok(()),
-            _ => Err(format!(
-                "cannot unify `{}` with `{}`",
-                a.display(),
-                b.display()
-            )),
+            _ => {
+                tracing::debug!(left = %a.display(), right = %b.display(), "unification conflict");
+                Err(format!(
+                    "cannot unify `{}` with `{}`",
+                    a.display(),
+                    b.display()
+                ))
+            }
         }
     }
 

@@ -152,6 +152,7 @@ impl Solver {
             .filter(|v| !env_free.contains(v))
             .collect();
         vars.sort_unstable();
+        tracing::debug!(ty = %resolved.display(), quantified = ?vars, "generalize");
         Scheme { vars, ty: resolved }
     }
 
@@ -166,7 +167,9 @@ impl Solver {
             .iter()
             .map(|&v| (v, self.fresh(InferenceVarKind::Instantiation)))
             .collect();
-        apply_var_map(&scheme.ty, &mapping)
+        let instance = apply_var_map(&scheme.ty, &mapping);
+        tracing::debug!(scheme = %scheme.ty.display(), instance = %instance.display(), "instantiate");
+        instance
     }
 
     /// Resolve a type through the substitution, recursing into components.

@@ -50,10 +50,7 @@ fn e2e_cases_produce_expected_output() {
                 pp.display()
             )
         });
-        let out = Command::new(bin)
-            .arg(pp)
-            .output()
-            .expect("spawn prepoly");
+        let out = Command::new(bin).arg(pp).output().expect("spawn prepoly");
         assert!(
             out.status.success(),
             "{} failed to run (status {:?})\nstderr:\n{}",

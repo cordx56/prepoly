@@ -16,6 +16,8 @@ prepoly_typeck.workspace = true
 prepoly_repl.workspace = true
 
 clap = { version = "4", features = ["derive"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 # The LLVM JIT back end is native-only -- LLVM cannot link for wasm -- so its
 # optional dependencies are declared only for non-wasm targets. The default `jit`

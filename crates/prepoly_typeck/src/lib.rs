@@ -62,10 +62,16 @@ pub fn analyze(program: &Program) -> Analysis {
     // monomorphization (DESIGN.md 5.7): it infers principal types for the
     // functional core and rejects unification conflicts the ad-hoc pass may miss.
     errors.extend(hm::check(program));
+    tracing::debug!(after_hm = errors.len(), "errors after Hindley-Milner pass");
     let infer = infer::analyze(program);
     errors.extend(infer.errors);
     errors.sort_by_key(|e| e.span.lo);
     errors.dedup();
+    tracing::debug!(
+        total = errors.len(),
+        fn_instances = infer.fn_instances.len(),
+        "type analysis finished"
+    );
     Analysis {
         errors,
         typed: infer.typed,

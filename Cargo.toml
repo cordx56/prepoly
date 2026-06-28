@@ -13,7 +13,7 @@ members = [
     "crates/prepoly_engine",
     "crates/prepoly_repl",
     "crates/prepoly_driver",
-    "bootstrap",
+    "bootstrap", "crates/prepoly_language_server",
 ]
 # The default set is the cross-platform crates -- those that build for every
 # target including wasm. The native-only crates are left out so a plain
@@ -63,6 +63,9 @@ inkwell = { version = "0.9", features = ["llvm22-1"] }
 llvm-sys = { version = "221", features = ["prefer-static"] }
 
 tracing = "0.1"
+# `env-filter` parses the `PREPOLY_LOG` directive the driver feeds it; the rest of
+# the default features (`fmt`, `ansi`) give the stderr formatter.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [profile.release]
 opt-level = 3

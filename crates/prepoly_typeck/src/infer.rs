@@ -69,6 +69,7 @@ pub fn analyze(program: &Program) -> Inference {
     checker.precompute_function_returns();
     checker.precompute_method_returns();
     for f in program.functions.values() {
+        tracing::debug!(function = %f.signature.name, "inferring function body");
         let mut scopes = checker.signature_scopes(&f.signature.params);
         let ret = f.signature.ret_ty.clone();
         checker.current_module = f.module.clone();
@@ -1524,8 +1525,7 @@ impl<'a> Checker<'a> {
                 // path may not type-check -- e.g. a bare `null` (`never?`) whose
                 // truthy arm narrows it to `never` -- yet must not reject the
                 // program. The reachable arm alone determines the `if` type.
-                let then_ty =
-                    self.check_branch(then, &mut then_scopes, truth == Some(false));
+                let then_ty = self.check_branch(then, &mut then_scopes, truth == Some(false));
                 let else_ty = match els {
                     Some(e) => self.check_branch_expr(e, scopes, truth == Some(true)),
                     None => Type::Void,
@@ -2059,6 +2059,11 @@ impl<'a> Checker<'a> {
                 if resolved_args.iter().all(is_concrete_type) {
                     let entry = self.fn_instances.entry(symbol.clone()).or_default();
                     if !entry.iter().any(|t| t == &resolved_args) {
+                        tracing::debug!(
+                            symbol = %symbol,
+                            args = ?resolved_args.iter().map(|t| t.display()).collect::<Vec<_>>(),
+                            "recording new monomorphization instance"
+                        );
                         entry.push(resolved_args);
                     }
                 }
@@ -3038,8 +3043,16 @@ impl<'a> Checker<'a> {
         }
         let key = format!("fn:{symbol}");
         if !self.instantiating.insert(key.clone()) {
+            // Recursive call: re-checking the body again would not terminate, so
+            // fall back to the declared/precomputed return type.
+            tracing::debug!(symbol = %symbol, "recursive call, using fallback return type");
             return fallback_ret;
         }
+        tracing::debug!(
+            symbol = %symbol,
+            args = ?arg_types.iter().map(|t| self.resolve(t).display()).collect::<Vec<_>>(),
+            "re-elaborating function body at call site"
+        );
         // Re-check the callee body in its own module so its internal names
         // resolve under that module's visibility, not the caller's (PLAN.md R5).
         let saved_module = std::mem::replace(&mut self.current_module, module.to_vec());
@@ -3570,6 +3583,7 @@ impl<'a> Checker<'a> {
         for scope in scopes.iter_mut().rev() {
             if let Some(Type::Nullable(inner)) = scope.get(name).cloned().map(|t| self.resolve(&t))
             {
+                tracing::debug!(name, to = %inner.display(), "narrowing nullable to non-null");
                 scope.insert(name.to_string(), *inner);
                 break;
             }

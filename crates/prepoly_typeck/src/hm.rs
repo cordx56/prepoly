@@ -241,6 +241,7 @@ impl<'p> Hm<'p> {
         // bare `return v` then targets `ok` and every error site reconciles to
         // `err`.
         self.fallible = block_is_fallible(body);
+        tracing::debug!(context, fallible = self.fallible, "checking callable body");
         self.ok = self.solver.fresh(InferenceVarKind::Source);
         self.err = self.solver.fresh(InferenceVarKind::Source);
         let declared = self.or_fresh(ret_ty);
@@ -351,6 +352,10 @@ impl<'p> Hm<'p> {
         }
         let h = self.solver.resolve(have);
         let w = self.solver.resolve(want);
+        // Unification failed; the value only flows if structural subtyping admits
+        // it (a wider record into a narrower position). Trace this fallback: it is
+        // where a too-permissive structural rule would let an unsound flow through.
+        tracing::debug!(have = %h.display(), want = %w.display(), "flow_into falling back to structural subtyping");
         if crate::structural::types_compatible(self.program, &h, &w) {
             return;
         }
@@ -1157,11 +1162,19 @@ impl<'p> Hm<'p> {
             let resolved = self.solver.resolve(&Type::Unknown(id));
             match (&resolved, is_int) {
                 (Type::Unknown(_), true) => {
+                    tracing::debug!(
+                        var = id,
+                        "numeric literal unconstrained, defaulting to int32"
+                    );
                     let _ = self
                         .solver
                         .unify(&resolved, &Type::Int(prepoly_hir::IntKind::I32));
                 }
                 (Type::Unknown(_), false) => {
+                    tracing::debug!(
+                        var = id,
+                        "numeric literal unconstrained, defaulting to float64"
+                    );
                     let _ = self
                         .solver
                         .unify(&resolved, &Type::Float(prepoly_hir::FloatKind::F64));

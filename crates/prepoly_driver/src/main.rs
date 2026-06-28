@@ -69,7 +69,31 @@ enum Mode {
     Repl,
 }
 
+/// Initialize the tracing subscriber from the `PREPOLY_LOG` environment variable.
+/// `PREPOLY_LOG` uses `tracing_subscriber`'s `EnvFilter` syntax, so a level
+/// (`PREPOLY_LOG=debug`) or per-target directives
+/// (`PREPOLY_LOG=prepoly_typeck=debug,prepoly_solver=trace`) both work. Unset or
+/// empty, the filter defaults to `warn`, so an ordinary run only surfaces
+/// warnings and errors and the compiler's `debug!` traces stay silent. Logs are
+/// written to stderr (program output owns stdout) without timestamps, which keeps
+/// them readable as a compile trace and avoids a clock call on the wasm build.
+/// `try_init` so a second call (e.g. from a test harness) is a no-op rather than a
+/// panic.
+fn init_tracing() {
+    use tracing_subscriber::filter::LevelFilter;
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(LevelFilter::WARN.into())
+        .with_env_var("PREPOLY_LOG")
+        .from_env_lossy();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(io::stderr)
+        .without_time()
+        .try_init();
+}
+
 fn main() -> ExitCode {
+    init_tracing();
     let cli = Cli::parse();
     match cli.command {
         // A bare file argument is type-checked and run; with neither a file nor a
@@ -375,6 +399,7 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         auto_acquire_modules(&mut modules);
     }
 
+    tracing::debug!(modules = modules.len(), "lowering module graph to HIR");
     let (program, lower_errors) = lower(&modules);
     let mut errors: Vec<(String, Span)> = Vec::new();
     for e in lower_errors {
@@ -383,10 +408,16 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
     for e in prepoly_resolve::check_imports(&program, &modules) {
         errors.push((e.message, e.span));
     }
+    tracing::debug!(
+        functions = program.functions.len(),
+        types = program.types.len(),
+        "running type analysis"
+    );
     let analysis = prepoly_typeck::analyze(&program);
     for e in &analysis.errors {
         errors.push((e.message.clone(), e.span));
     }
+    tracing::debug!(errors = errors.len(), "front-end analysis complete");
     if !errors.is_empty() {
         errors.sort_by_key(|(_, s)| s.lo);
         return Err(render_errors(&errors, &sources));
@@ -527,8 +558,11 @@ impl SourceMap {
     /// the file-local offset.
     fn locate(&self, off: usize) -> Option<(&PathBuf, &str, usize)> {
         self.entries.iter().find_map(|e| {
-            (off >= e.base && off <= e.base + e.src.len())
-                .then_some((&e.path, e.src.as_str(), off - e.base))
+            (off >= e.base && off <= e.base + e.src.len()).then_some((
+                &e.path,
+                e.src.as_str(),
+                off - e.base,
+            ))
         })
     }
 }

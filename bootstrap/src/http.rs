@@ -33,7 +33,11 @@ pub async fn download(name: impl AsRef<str>, url: impl AsRef<str>) -> anyhow::Re
     // `reqwest::get` does not fail on a 4xx/5xx; check explicitly so a missing
     // asset reports the status rather than feeding an error page to the unpacker.
     if !resp.status().is_success() {
-        anyhow::bail!("download failed: HTTP {} for {}", resp.status(), url.as_ref());
+        anyhow::bail!(
+            "download failed: HTTP {} for {}",
+            resp.status(),
+            url.as_ref()
+        );
     }
     let content_length = resp.content_length().unwrap_or(2_000_000_000) as usize;
     let mut data = Vec::with_capacity(content_length);
