@@ -3,55 +3,58 @@
 Diagnostics, hover types, go-to-definition, and semantic-token highlighting for
 `.pp` files, backed by `prepoly-lsp` (the `prepoly_language_server` crate).
 
+Uses the native Neovim 0.11+ LSP workflow: a server definition in `lsp/`, the
+filetype mapping in `ftdetect/`, and `vim.lsp.enable("prepoly")` to start it.
+
 ## 1. Build the server
 
 ```sh
 # Install onto PATH (recommended):
 cargo install --path crates/prepoly_language_server   # -> ~/.cargo/bin/prepoly-lsp
 
-# ...or just build it and point `cmd` at the binary:
+# ...or just build it and override `cmd` to point at the binary (see below):
 cargo build -p prepoly_language_server                # -> target/debug/prepoly-lsp
 ```
 
 `prepoly-lsp` has no LLVM dependency, so it builds without the JIT toolchain.
 
-## 2. Make this directory available to Neovim
+## 2. Put this directory on the runtimepath and enable the server
 
-This folder is a minimal plugin (`lua/prepoly.lua`). Add it to your runtimepath
-with a plugin manager, or copy `lua/prepoly.lua` into your config's `lua/`.
+This folder is a minimal plugin: `lsp/prepoly.lua` (server config) and
+`ftdetect/prepoly.lua` (the `.pp` -> `prepoly` filetype mapping).
 
 ### lazy.nvim
 
 ```lua
 {
   dir = "/path/to/prepoly/editors/nvim",
-  dependencies = { "neovim/nvim-lspconfig" },
-  -- Register the filetype at startup so the first `.pp` buffer is recognised,
-  -- then lazy-load the LSP setup when a prepoly file opens.
-  init = function()
-    vim.filetype.add({ extension = { pp = "prepoly" } })
-  end,
-  ft = "prepoly",
+  ft = "prepoly", -- lazy.nvim sources ftdetect/ at startup, so this triggers correctly
   config = function()
-    require("prepoly").setup({})
+    vim.lsp.enable("prepoly")
   end,
 }
 ```
 
-### packer / vim-plug + manual setup
+### Manual (any setup with this directory on the runtimepath)
 
 ```lua
--- after the plugin (this directory) is on the runtimepath:
-require("prepoly").setup({})
+vim.opt.runtimepath:append("/path/to/prepoly/editors/nvim")
+vim.lsp.enable("prepoly")
 ```
 
-If you built the binary instead of installing it, pass its path:
+### Using a locally built binary instead of one on PATH
+
+Override `cmd` before enabling; the override merges over `lsp/prepoly.lua`:
 
 ```lua
-require("prepoly").setup({
+vim.lsp.config("prepoly", {
   cmd = { vim.fn.getcwd() .. "/target/debug/prepoly-lsp" },
 })
+vim.lsp.enable("prepoly")
 ```
+
+Requires Neovim 0.11+. (`lsp/` + `vim.lsp.enable` is the native API; older
+Neovim needs nvim-lspconfig's classic `setup` framework instead.)
 
 ## 3. Keymaps
 
@@ -85,10 +88,9 @@ Token groups (`@lsp.type.function`, `@lsp.type.type`, `@lsp.type.enum`,
 
 ## Notes
 
-- `.pp` is also Puppet's extension. `vim.filetype.add` (used by `setup` and the
-  lazy.nvim `init` above) overrides that mapping for prepoly.
+- `.pp` is also Puppet's extension; `ftdetect/prepoly.lua` overrides that.
 - Imports are resolved from each file's directory on disk, so unsaved edits in
   *other* open files are not yet reflected across files; the active file is
   always analyzed from its live buffer contents.
-- Set `PREPOLY_LOG=debug` in the environment to get server-side trace logs on
+- Set `PREPOLY_LOG=debug` in the environment for server-side trace logs on
   stderr (visible via `:LspLog`).
