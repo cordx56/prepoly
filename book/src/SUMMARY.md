@@ -2,6 +2,8 @@
 
 [Introduction](introduction.md)
 
+[Playground](playground.md)
+
 # User guide
 
 - [Chapter 1: Hello, world!](chapter_1.md)
