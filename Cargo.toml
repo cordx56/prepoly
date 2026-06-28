@@ -13,7 +13,8 @@ members = [
     "crates/prepoly_engine",
     "crates/prepoly_repl",
     "crates/prepoly_driver",
-    "bootstrap", "crates/prepoly_language_server",
+    "bootstrap",
+    "crates/prepoly_language_server",
 ]
 # The default set is the cross-platform crates -- those that build for every
 # target including wasm. The native-only crates are left out so a plain
