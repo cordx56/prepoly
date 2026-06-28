@@ -22,31 +22,32 @@
   }
   #stdout, #stderr {
     margin: 8px 0;
-    padding: 6px;
+    padding: 12px;
     border: 1px solid #ccc;
     font-size: 1.2em;
   }
   #stderr {
     color: #c00;
   }
-  #stdout pre, #stderr pre {
+  #stdout pre, #stderr pre, #stdout code, #stderr code {
     margin: 0;
+    padding: 0;
   }
 </style>
 <div id="playground">
   <section>
-    <h2>Program</h2>
+    <h3>Program</h3>
     <div>
       <textarea id="program"></textarea>
     </div>
     <button id="execButton">Execute</button>
   </section>
   <section>
-    <h2>stdout</h2>
+    <h3>stdout</h3>
     <div id="stdout"></div>
   </section>
   <section>
-    <h2>stderr</h2>
+    <h3>stderr</h3>
     <div id="stderr"></div>
   </section>
   <script type="module" src="/src/main.ts"></script>
