@@ -341,6 +341,18 @@ impl FnLower<'_, '_> {
         self.loops.push((incr_bb, end_bb));
         let _ = self.lower_block_value(body);
         if !self.b.terminated() {
+            // A loop body that reassigns the loop variable (`e *= 2`, `e = ...`)
+            // means the element is bound by reference: write the new value back into
+            // the slot so the array is mutated in place. (A managed element mutated
+            // through its own fields aliases the slot already, so only a bare
+            // reassignment needs this.)
+            if reassigns_var(body, var) {
+                let e = self.lower_ident(var);
+                self.b.push(MirStmt::Store(
+                    Place::projected(arr, vec![Projection::Index(Operand::Local(i))]),
+                    e,
+                ));
+            }
             self.b.terminate(Terminator::Goto(incr_bb));
         }
         self.loops.pop();
@@ -355,5 +367,35 @@ impl FnLower<'_, '_> {
         self.b.push(MirStmt::Assign(i, Rvalue::Use(next)));
         self.b.terminate(Terminator::Goto(cond_bb));
         self.b.switch_to(end_bb);
+    }
+}
+
+/// Whether `block` reassigns the whole binding `var` (`var = ...` / `var op= ...`),
+/// as opposed to mutating a field/element of it. Such a reassignment of a `for`
+/// loop variable is the signal that the element must be written back to the array.
+fn reassigns_var(block: &Block, var: &str) -> bool {
+    block.stmts.iter().any(|s| stmt_reassigns_var(s, var))
+}
+
+fn stmt_reassigns_var(stmt: &Stmt, var: &str) -> bool {
+    match stmt {
+        Stmt::Assign { target, .. } => matches!(target, Expr::Ident(n, _) if n == var),
+        Stmt::While { body, .. } => reassigns_var(body, var),
+        // A nested `for` that rebinds the same name shadows it, so stop there.
+        Stmt::For { var: v, body, .. } => v != var && reassigns_var(body, var),
+        Stmt::Expr(e) | Stmt::Return(Some(e), _) => expr_reassigns_var(e, var),
+        Stmt::Let { value, .. } => expr_reassigns_var(value, var),
+        _ => false,
+    }
+}
+
+fn expr_reassigns_var(e: &Expr, var: &str) -> bool {
+    match e {
+        Expr::Block(b, _) => reassigns_var(b, var),
+        Expr::If(_, t, els, _) | Expr::IfLet(_, _, t, els, _) => {
+            reassigns_var(t, var) || els.as_ref().is_some_and(|e| expr_reassigns_var(e, var))
+        }
+        Expr::Match(_, arms, _) => arms.iter().any(|a| expr_reassigns_var(&a.body, var)),
+        _ => false,
     }
 }

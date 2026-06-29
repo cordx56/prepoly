@@ -57,6 +57,39 @@ pub enum IntKind {
 }
 
 impl IntKind {
+    /// The bit width of this integer type.
+    pub fn bits(self) -> u32 {
+        match self {
+            IntKind::I8 | IntKind::U8 => 8,
+            IntKind::I16 | IntKind::U16 => 16,
+            IntKind::I32 | IntKind::U32 => 32,
+            IntKind::I64 | IntKind::U64 => 64,
+        }
+    }
+
+    /// Whether this integer type is signed.
+    pub fn is_signed(self) -> bool {
+        matches!(
+            self,
+            IntKind::I8 | IntKind::I16 | IntKind::I32 | IntKind::I64
+        )
+    }
+
+    /// The integer type of a given signedness and bit width.
+    pub fn of(signed: bool, bits: u32) -> IntKind {
+        match (signed, bits) {
+            (true, 8) => IntKind::I8,
+            (true, 16) => IntKind::I16,
+            (true, 64) => IntKind::I64,
+            (false, 8) => IntKind::U8,
+            (false, 16) => IntKind::U16,
+            (false, 32) => IntKind::U32,
+            (false, 64) => IntKind::U64,
+            (true, _) => IntKind::I32,
+            (false, _) => IntKind::U32,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             IntKind::I8 => "int8",
@@ -104,6 +137,14 @@ pub enum FloatKind {
 }
 
 impl FloatKind {
+    /// The bit width of this float type.
+    pub fn bits(self) -> u32 {
+        match self {
+            FloatKind::F32 => 32,
+            FloatKind::F64 => 64,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             FloatKind::F32 => "float32",
@@ -460,6 +501,29 @@ fn resolve_named(
             None => return Err(format!("unknown type `{name}`")),
         },
     })
+}
+
+/// The result type of an arithmetic or comparison operation between two numeric
+/// types, applying the implicit conversions:
+/// - int op int   -> the wider bit width (a mix of signed and unsigned is signed)
+/// - int op uint  -> a signed int (covered by the rule above)
+/// - int op float -> that float
+/// - float op float -> the wider bit width
+///
+/// `None` when either operand is not a numeric (int/float) type.
+pub fn common_numeric_type(a: &Type, b: &Type) -> Option<Type> {
+    match (a, b) {
+        (Type::Int(ka), Type::Int(kb)) => {
+            let signed = ka.is_signed() || kb.is_signed();
+            let bits = ka.bits().max(kb.bits());
+            Some(Type::Int(IntKind::of(signed, bits)))
+        }
+        (Type::Float(fa), Type::Float(fb)) => {
+            Some(Type::Float(if fa.bits() >= fb.bits() { *fa } else { *fb }))
+        }
+        (Type::Int(_), Type::Float(fk)) | (Type::Float(fk), Type::Int(_)) => Some(Type::Float(*fk)),
+        _ => None,
+    }
 }
 
 /// The type yielded by indexing into `ty`. Reference and mutability wrappers are

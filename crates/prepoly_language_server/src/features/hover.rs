@@ -14,7 +14,7 @@ use tower_lsp_server::ls_types::{
 use crate::analysis::FullAnalysis;
 use crate::document::Document;
 use crate::features::nav;
-use crate::render::{UnknownNamer, render_signature_full, render_type, render_type_def};
+use crate::render::{UnknownNamer, render_type, render_type_def};
 
 /// Build the hover response for `pos` in `doc`, using the full analysis.
 pub fn hover(doc: &Document, full: &FullAnalysis, pos: Position) -> Option<Hover> {
@@ -30,10 +30,7 @@ pub fn hover(doc: &Document, full: &FullAnalysis, pos: Position) -> Option<Hover
                 // A bare name that resolves to a function is best shown as its
                 // signature (with parameter names); otherwise show its type.
                 if let Some(f) = full.program.resolve_function(&module, name) {
-                    return Some(markup(
-                        function_signature(full, f),
-                        local_range(doc, full, expr.span),
-                    ));
+                    return Some(function_hover(full, f, local_range(doc, full, expr.span)));
                 }
                 let mut namer = UnknownNamer::default();
                 let value = format!("{name}: {}", render_type(&expr.ty, &mut namer));
@@ -87,10 +84,7 @@ fn ident_hover(
         ));
     }
     if let Some(f) = full.program.resolve_function(module, &name) {
-        return Some(markup(
-            function_signature(full, f),
-            Some(doc.range_of(span)),
-        ));
+        return Some(function_hover(full, f, Some(doc.range_of(span))));
     }
     if let Some(t) = full.program.resolve_type(module, &name) {
         return Some(markup(render_type_def(t), Some(doc.range_of(span))));
@@ -98,30 +92,17 @@ fn ident_hover(
     None
 }
 
-/// Render a free function's signature for hover, filling unannotated parameters
-/// and return type with the types inference recovered from the body and call
-/// sites (e.g. a `for`-iterated parameter shows as `T[]` rather than a bare
-/// `unknown`).
-fn function_signature(full: &FullAnalysis, f: &prepoly_hir::FunInfo) -> String {
-    let body_span = f.decl.body.span;
-    let params: Vec<Option<prepoly_hir::Type>> = f
-        .signature
-        .params
-        .iter()
-        .map(|p| {
-            if p.resolved_ty.is_some() || p.name == "self" {
-                None
-            } else {
-                nav::inferred_param_type(full, body_span, &p.name)
-            }
-        })
-        .collect();
-    let ret = if f.signature.ret_ty.is_none() {
-        nav::inferred_return(full, &f.signature.name)
-    } else {
-        None
-    };
-    render_signature_full(&f.signature, &params, ret.as_ref())
+/// Hover for a free function: its generic signature plus, when it is called with
+/// concrete types, the `unknown_N` bindings recovered from a call site (see
+/// [`crate::features::signature`]).
+fn function_hover(full: &FullAnalysis, f: &prepoly_hir::FunInfo, range: Option<Range>) -> Hover {
+    Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: crate::features::signature::function_markdown(full, f),
+        }),
+        range,
+    }
 }
 
 /// Map a global span back to a document-local range, when it lies in the active

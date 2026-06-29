@@ -88,9 +88,9 @@ fn hover_text(h: &tower_lsp_server::ls_types::Hover) -> String {
     }
 }
 
-/// Hovering a function whose parameter and return are unannotated shows them as
-/// numbered `unknown_N`, the contract for an inference-open function type. The
-/// function is never called, so no concrete return type can be recovered.
+/// An unannotated function's type uses numbered `unknown_N`, sharing a variable
+/// where the source does: identity `fun id(x) { return x }` has the same
+/// `unknown_0` for its parameter and return. Uncalled, so no bindings section.
 #[test]
 fn hover_shows_unknown_numbered_signature() {
     let src = "fun id(x) {\n    return x\n}\n";
@@ -98,14 +98,30 @@ fn hover_shows_unknown_numbered_signature() {
     let (doc, pos) = position(src, "id(x)", false);
     let h = hover::hover(&doc, &full, pos).expect("hover over the function name");
     let text = hover_text(&h);
-    assert!(text.contains("fun id("), "got: {text}");
     assert!(
-        text.contains("unknown_0"),
-        "param should be unknown_0: {text}"
+        text.contains("fun id(x: unknown_0) -> unknown_0"),
+        "identity type: {text}"
     );
+    assert!(!text.contains("---"), "no bindings without a call: {text}");
+}
+
+/// A generic function called with concrete types shows its generic signature and
+/// a separated section binding each `unknown_N` to the call's concrete type.
+#[test]
+fn hover_shows_call_site_bindings() {
+    let src = "fun f(a, b) {\n    return a\n}\n\nf(1, \"x\")\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "f(a, b)", false);
+    let h = hover::hover(&doc, &full, pos).expect("hover over the function name");
+    let text = hover_text(&h);
     assert!(
-        text.contains("unknown_1"),
-        "return should be unknown_1: {text}"
+        text.contains("fun f(a: unknown_0, b: unknown_1) -> unknown_0"),
+        "generic signature: {text}"
+    );
+    assert!(text.contains("---"), "separator: {text}");
+    assert!(
+        text.contains("unknown_0 = int32") && text.contains("unknown_1 = string"),
+        "bindings: {text}"
     );
 }
 

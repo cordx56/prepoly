@@ -498,12 +498,12 @@ impl<'p> Hm<'p> {
                 var, iter, body, ..
             } => {
                 let iter_ty = self.infer_expr(iter);
-                // The loop variable is the element type of a slice/array iterable;
-                // otherwise leave it open (permissive for unmodelled iterables).
-                let elem = match self.solver.resolve(&iter_ty) {
-                    Type::Slice(e) | Type::Array(e, _) => *e,
-                    _ => self.solver.fresh(InferenceVarKind::Source),
-                };
+                // The loop variable is the element type of a slice/array iterable
+                // (seeing through reference/mutability wrappers, so iterating a
+                // `ref(mut(T[]))` binds `ref(mut(T))` elements); otherwise leave it
+                // open (permissive for unmodelled iterables).
+                let elem = prepoly_hir::index_element(&self.solver.resolve(&iter_ty))
+                    .unwrap_or_else(|| self.solver.fresh(InferenceVarKind::Source));
                 self.scopes.push(HashMap::new());
                 self.bind_mono(var, elem);
                 for stmt in &body.stmts {
@@ -846,17 +846,29 @@ impl<'p> Hm<'p> {
                 self.unify(&tb, &Type::Bool, b.span());
                 Type::Bool
             }
-            // Comparisons relate two operands of the same type, yielding a bool.
+            // Comparisons yield a bool. Two operands of differing numeric types are
+            // compared via their common type (no unification); otherwise they must
+            // unify (same type, or a literal adapting to the other).
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                self.unify(&ta, &tb, span);
+                let (ra, rb) = (self.solver.resolve(&ta), self.solver.resolve(&tb));
+                if prepoly_hir::common_numeric_type(&ra, &rb).is_none() {
+                    self.unify(&ta, &tb, span);
+                }
                 Type::Bool
             }
-            // Arithmetic and bitwise operators relate two operands of one type and
-            // return it. (`+` also covers string concatenation, which unifies the
-            // two `Str` operands the same way.)
+            // Arithmetic and bitwise operators relate two operands and return their
+            // type. Differing numeric operands implicitly convert to a common type;
+            // otherwise the operands unify (same type, a literal adapting, or two
+            // `Str` for `+` concatenation).
             _ => {
-                self.unify(&ta, &tb, span);
-                ta
+                let (ra, rb) = (self.solver.resolve(&ta), self.solver.resolve(&tb));
+                match prepoly_hir::common_numeric_type(&ra, &rb) {
+                    Some(common) => common,
+                    None => {
+                        self.unify(&ta, &tb, span);
+                        ta
+                    }
+                }
             }
         }
     }

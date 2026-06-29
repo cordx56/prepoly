@@ -63,25 +63,43 @@ fn server_answers_hover_definition_completion_and_diagnostics() {
                 "params":{"textDocument":{"uri":URI},"position":pos}})
         };
 
-        send(&mut stdin, &json!({"jsonrpc":"2.0","id":1,"method":"initialize",
-            "params":{"capabilities":{},"rootUri":null}}));
+        send(
+            &mut stdin,
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+            "params":{"capabilities":{},"rootUri":null}}),
+        );
         read_until(&mut reader, &mut seen, 1);
 
-        send(&mut stdin, &json!({"jsonrpc":"2.0","method":"initialized","params":{}}));
-        send(&mut stdin, &json!({"jsonrpc":"2.0","method":"textDocument/didOpen",
-            "params":{"textDocument":{"uri":URI,"languageId":"prepoly","version":1,"text":SRC}}}));
+        send(
+            &mut stdin,
+            &json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+        );
+        send(
+            &mut stdin,
+            &json!({"jsonrpc":"2.0","method":"textDocument/didOpen",
+            "params":{"textDocument":{"uri":URI,"languageId":"prepoly","version":1,"text":SRC}}}),
+        );
 
         send(&mut stdin, &at(2, "textDocument/hover"));
         read_until(&mut reader, &mut seen, 2);
         send(&mut stdin, &at(3, "textDocument/definition"));
         read_until(&mut reader, &mut seen, 3);
-        send(&mut stdin, &json!({"jsonrpc":"2.0","id":4,"method":"textDocument/completion",
-            "params":{"textDocument":{"uri":URI},"position":pos,"context":{"triggerKind":1}}}));
+        send(
+            &mut stdin,
+            &json!({"jsonrpc":"2.0","id":4,"method":"textDocument/completion",
+            "params":{"textDocument":{"uri":URI},"position":pos,"context":{"triggerKind":1}}}),
+        );
         read_until(&mut reader, &mut seen, 4);
 
-        send(&mut stdin, &json!({"jsonrpc":"2.0","id":5,"method":"shutdown","params":{}}));
+        send(
+            &mut stdin,
+            &json!({"jsonrpc":"2.0","id":5,"method":"shutdown","params":{}}),
+        );
         read_until(&mut reader, &mut seen, 5);
-        send(&mut stdin, &json!({"jsonrpc":"2.0","method":"exit","params":{}}));
+        send(
+            &mut stdin,
+            &json!({"jsonrpc":"2.0","method":"exit","params":{}}),
+        );
 
         let _ = tx.send(seen);
     });

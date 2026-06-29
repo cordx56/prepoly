@@ -149,9 +149,15 @@ impl<'p> ProgramCtx<'p> {
             TypeExpr::Ref(..) => false,
             TypeExpr::Mut(inner, _) => self.type_needs_copy(module, inner),
             TypeExpr::Array(..) | TypeExpr::Tuple(..) | TypeExpr::Anonymous(..) => true,
-            TypeExpr::Named(n, _) => self.program.resolve_type(module, n).is_some_and(|info| {
-                matches!(info.kind, TypeKind::Record { .. } | TypeKind::Sum { .. })
-            }),
+            // `infer` is resolved per call site and may be any heap value, so it is
+            // deep-copied too -- the back end's `__deep_copy` is type-directed, so a
+            // primitive instantiation is a no-op. A named record/sum is also copied.
+            TypeExpr::Named(n, _) => {
+                n == "infer"
+                    || self.program.resolve_type(module, n).is_some_and(|info| {
+                        matches!(info.kind, TypeKind::Record { .. } | TypeKind::Sum { .. })
+                    })
+            }
             _ => false,
         }
     }

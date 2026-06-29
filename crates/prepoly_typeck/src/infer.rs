@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use prepoly_hir::{
     CallableSignature, Constness, FloatKind, IntKind, NominalType, ParamInfo, Program,
-    Substitution, Type, TypeKind, TypedProgram,
+    Substitution, Type, TypeKind, TypedProgram, common_numeric_type,
 };
 use prepoly_lexer::Span;
 use prepoly_parser::ast::*;
@@ -459,10 +459,8 @@ impl<'a> Checker<'a> {
                     var, iter, body, ..
                 } => {
                     let iter_ty = self.infer_expr_light(iter, env, errors);
-                    let item_ty = match iter_ty {
-                        Type::Array(inner, _) | Type::Slice(inner) => *inner,
-                        _ => self.fresh_unknown(),
-                    };
+                    let item_ty = prepoly_hir::index_element(&iter_ty)
+                        .unwrap_or_else(|| self.fresh_unknown());
                     let mut inner = env.clone();
                     inner.insert(var.clone(), item_ty);
                     self.infer_returns_block(body, &mut inner, normal, errors);
@@ -594,9 +592,7 @@ impl<'a> Checker<'a> {
                     .map(|e| self.infer_expr_light(e, env, errors))
                     .unwrap_or_else(|| self.fresh_unknown()),
             )),
-            Expr::Range(lo, _, _) => {
-                Type::Slice(Box::new(self.infer_expr_light(lo, env, errors)))
-            }
+            Expr::Range(lo, _, _) => Type::Slice(Box::new(self.infer_expr_light(lo, env, errors))),
             Expr::TypeLit(name, fields, _) => self.infer_type_lit_light(name, fields, env, errors),
             Expr::VariantLit(name, variant, fields, _) => {
                 self.infer_variant_lit_light(name, variant, fields, env, errors)
@@ -1240,30 +1236,19 @@ impl<'a> Checker<'a> {
                 var, iter, body, ..
             } => {
                 let iter_ty = self.check_expr(iter, scopes);
-                let item_ty = match self.resolve(&iter_ty) {
-                    Type::Array(inner, _) | Type::Slice(inner) => *inner,
-                    Type::Unknown(_) => {
-                        // The only iterable types are arrays and slices, so an
-                        // as-yet-unconstrained iterand must be a sequence:
-                        // constrain it to a slice of a fresh element type. An
-                        // unannotated parameter iterated by `for` is then inferred
-                        // as `T[]` with the loop variable as its element `T`, and
-                        // a non-iterable argument is rejected where the slice
-                        // constraint fails to unify.
-                        let elem = self.fresh_unknown();
-                        let _ = self
-                            .solver
-                            .unify(&iter_ty, &Type::Slice(Box::new(elem.clone())));
-                        elem
-                    }
-                    other => {
-                        self.errors.push(TypeError {
-                            message: format!("cannot iterate over `{}`", other.display()),
-                            span: iter.span(),
-                        });
-                        self.fresh_unknown()
-                    }
-                };
+                // Iterating sees through reference/mutability wrappers and binds the
+                // loop variable to the element of the same kind: over `ref(mut(T[]))`
+                // each element is a `ref(mut(T))`, so mutating it writes through.
+                let item_ty = self.for_element(&iter_ty).unwrap_or_else(|| {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "cannot iterate over `{}`",
+                            self.resolve(&iter_ty).display()
+                        ),
+                        span: iter.span(),
+                    });
+                    self.fresh_unknown()
+                });
                 scopes.push(HashMap::from([(var.clone(), item_ty)]));
                 self.const_scopes.push(HashSet::new());
                 self.check_block(body, scopes);
@@ -3592,8 +3577,11 @@ impl<'a> Checker<'a> {
         right: &Type,
         span: prepoly_lexer::Span,
     ) -> Type {
-        let left = self.resolve(left);
-        let right = self.resolve(right);
+        // See through reference/mutability wrappers: an operand read through a
+        // reference (e.g. a `ref(mut(int32))` array element bound by a `for` loop)
+        // operates on its underlying value, and the operator yields that value type.
+        let left = peel_ref_mut(&self.resolve(left)).clone();
+        let right = peel_ref_mut(&self.resolve(right)).clone();
         if matches!(left, Type::Nullable(_)) || matches!(right, Type::Nullable(_)) {
             if is_null_comparison(op, &left, &right) {
                 return Type::Bool;
@@ -3605,27 +3593,34 @@ impl<'a> Checker<'a> {
         if let Some(ty) = integer_literal_binary_type(op, left_expr, &left, right_expr, &right) {
             return ty;
         }
+        // A numeric arithmetic/comparison between mixed types implicitly converts
+        // both to their common type (DESIGN: implicit numeric conversions).
+        let is_unknown = matches!(left, Type::Unknown(_)) || matches!(right, Type::Unknown(_));
+        let numeric_common = common_numeric_type(&left, &right);
         match op {
-            BinOp::Add => match (&left, &right) {
-                (Type::Int(a), Type::Int(b)) if a == b => left,
-                (Type::Float(a), Type::Float(b)) if a == b => left,
-                (Type::Str, Type::Str) => Type::Str,
-                (Type::Unknown(_), _) | (_, Type::Unknown(_)) => self.fresh_unknown(),
-                _ => self.binary_error(op, &left, &right, span),
-            },
-            BinOp::Sub | BinOp::Mul | BinOp::Div => match (&left, &right) {
-                (Type::Int(a), Type::Int(b)) if a == b => left,
-                (Type::Float(a), Type::Float(b)) if a == b => left,
-                (Type::Unknown(_), _) | (_, Type::Unknown(_)) => self.fresh_unknown(),
-                _ => self.binary_error(op, &left, &right, span),
-            },
-            BinOp::Rem => match (&left, &right) {
-                (Type::Int(a), Type::Int(b)) if a == b => left,
-                (Type::Unknown(_), _) | (_, Type::Unknown(_)) => self.fresh_unknown(),
-                _ => self.binary_error(op, &left, &right, span),
-            },
+            BinOp::Add if matches!((&left, &right), (Type::Str, Type::Str)) => Type::Str,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                if is_unknown {
+                    self.fresh_unknown()
+                } else if let Some(t) = numeric_common {
+                    t
+                } else {
+                    self.binary_error(op, &left, &right, span)
+                }
+            }
+            // Remainder is integer-only (the widths may still differ).
+            BinOp::Rem => {
+                if is_unknown {
+                    self.fresh_unknown()
+                } else if let Some(t @ Type::Int(_)) = numeric_common {
+                    t
+                } else {
+                    self.binary_error(op, &left, &right, span)
+                }
+            }
             BinOp::Eq | BinOp::Ne => {
-                if self.can_unify(&left, &right)
+                if numeric_common.is_some()
+                    || self.can_unify(&left, &right)
                     || matches!(left, Type::Never)
                     || matches!(right, Type::Never)
                 {
@@ -3636,12 +3631,13 @@ impl<'a> Checker<'a> {
             }
             // Ordering comparisons are numeric only (DESIGN.md 5.9). Strings have
             // no ordering: `==`/`!=` compare them, but `<`/`>`/`<=`/`>=` do not.
-            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => match (&left, &right) {
-                (Type::Int(a), Type::Int(b)) if a == b => Type::Bool,
-                (Type::Float(a), Type::Float(b)) if a == b => Type::Bool,
-                (Type::Unknown(_), _) | (_, Type::Unknown(_)) => Type::Bool,
-                _ => self.binary_error(op, &left, &right, span),
-            },
+            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                if numeric_common.is_some() || is_unknown {
+                    Type::Bool
+                } else {
+                    self.binary_error(op, &left, &right, span)
+                }
+            }
             BinOp::And | BinOp::Or => match (&left, &right) {
                 (Type::Bool, Type::Bool) => Type::Bool,
                 (Type::Unknown(_), _) | (_, Type::Unknown(_)) => Type::Bool,
@@ -3674,6 +3670,28 @@ impl<'a> Checker<'a> {
             span,
         });
         self.fresh_unknown()
+    }
+
+    /// The element type bound by a `for` loop over `iter_ty`, seeing through
+    /// reference/mutability wrappers and re-applying them to the element (over a
+    /// `ref(mut(T[]))` each element is a `ref(mut(T))`). An as-yet-unconstrained
+    /// iterand (possibly under wrappers) is constrained to a slice. `None` when the
+    /// iterand is not a sequence.
+    fn for_element(&mut self, iter_ty: &Type) -> Option<Type> {
+        match self.resolve(iter_ty) {
+            Type::Slice(e) | Type::Array(e, _) => Some(*e),
+            Type::Ref(inner) => self.for_element(&inner).map(|e| Type::Ref(Box::new(e))),
+            Type::Mut(inner) => self.for_element(&inner).map(|e| Type::Mut(Box::new(e))),
+            Type::ConstOf(inner) => self.for_element(&inner).map(|e| Type::ConstOf(Box::new(e))),
+            resolved @ Type::Unknown(_) => {
+                let elem = self.fresh_unknown();
+                let _ = self
+                    .solver
+                    .unify(&resolved, &Type::Slice(Box::new(elem.clone())));
+                Some(elem)
+            }
+            _ => None,
+        }
     }
 
     fn expect_int_index(&mut self, ty: &Type, span: prepoly_lexer::Span) {
@@ -4930,7 +4948,6 @@ fn env_from_scopes(scopes: &ScopeStack) -> HashMap<String, Type> {
     }
     env
 }
-
 
 fn is_maybe_indexable(ty: &Type) -> bool {
     matches!(

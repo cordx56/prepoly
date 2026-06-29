@@ -1343,12 +1343,14 @@ mod tests {
     }
 
     #[test]
-    fn integer_literal_comparison_rejects_out_of_range_context() {
+    fn integer_literal_comparison_converts_to_a_common_type() {
+        // A `uint8` compared with an int literal converts both to a common int
+        // type (the comparison is valid even if the literal is out of `uint8`'s
+        // range -- it is simply never equal).
         let e = errs("fun main() {\n    let x: uint8 = 1\n    if x == 300 { return }\n}\n");
         assert!(
-            e.iter()
-                .any(|m| m.contains("operator `==` is not defined for `uint8` and `int32`")),
-            "{e:?}"
+            e.is_empty(),
+            "uint8 == int literal should compare via a common type: {e:?}"
         );
     }
 
@@ -1367,12 +1369,10 @@ mod tests {
     }
 
     #[test]
-    fn int_float_mix_is_reported() {
+    fn int_float_mix_converts_to_float() {
+        // An int operand with a float operand implicitly converts to that float.
         let e = errs("fun main() {\n    let a = 1\n    let b = 2.0\n    let c = a + b\n}\n");
-        assert!(
-            e.iter().any(|m| m.contains("no implicit conversion")),
-            "{e:?}"
-        );
+        assert!(e.is_empty(), "int + float should convert to float: {e:?}");
     }
 
     #[test]
@@ -1549,28 +1549,21 @@ mod tests {
     }
 
     #[test]
-    fn exact_integer_kind_is_required() {
+    fn mixed_integer_widths_convert_to_the_wider() {
+        // Two integers of different widths implicitly convert to the wider.
         let e =
             errs("fun main() {\n    let a: int8 = 1\n    let b: int32 = 2\n    let c = a + b\n}\n");
-        assert!(
-            e.iter()
-                .any(|m| m.contains("operator `+` is not defined for `int8` and `int32`")),
-            "{e:?}"
-        );
+        assert!(e.is_empty(), "int8 + int32 should convert to int32: {e:?}");
     }
 
     #[test]
-    fn generic_function_rejects_mixed_integer_kinds() {
-        // The function body is checked again with the concrete call-site types,
-        // so unknown parameters cannot bypass the exact numeric-kind rule.
+    fn generic_function_allows_mixed_integer_kinds() {
+        // The function body is checked again with the concrete call-site types;
+        // `uint8 + int32` implicitly converts to the wider signed int.
         let e = errs(
             "fun add(x, y) {\n    return x + y\n}\nfun main() {\n    let r = add(uint8.from(1)!, 2)\n}\n",
         );
-        assert!(
-            e.iter()
-                .any(|m| m.contains("operator `+` is not defined for `uint8` and `int32`")),
-            "{e:?}"
-        );
+        assert!(e.is_empty(), "uint8 + int32 should convert: {e:?}");
     }
 
     #[test]
@@ -1747,12 +1740,14 @@ mod tests {
 
     #[test]
     fn result_match_binds_ok_payload_type() {
+        // The match binds `value` at the Ok payload type (`uint8`): using it where
+        // a string is required is rejected, confirming the payload type.
         let e = errs(
-            "fun main() {\n    let r = uint8.from(1)\n    match r {\n        Ok { value } => value + 300,\n        Err { error } => 0,\n    }\n}\n",
+            "fun main() {\n    let r = uint8.from(1)\n    let z = match r {\n        Ok { value } => {\n            let s: string = value\n            0\n        },\n        Err { error } => 0,\n    }\n}\n",
         );
         assert!(
             e.iter()
-                .any(|m| m.contains("operator `+` is not defined for `uint8` and `int32`")),
+                .any(|m| m.contains("cannot use `uint8` where `string` is required")),
             "{e:?}"
         );
     }

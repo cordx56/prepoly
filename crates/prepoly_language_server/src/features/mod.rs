@@ -7,3 +7,4 @@ pub mod diagnostics;
 pub mod hover;
 pub mod nav;
 pub mod semantic_tokens;
+pub mod signature;

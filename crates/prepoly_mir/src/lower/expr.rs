@@ -54,7 +54,7 @@ impl<'a, 'p> FnLower<'a, 'p> {
     }
 
     /// A bare identifier: a bound local, otherwise a module global read.
-    fn lower_ident(&mut self, name: &str) -> Operand {
+    pub(crate) fn lower_ident(&mut self, name: &str) -> Operand {
         // A cell-promoted name reads element 0 of its one-element cell array.
         if self.is_cell(name)
             && let Some(local) = self.lookup(name)

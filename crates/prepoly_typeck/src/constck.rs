@@ -168,9 +168,22 @@ impl ConstChecker<'_> {
                 self.check_expr(cond, scopes);
                 self.check_block(body, scopes);
             }
-            Stmt::For { iter, body, .. } => {
+            Stmt::For {
+                var, iter, body, ..
+            } => {
                 self.check_expr(iter, scopes);
+                // The loop variable is a reference into each element, so its
+                // mutability matches the iterand: iterating an immutable array (a
+                // const, or a `ref(T)` parameter) binds it const, rejecting an
+                // in-place mutation like `e *= 2`. A mutable array binds it mutable.
+                let binding = if self.const_root(iter, scopes).is_some() {
+                    Binding::Const(None)
+                } else {
+                    Binding::Mutable
+                };
+                scopes.push(HashMap::from([(var.clone(), binding)]));
                 self.check_block(body, scopes);
+                scopes.pop();
             }
             Stmt::Expr(expr) => self.check_expr(expr, scopes),
             Stmt::Return(Some(expr), _) => self.check_expr(expr, scopes),

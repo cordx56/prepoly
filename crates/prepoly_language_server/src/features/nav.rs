@@ -2,7 +2,9 @@
 //! finding the identifier under the cursor, finding the tightest typed
 //! expression at an offset, and turning a global span into an LSP `Location`.
 
-use prepoly_hir::{Type, TypedExpr, TypedExprKind};
+use std::collections::{HashMap, HashSet};
+
+use prepoly_hir::{FunInfo, Type, TypedExpr, TypedExprKind};
 use prepoly_lexer::{Span, TokenKind, lex};
 use prepoly_parser::ast::{
     Block, Expr, Member, Module, Param, Pattern, Stmt, StrSeg, TopLevel, TypeBody,
@@ -192,25 +194,150 @@ pub fn inferred_return(full: &FullAnalysis, name: &str) -> Option<Type> {
     ret
 }
 
-/// The inferred type of parameter `name` of a function whose body is `body_span`,
-/// recovered from a use of the parameter in the body (the signature tables hold
-/// only the annotation). Prefers the first use that has a structural type over a
-/// bare inference variable, and the generic check's recording (earlier in the
-/// list) over a call-site monomorphization -- so e.g. a `for`-iterated parameter
-/// shows as the general `T[]` rather than a concrete element type.
-pub fn inferred_param_type(full: &FullAnalysis, body_span: Span, name: &str) -> Option<Type> {
-    let uses = || {
-        full.typed
-            .expressions
-            .iter()
-            .filter(move |e| {
-                matches!(&e.kind, TypedExprKind::Ident(n) if n == name) && within(body_span, e.span)
-            })
-    };
-    uses()
-        .find(|e| !matches!(e.ty, Type::Unknown(_)))
-        .or_else(|| uses().next())
+/// The generic type of parameter `name` (function body `body_span`), recovered
+/// from the first recorded use of the parameter in the body. The body is checked
+/// generically before any call-site monomorphization, so the first recording
+/// carries the inference variables of the function's general type (e.g. a
+/// `for`-iterated parameter shows as `T[]`), not a concrete instance.
+pub fn generic_param_type(full: &FullAnalysis, body_span: Span, name: &str) -> Option<Type> {
+    full.typed
+        .expressions
+        .iter()
+        .find(|e| {
+            matches!(&e.kind, TypedExprKind::Ident(n) if n == name) && within(body_span, e.span)
+        })
         .map(|e| e.ty.clone())
+}
+
+/// The generic return type of `f`, from the first recorded `return` expression
+/// in its body. Used to show a param-dependent return as a variable (`-> T`); a
+/// fallible/wrapped return type is not visible here and comes from the call site
+/// (see [`inferred_return`]).
+pub fn generic_return_type(full: &FullAnalysis, f: &FunInfo) -> Option<Type> {
+    let span = first_return_value_span(&f.decl.body)?;
+    full.typed
+        .expressions
+        .iter()
+        .find(|e| e.span == span)
+        .map(|e| e.ty.clone())
+}
+
+fn first_return_value_span(block: &Block) -> Option<Span> {
+    block.stmts.iter().find_map(return_value_in_stmt)
+}
+
+fn return_value_in_stmt(s: &Stmt) -> Option<Span> {
+    match s {
+        Stmt::Return(Some(e), _) => Some(e.span()),
+        Stmt::While { body, .. } | Stmt::For { body, .. } => first_return_value_span(body),
+        Stmt::Expr(e) => return_value_in_expr(e),
+        _ => None,
+    }
+}
+
+fn return_value_in_expr(e: &Expr) -> Option<Span> {
+    match e {
+        Expr::If(_, then, els, _) | Expr::IfLet(_, _, then, els, _) => {
+            first_return_value_span(then)
+                .or_else(|| els.as_ref().and_then(|x| return_value_in_expr(x)))
+        }
+        Expr::Match(_, arms, _) => arms.iter().find_map(|a| return_value_in_expr(&a.body)),
+        Expr::Block(b, _) => first_return_value_span(b),
+        _ => None,
+    }
+}
+
+/// The concrete argument types of the first call to free function `name`, for
+/// binding the function's generic type variables to a call instance.
+pub fn call_arg_types(full: &FullAnalysis, name: &str) -> Option<Vec<Type>> {
+    let mut result = None;
+    let mut visit = |e: &Expr| {
+        if result.is_some() {
+            return;
+        }
+        if let Expr::Call(callee, args, _) = e
+            && let Expr::Ident(n, _) = callee.as_ref()
+            && n == name
+        {
+            let types = args
+                .iter()
+                .map(|a| {
+                    let span = a.expr.span();
+                    full.typed
+                        .expressions
+                        .iter()
+                        .find(|te| te.span == span)
+                        .map(|te| te.ty.clone())
+                        .unwrap_or(Type::Unknown(u32::MAX))
+                })
+                .collect();
+            result = Some(types);
+        }
+    };
+    walk_exprs(&full.main_ast, &mut visit);
+    result
+}
+
+/// Bind the inference variables of a `generic` type to the corresponding parts
+/// of a `concrete` type, accumulating `variable id -> concrete type`. Transparent
+/// wrappers (`?`/`const`/`mut`/`ref`) on either side are peeled first.
+pub fn collect_bindings(generic: &Type, concrete: &Type, out: &mut HashMap<u32, Type>) {
+    let g = peel_transparent(generic);
+    let c = peel_transparent(concrete);
+    match (g, c) {
+        (Type::Unknown(id), _) => {
+            out.entry(*id).or_insert_with(|| c.clone());
+        }
+        (Type::Array(g, _) | Type::Slice(g), Type::Array(c, _) | Type::Slice(c)) => {
+            collect_bindings(g, c, out);
+        }
+        (Type::Tuple(gs), Type::Tuple(cs)) => {
+            gs.iter()
+                .zip(cs)
+                .for_each(|(g, c)| collect_bindings(g, c, out));
+        }
+        (Type::Fun(gps, gr), Type::Fun(cps, cr)) => {
+            gps.iter()
+                .zip(cps)
+                .for_each(|(g, c)| collect_bindings(g, c, out));
+            collect_bindings(gr, cr, out);
+        }
+        _ => {}
+    }
+}
+
+/// The inference variable ids occurring anywhere in `ty`.
+pub fn free_vars(ty: &Type) -> HashSet<u32> {
+    let mut vars = HashSet::new();
+    fn go(ty: &Type, vars: &mut HashSet<u32>) {
+        match ty {
+            Type::Unknown(id) => {
+                vars.insert(*id);
+            }
+            Type::Array(t, _)
+            | Type::Slice(t)
+            | Type::Nullable(t)
+            | Type::ConstOf(t)
+            | Type::Mut(t)
+            | Type::Ref(t) => go(t, vars),
+            Type::Tuple(ts) => ts.iter().for_each(|t| go(t, vars)),
+            Type::Fun(ps, r) => {
+                ps.iter().for_each(|p| go(p, vars));
+                go(r, vars);
+            }
+            Type::Record(n) | Type::Sum(n) => n.substitution.iter().for_each(|(_, t)| go(t, vars)),
+            _ => {}
+        }
+    }
+    go(ty, &mut vars);
+    vars
+}
+
+fn peel_transparent(ty: &Type) -> &Type {
+    match ty {
+        Type::Nullable(t) | Type::ConstOf(t) | Type::Mut(t) | Type::Ref(t) => peel_transparent(t),
+        other => other,
+    }
 }
 
 /// Visit every expression in the module (pre-order), for span-based lookups.

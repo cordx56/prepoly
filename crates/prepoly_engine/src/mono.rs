@@ -1426,6 +1426,17 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         let tb = self.operand_type(b, local_types)?;
         let a_local = matches!(a, Operand::Local(_));
         let b_local = matches!(b, Operand::Local(_));
+        // Mixed numeric operands yield their common type (int width/signedness, and
+        // int-with-float), except that an integer literal adapts to a variable's
+        // int type (one operand a variable, the other a literal).
+        if let (Some(ta), Some(tb)) = (&ta, &tb) {
+            let (na, nb) = (unwrap_nullable(ta), unwrap_nullable(tb));
+            let int_literal_adapt =
+                matches!((na, nb), (Type::Int(_), Type::Int(_))) && (a_local != b_local);
+            if !int_literal_adapt && let Some(common) = prepoly_hir::common_numeric_type(na, nb) {
+                return Ok(Some(common));
+            }
+        }
         let pick = if a_local && ta.is_some() {
             ta
         } else if b_local && tb.is_some() {
@@ -2190,15 +2201,18 @@ fn check_bin(op: BinOp, a: &Type, b: &Type) -> Result<(), String> {
         return Ok(());
     }
     let same = a == b;
-    let numeric = |t: &Type| matches!(t, Type::Int(_) | Type::Float(_));
     let integer = |t: &Type| matches!(t, Type::Int(_));
     let both_int = integer(a) && integer(b);
     match op {
         // `+` is numeric addition or string concatenation. Two integers may
         // differ in width (a literal adapts to the other's type; the back end
         // coerces both to the operand type).
+        // Numeric operands of differing types implicitly convert to their common
+        // type (mixed width, signedness, and int-with-float); `+` also concatenates
+        // two strings.
         BinOp::Add => {
-            if both_int || (same && (numeric(a) || matches!(a, Type::Str))) {
+            if prepoly_hir::common_numeric_type(a, b).is_some() || (same && matches!(a, Type::Str))
+            {
                 Ok(())
             } else {
                 Err(format!(
@@ -2209,7 +2223,7 @@ fn check_bin(op: BinOp, a: &Type, b: &Type) -> Result<(), String> {
             }
         }
         BinOp::Sub | BinOp::Mul | BinOp::Div => {
-            if both_int || (same && numeric(a)) {
+            if prepoly_hir::common_numeric_type(a, b).is_some() {
                 Ok(())
             } else {
                 Err(format!(
@@ -2219,7 +2233,20 @@ fn check_bin(op: BinOp, a: &Type, b: &Type) -> Result<(), String> {
                 ))
             }
         }
-        BinOp::Rem | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+        // Remainder is integer-only but the widths may differ (coerced to the
+        // common int); the bitwise/shift operators need two equal integers.
+        BinOp::Rem => {
+            if both_int {
+                Ok(())
+            } else {
+                Err(format!(
+                    "`Rem` needs two integer operands, got {} and {}",
+                    a.display(),
+                    b.display()
+                ))
+            }
+        }
+        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
             if same && integer(a) {
                 Ok(())
             } else {
@@ -2230,10 +2257,12 @@ fn check_bin(op: BinOp, a: &Type, b: &Type) -> Result<(), String> {
                 ))
             }
         }
-        // Two integers may differ in width (coerced to the wider); equality also
-        // applies to bool and string; float comparisons need equal widths.
+        // A numeric comparison converts mixed operands to a common type; equality
+        // also applies to two bools or two strings.
         BinOp::Eq | BinOp::Ne => {
-            if both_int || (same && (numeric(a) || matches!(a, Type::Bool | Type::Str))) {
+            if prepoly_hir::common_numeric_type(a, b).is_some()
+                || (same && matches!(a, Type::Bool | Type::Str))
+            {
                 Ok(())
             } else {
                 Err(format!(
@@ -2244,7 +2273,7 @@ fn check_bin(op: BinOp, a: &Type, b: &Type) -> Result<(), String> {
             }
         }
         BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-            if both_int || (same && matches!(a, Type::Float(_))) {
+            if prepoly_hir::common_numeric_type(a, b).is_some() {
                 Ok(())
             } else {
                 Err(format!(
@@ -2278,15 +2307,19 @@ pub fn binary_operand_type(a: &Operand, b: &Operand, local_types: &[Type]) -> Ty
     let tb = unwrap_nullable(&rb).clone();
     let a_local = matches!(a, Operand::Local(_));
     let b_local = matches!(b, Operand::Local(_));
-    if let (Type::Int(ka), Type::Int(kb)) = (&ta, &tb) {
-        // A literal adapts to a variable's int type (e.g. `byte - 32` stays
-        // uint8); between two variables (or two literals) the wider wins.
-        return match (a_local, b_local) {
-            (true, false) => ta,
-            (false, true) => tb,
-            _ if int_bits(*ka) >= int_bits(*kb) => ta,
-            _ => tb,
-        };
+    // An integer literal adapts to a variable's int type (e.g. `byte - 32` stays
+    // uint8) rather than forcing a common type.
+    if let (Type::Int(_), Type::Int(_)) = (&ta, &tb) {
+        match (a_local, b_local) {
+            (true, false) => return ta,
+            (false, true) => return tb,
+            _ => {}
+        }
+    }
+    // Otherwise mixed numeric operands implicitly convert to their common type
+    // (wider width, signedness, and int-with-float).
+    if let Some(common) = prepoly_hir::common_numeric_type(&ta, &tb) {
+        return common;
     }
     if a_local {
         ta
@@ -2423,16 +2456,6 @@ fn resolve_alias(alias: &HashMap<LocalId, LocalId>, mut l: LocalId) -> LocalId {
         }
     }
     l
-}
-
-/// Bit width of an integer kind.
-fn int_bits(k: IntKind) -> u32 {
-    match k {
-        IntKind::I8 | IntKind::U8 => 8,
-        IntKind::I16 | IntKind::U16 => 16,
-        IntKind::I32 | IntKind::U32 => 32,
-        IntKind::I64 | IntKind::U64 => 64,
-    }
 }
 
 #[cfg(test)]

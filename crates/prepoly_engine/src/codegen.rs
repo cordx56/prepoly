@@ -1401,6 +1401,11 @@ pub trait Codegen {
             return self.coerce(v, inner, expected_ty);
         }
         match lit {
+            // An integer literal in a float context (e.g. `e * 2` where `e` is a
+            // float) is the corresponding float constant.
+            Literal::Int(v) if matches!(expected_ty, Type::Float(_)) => {
+                self.const_float(*v as f64, expected_ty)
+            }
             Literal::Int(v) => self.const_int(*v, expected_ty),
             Literal::Float(v) => self.const_float(*v, expected_ty),
             Literal::Bool(b) => self.const_bool(*b),

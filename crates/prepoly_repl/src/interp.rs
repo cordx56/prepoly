@@ -998,6 +998,15 @@ fn coerce(v: Value, from: &Type, to: &Type) -> Value {
         (Value::Int(x), Type::Int(k)) if !matches!(from, Type::Int(kf) if kf == k) => {
             Value::Int(norm_int(*x, *k))
         }
+        // An integer implicitly converts to a float (e.g. `int * float`).
+        (Value::Int(x), Type::Float(fk)) => {
+            let f = *x as f64;
+            Value::Float(if matches!(fk, FloatKind::F32) {
+                (f as f32) as f64
+            } else {
+                f
+            })
+        }
         (Value::Float(x), Type::Float(FloatKind::F32)) => Value::Float((*x as f32) as f64),
         _ => v,
     }

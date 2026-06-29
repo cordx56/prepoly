@@ -45,6 +45,15 @@ impl UnknownNamer {
         self.next += 1;
         format!("unknown_{n}")
     }
+
+    /// The `(inference variable id, N)` pairs assigned so far, in `N` order, so a
+    /// caller can render an `unknown_N = <type>` binding for each variable using
+    /// the same numbering the signature was rendered with.
+    pub fn assignments(&self) -> Vec<(u32, usize)> {
+        let mut pairs: Vec<(u32, usize)> = self.by_id.iter().map(|(&id, &n)| (id, n)).collect();
+        pairs.sort_by_key(|&(_, n)| n);
+        pairs
+    }
 }
 
 /// Render a resolved type, mapping inference variables to `unknown_N`.
@@ -128,32 +137,46 @@ pub fn render_signature_full(
     inferred_params: &[Option<Type>],
     inferred_ret: Option<&Type>,
 ) -> String {
-    let mut namer = UnknownNamer::default();
-    let params = sig
-        .params
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            // The method receiver is written bare in source and its type is the
-            // enclosing type, so it is shown as `self` without consuming an
-            // `unknown_N` slot -- the first real unannotated parameter is then
-            // `unknown_0`.
-            if p.name == "self" && p.resolved_ty.is_none() {
-                return "self".to_string();
-            }
-            let inferred = inferred_params.get(i).and_then(|o| o.as_ref());
-            let ty = match (&p.resolved_ty, inferred) {
-                (Some(t), _) => render_type(t, &mut namer),
-                (None, Some(t)) => render_type(t, &mut namer),
-                (None, None) => namer.fresh(),
-            };
-            format!("{}: {ty}", p.name)
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    render_signature_into(
+        sig,
+        inferred_params,
+        inferred_ret,
+        &mut UnknownNamer::default(),
+    )
+}
+
+/// Like [`render_signature_full`], but numbering inference variables through the
+/// caller's `namer`. After it returns, `namer.assignments()` gives the
+/// `unknown_N` numbering used, so a binding section (`unknown_N = <type>`) can be
+/// rendered with the same names.
+pub fn render_signature_into(
+    sig: &CallableSignature,
+    inferred_params: &[Option<Type>],
+    inferred_ret: Option<&Type>,
+    namer: &mut UnknownNamer,
+) -> String {
+    let mut rendered = Vec::with_capacity(sig.params.len());
+    for (i, p) in sig.params.iter().enumerate() {
+        // The method receiver is written bare in source and its type is the
+        // enclosing type, so it is shown as `self` without consuming an
+        // `unknown_N` slot -- the first real unannotated parameter is then
+        // `unknown_0`.
+        if p.name == "self" && p.resolved_ty.is_none() {
+            rendered.push("self".to_string());
+            continue;
+        }
+        let inferred = inferred_params.get(i).and_then(|o| o.as_ref());
+        let ty = match (&p.resolved_ty, inferred) {
+            (Some(t), _) => render_type(t, namer),
+            (None, Some(t)) => render_type(t, namer),
+            (None, None) => namer.fresh(),
+        };
+        rendered.push(format!("{}: {ty}", p.name));
+    }
+    let params = rendered.join(", ");
     let ret = match (&sig.ret_ty, inferred_ret) {
-        (Some(t), _) => render_type(t, &mut namer),
-        (None, Some(t)) => render_type(t, &mut namer),
+        (Some(t), _) => render_type(t, namer),
+        (None, Some(t)) => render_type(t, namer),
         (None, None) => namer.fresh(),
     };
     format!("fun {}({params}) -> {ret}", sig.name)

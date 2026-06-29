@@ -1587,7 +1587,6 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
                             "copyfn",
                         )
                         .unwrap()
-                        .into()
                 } else {
                     self.i64c(0)
                 };
@@ -2194,6 +2193,26 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
                 .build_float_trunc(v.into_float_value(), self.ctx.f32_type(), "ft")
                 .unwrap()
                 .into(),
+            // An integer implicitly converts to a float (e.g. `int * float`):
+            // signed/unsigned int-to-float per the int's signedness.
+            (Type::Int(k), Type::Float(fk)) => {
+                let target = match fk {
+                    FloatKind::F32 => self.ctx.f32_type(),
+                    FloatKind::F64 => self.ctx.f64_type(),
+                };
+                let iv = v.into_int_value();
+                if int_signed(*k) {
+                    self.builder
+                        .build_signed_int_to_float(iv, target, "sitofp")
+                        .unwrap()
+                        .into()
+                } else {
+                    self.builder
+                        .build_unsigned_int_to_float(iv, target, "uitofp")
+                        .unwrap()
+                        .into()
+                }
+            }
             // Nullables share the pointer repr (null = null pointer); coercion
             // between two nullables is identity, value -> nullable wraps it in a
             // heap cell, and nullable -> value unwraps (narrowing).
