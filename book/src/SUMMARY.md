@@ -12,3 +12,4 @@
 - [Hello, world!](hello.md)
 - [Defining types](types.md)
 - [Modules](modules.md)
+- [LLM agents](llm.md)

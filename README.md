@@ -8,15 +8,17 @@
   <p>
     with just-in-time compilation
   </p>
+  <p>
+    <a href="https://prepoly.56.ax">Documentation / Playground</a>
+  </p>
 </div>
 
 prepoly is a statically type-checked, structurally typed language with
 Hindley-Milner type inference. The name contracts *pre-typed* and *polymorphic*:
 it runs like an interpreter, but every function is fully type-checked just before
-it executes, and most types are inferred rather than written. One checked program
-either **JIT-compiles** to native code through LLVM or runs on a **pure-Rust
-interpreter** (used for the REPL and for WebAssembly); both back ends share the
-entire front end, so they accept the same programs.
+it executes, and most types are inferred rather than written. A program is run by
+a **just-in-time compiler** for native speed, or by an **interpreter** for the
+REPL and WebAssembly.
 
 ```
 $ prepoly hello.pp
@@ -35,6 +37,9 @@ Hello, world!
 - **Exhaustive pattern matching** with `match` and `if let`.
 - **Nullable and Result.** `T?` is narrowed by `if`; `T!` is a `Result`, with
   `error(x)`, `expr!` early-return propagation, and automatic `Ok` wrapping.
+- **Structural conversion.** `T.from(v)` for a record type `T` yields `T?` — the
+  record when `v` structurally has all of `T`'s fields, else null — so
+  `if let p = T.from(v)` branches on the actual value.
 - **References with inferred mutability.** An unannotated parameter is passed by
   reference and its mutability is inferred; `infer` deep-copies instead; `ref(T)`
   and `ref(mut(T))` are explicit. Closures capture by mutable reference.
@@ -43,8 +48,7 @@ Hello, world!
 - **A file-based module system** where each file is a module and a leading `_`
   marks a private name, plus a small standard library written in prepoly itself.
 - **Experimental concurrency.** `spawn(f)` and `with(cown, f)` are the only
-  primitives; the compiler infers ownership (move/freeze/cown), never the
-  programmer.
+  primitives; the compiler infers ownership, never the programmer.
 - **Tooling:** an interactive REPL and an LSP server (`prepoly-lsp`).
 
 ## Language tour
@@ -151,17 +155,14 @@ use and runs cargo with it on the path. Use `./x` in place of `cargo`:
 ./x cargo clippy --workspace --all-targets
 ```
 
-LLVM is needed only by the JIT back end. The rest of the toolchain is pure Rust,
-so the front/middle ends and an interpreter-only driver build with plain `cargo`:
+LLVM is needed only by the JIT. An interpreter-only build needs no LLVM and uses
+plain `cargo`:
 
 ```sh
-cargo test -p prepoly_typeck                        # any portable crate, no ./x
-cargo build -p prepoly_driver --no-default-features # interpreter-only driver
+cargo build -p prepoly_driver --no-default-features # interpreter only, no LLVM
 ```
 
-prepoly also builds for `wasm32-wasip1`, where the JIT cannot link; the driver's
-`build.rs` turns the default `jit` feature off for wasm targets and runs through
-the interpreter.
+prepoly also builds for `wasm32-wasip1`, where it runs through the interpreter.
 
 ## Running programs
 
@@ -173,30 +174,23 @@ prepoly repl                      # interactive interpreter session
 prepoly                           # no arguments: same interactive session
 ```
 
-A bare file argument is type-checked and then run on the LLVM JIT when it is
-available (the default `jit` feature on a non-wasm target), otherwise on the
-interpreter. Each module's top-level statements run in dependency order, then
-`main` is called if defined. The standard library is an implicit prelude.
+A bare file argument is type-checked and then run on the JIT when it is built in,
+otherwise on the interpreter. Each module's top-level statements run in dependency
+order, then `main` is called if defined. The standard library is an implicit
+prelude.
 
 A tutorial lives in [`book/`](book/) (mdBook), and every language feature has a
 runnable example in [`examples/`](examples/), each checked by `cargo test`.
 
 ## Status
 
-Sequential execution is the tested, supported path: the workspace is `clippy`-
-clean and its test suite passes. Two sharp edges are worth knowing:
+Sequential execution is the tested, supported path. Two sharp edges are worth
+knowing:
 
-- **Concurrency is experimental and not yet guaranteed data-race-free.** `spawn`
-  runs a closure on a real OS thread and the compiler promotes shared captures
-  (freeze for read-only, cown for mutated), but the mutation analysis does not
-  yet cover every form, and spawned work is joined only at the end of `main`, so
-  a read that races ahead of the tasks needs an explicit `sync()`. Treat it as a
-  preview.
-- **The JIT and interpreter agree on the common case but not on every corner.**
-  They are pinned to identical output on the example suite, yet a few edges still
-  differ (over-width bit shifts, `NaN != NaN`, non-boundary string slices, and a
-  handful of others), so code that leans on such corners may behave differently
-  across the two back ends.
+- **Concurrency is experimental.** Scheduling is unstructured, so code that must
+  observe a spawned task's results calls `sync()` first. Treat it as a preview.
+- **The JIT and interpreter agree across the language's tested surface,** but a
+  few numeric and string corner cases can still differ between the two.
 
 ## License
 
