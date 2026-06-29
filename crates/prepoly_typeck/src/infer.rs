@@ -713,6 +713,13 @@ impl<'a> Checker<'a> {
         env: &HashMap<String, Type>,
         errors: &mut Vec<(Type, Span)>,
     ) -> Type {
+        if name.is_empty() {
+            let field_tys: Vec<(String, Type)> = fields
+                .iter()
+                .map(|(fname, e)| (fname.clone(), self.infer_expr_light(e, env, errors)))
+                .collect();
+            return prepoly_hir::structural_record(field_tys);
+        }
         let tn = self.resolve_self_name(name);
         let resolved = self
             .resolve_type_symbol(&tn)
@@ -1013,6 +1020,13 @@ impl<'a> Checker<'a> {
                     ts.push(self.resolve_type(e)?);
                 }
                 Ok(Type::Tuple(ts))
+            }
+            TypeExpr::Anonymous(fields, _) => {
+                let mut resolved = Vec::with_capacity(fields.len());
+                for (name, fty) in fields {
+                    resolved.push((name.clone(), self.resolve_type(fty)?));
+                }
+                Ok(prepoly_hir::structural_record(resolved))
             }
         }
     }
@@ -1605,7 +1619,24 @@ impl<'a> Checker<'a> {
             }
             Expr::If(cond, then, els, span) => {
                 let cond_ty = self.check_condition(cond, scopes);
-                let truth = cond_ty.static_truthiness();
+                let mut truth = cond_ty.static_truthiness();
+                // Structural graceful degradation (the goal's structure-type rules):
+                // when the condition is a field access on a structural value that
+                // does not satisfy the then-branch for this concrete value (a
+                // missing field reads as `never?`, or a present field whose type the
+                // then-branch cannot use), the `if` is statically false rather than a
+                // type error. Probe the then-branch; if it does not type-check, fold
+                // the condition to false so its dead arm is discarded.
+                if truth != Some(false) && matches!(&**cond, Expr::Field(..)) {
+                    let mark = self.errors.len();
+                    let mut probe = scopes.clone();
+                    self.apply_truthy_narrowing(cond, &mut probe);
+                    self.check_branch(then, &mut probe, false);
+                    if self.errors.len() > mark {
+                        self.errors.truncate(mark);
+                        truth = Some(false);
+                    }
+                }
                 let mut then_scopes = scopes.clone();
                 self.apply_truthy_narrowing(cond, &mut then_scopes);
                 // A statically-known condition makes one arm unreachable. Its
@@ -1805,6 +1836,15 @@ impl<'a> Checker<'a> {
         span: prepoly_lexer::Span,
         scopes: &mut ScopeStack,
     ) -> Type {
+        // Anonymous structure literal `{ f: v, ... }`: a structural record whose
+        // field types are the field value types.
+        if name.is_empty() {
+            let field_tys: Vec<(String, Type)> = fields
+                .iter()
+                .map(|(fname, e)| (fname.clone(), self.check_expr(e, scopes)))
+                .collect();
+            return prepoly_hir::structural_record(field_tys);
+        }
         let tn = self.resolve_self_name(name);
         let Some(symbol) = self.resolve_type_symbol(&tn) else {
             return self.fresh_unknown();
@@ -1960,28 +2000,25 @@ impl<'a> Checker<'a> {
                 if let Some(ty) = record.substitution.get(name) {
                     return ty.clone();
                 }
-                let Some(info) = self.program.type_by_id(record.id) else {
-                    return self.fresh_unknown();
-                };
-                let TypeKind::Record { fields, methods } = &info.kind else {
-                    return self.fresh_unknown();
-                };
-                if let Some(field) = fields.iter().find(|f| f.name == name) {
-                    return field
-                        .resolved_ty
-                        .clone()
-                        .unwrap_or_else(|| self.fresh_unknown());
+                if let Some(info) = self.program.type_by_id(record.id)
+                    && let TypeKind::Record { fields, methods } = &info.kind
+                {
+                    if let Some(field) = fields.iter().find(|f| f.name == name) {
+                        return field
+                            .resolved_ty
+                            .clone()
+                            .unwrap_or_else(|| self.fresh_unknown());
+                    }
+                    // A bare `recv.method` (method as a value) is left to the runtime.
+                    if methods.contains_key(name) {
+                        return self.fresh_unknown();
+                    }
                 }
-                // A bare `recv.method` (method as a value) is left to the
-                // runtime; only genuinely-absent members are a static error.
-                if methods.contains_key(name) {
-                    return self.fresh_unknown();
-                }
-                self.errors.push(TypeError {
-                    message: format!("`{record}` has no field `{name}`"),
-                    span,
-                });
-                self.fresh_unknown()
+                // Accessing a field a structure does not have is an inference
+                // failure typed as the always-null `never?`: an `if` on it is
+                // statically false (then-branch pruned), and using it as a non-null
+                // value is still rejected (sound). (DESIGN: structure-type rules.)
+                Type::null()
             }
             Type::Sum(sum) => {
                 if let Some(variant_ty) = self.self_variant_field_type(base, &sum, name) {
@@ -3018,6 +3055,40 @@ impl<'a> Checker<'a> {
         span: prepoly_lexer::Span,
         scopes: &mut ScopeStack,
     ) -> Type {
+        // `T.from(v)`: a structural conversion to record type `T`. Every field `T`
+        // declares must be present in `v`'s (structure) type; a missing field is a
+        // type error (DESIGN.md: the goal's `T.from` contract).
+        if method == "from" {
+            let target = self
+                .program
+                .types
+                .get(qualifier)
+                .and_then(|info| match &info.kind {
+                    TypeKind::Record { fields, .. } => Some((
+                        info.type_ref(),
+                        info.name.clone(),
+                        fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
+                    )),
+                    _ => None,
+                });
+            if let Some((ty, tname, field_names)) = target {
+                if let Some(arg) = args.first() {
+                    let v = self.check_expr(&arg.expr, scopes);
+                    let v = self.resolve(&v);
+                    for fname in &field_names {
+                        if !self.field_is_present(&v, fname) {
+                            self.errors.push(TypeError {
+                                message: format!(
+                                    "`{tname}.from`: the value is missing field `{fname}` required by `{tname}`"
+                                ),
+                                span,
+                            });
+                        }
+                    }
+                }
+                return ty;
+            }
+        }
         if let Some(ret) = self.primitive_static_call(qualifier, method, args, scopes) {
             return ret;
         }
@@ -4312,6 +4383,21 @@ impl<'a> Checker<'a> {
         self.program
             .resolve_type(&self.current_module, name)
             .map(|t| t.type_ref())
+    }
+
+    /// Whether a (resolved) structure type genuinely declares `field` (in its
+    /// substitution or its declaration), not the absent-field fallback. Used by
+    /// `T.from` to detect a missing required field.
+    fn field_is_present(&self, ty: &Type, field: &str) -> bool {
+        let Type::Record(n) = ty else {
+            return false;
+        };
+        if n.substitution.get(field).is_some() {
+            return true;
+        }
+        matches!(self.program.type_by_id(n.id), Some(info)
+            if matches!(&info.kind, TypeKind::Record { fields, .. }
+                if fields.iter().any(|f| f.name == field)))
     }
 
     fn is_type_word(&self, name: &str) -> bool {

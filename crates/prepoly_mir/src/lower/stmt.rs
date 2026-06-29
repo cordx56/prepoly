@@ -49,6 +49,13 @@ pub(crate) fn resolve_simple_type(te: &TypeExpr) -> Option<Type> {
                 .collect::<Option<Vec<_>>>()?;
             Some(Type::Tuple(ts))
         }
+        TypeExpr::Anonymous(fields, _) => {
+            let mut resolved = Vec::with_capacity(fields.len());
+            for (name, fty) in fields {
+                resolved.push((name.clone(), resolve_simple_type(fty)?));
+            }
+            Some(prepoly_hir::structural_record(resolved))
+        }
     }
 }
 

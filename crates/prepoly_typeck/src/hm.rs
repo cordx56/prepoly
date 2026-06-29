@@ -632,6 +632,13 @@ impl<'p> Hm<'p> {
                                 self.solver.fresh(InferenceVarKind::Source)
                             }
                             Some(ty) => ty,
+                            // Accessing a field a structure does not have is not an
+                            // error: the access is an inference failure -- typed as
+                            // the always-null `never?`, so an `if` on it is
+                            // statically false (its then-branch is pruned) and using
+                            // it as a non-null value is still rejected. A sum's
+                            // non-common field still errors (a real variant mistake).
+                            None if matches!(resolved, Type::Record(_)) => Type::null(),
                             None => {
                                 self.error(
                                     format!("`{}` has no field `{}`", resolved.display(), field),
@@ -713,6 +720,15 @@ impl<'p> Hm<'p> {
             }
             // Record construction `Name { f: v, .. }`: each field value must match
             // the declared field type; the result is that record type.
+            Expr::TypeLit(name, fields, span) if name.is_empty() => {
+                // Anonymous structure literal `{ f: v, ... }`: a structural record
+                // whose field types are the field value types.
+                let field_tys: Vec<(String, Type)> = fields
+                    .iter()
+                    .map(|(fname, e)| (fname.clone(), self.infer_expr(e)))
+                    .collect();
+                prepoly_hir::structural_record(field_tys)
+            }
             Expr::TypeLit(name, fields, span) => {
                 let record = self.named_type(name);
                 for (fname, e) in fields {
@@ -848,6 +864,38 @@ impl<'p> Hm<'p> {
         args: &[prepoly_parser::ast::Arg],
         span: Span,
     ) -> Option<Type> {
+        // `T.from(v)` for a record type `T`: a structural conversion. The result is
+        // `T`; `v`'s (structure) type must contain every field `T` declares, else a
+        // type error. (Numeric/string `from` is handled below.)
+        if method == "from" {
+            let target = self
+                .program
+                .resolve_type(&self.module, type_name)
+                .and_then(|info| match &info.kind {
+                    TypeKind::Record { fields, .. } => Some((
+                        info.type_ref(),
+                        fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
+                    )),
+                    _ => None,
+                });
+            if let Some((ty, field_names)) = target {
+                if let Some(arg) = args.first() {
+                    let v = self.infer_expr(&arg.expr);
+                    let v = self.solver.resolve(&v);
+                    for fname in &field_names {
+                        if !self.field_is_present(&v, fname) {
+                            self.error(
+                                format!(
+                                    "`{type_name}.from`: the value is missing field `{fname}` required by `{type_name}`"
+                                ),
+                                span,
+                            );
+                        }
+                    }
+                }
+                return Some(ty);
+            }
+        }
         let int_kind = IntKind::from_name(type_name);
         let float_kind = match type_name {
             "float32" => Some(FloatKind::F32),
@@ -1156,6 +1204,22 @@ impl<'p> Hm<'p> {
         self.program
             .resolve_type(&self.module, name)
             .map(TypeInfo::type_ref)
+    }
+
+    /// Whether a (resolved) structure type genuinely declares `field` -- in its
+    /// substitution (a constructed/structural record) or its declaration (a bare
+    /// nominal). Unlike `record_field_type` this does not treat an absent field as
+    /// the nullable fallback, so `T.from` can detect a missing required field.
+    fn field_is_present(&self, ty: &Type, field: &str) -> bool {
+        let Type::Record(n) = ty else {
+            return false;
+        };
+        if n.substitution.get(field).is_some() {
+            return true;
+        }
+        matches!(self.program.type_by_id(n.id), Some(info)
+            if matches!(&info.kind, TypeKind::Record { fields, .. }
+                if fields.iter().any(|f| f.name == field)))
     }
 
     /// Whether `name` is a variant of the sum type `scrut` resolves to (so a bare

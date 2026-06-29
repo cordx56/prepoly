@@ -80,6 +80,19 @@ impl<'p> ProgramCtx<'p> {
             || matches!(name, "float32" | "float64" | "string" | "bool")
     }
 
+    /// The declared field names of record type `ty` (as seen from `module`), in
+    /// declaration order, or `None` if `ty` is not a record. Used to desugar
+    /// `T.from(v)` into a record built from `v`'s fields.
+    fn record_field_names(&self, module: &[String], ty: &str) -> Option<Vec<String>> {
+        let info = self.program.resolve_type(module, ty)?;
+        match &info.kind {
+            TypeKind::Record { fields, .. } => {
+                Some(fields.iter().map(|f| f.name.clone()).collect())
+            }
+            _ => None,
+        }
+    }
+
     /// The dispatch key for a static call `ty.method(...)`: a user type's unique
     /// symbol, or the primitive type word unchanged (matches codegen).
     fn static_qualifier(&self, module: &[String], ty: &str) -> String {

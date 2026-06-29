@@ -24,8 +24,8 @@ use prepoly_hir::{
     FloatKind, IntKind, NominalType, Program, RESULT_TYPE_ID, Substitution, Type, TypeKind,
 };
 use prepoly_mir::{
-    Callee, ClosureId, LocalId, MirBody, MirClosure, MirFunction, MirMethod, MirProgram, MirStmt,
-    Operand, Projection, Rvalue, Terminator,
+    BlockId, Callee, ClosureId, LocalId, MirBody, MirClosure, MirFunction, MirMethod, MirProgram,
+    MirStmt, Operand, Projection, Rvalue, Terminator,
 };
 use prepoly_parser::ast::{BinOp, UnaryOp};
 
@@ -269,8 +269,9 @@ pub fn numeric_conv_ret(ty: &str, method: &str) -> Option<Type> {
 fn is_printable(ty: &Type) -> bool {
     match ty {
         Type::Str | Type::Bool | Type::Int(_) | Type::Float(_) => true,
-        // A nullable of a printable: prints its value, or `null`.
-        Type::Nullable(inner) => is_printable(inner),
+        // A nullable of a printable prints its value, or `null`. A `never?` (the
+        // null literal, or an absent structural field) is always null and prints so.
+        Type::Nullable(inner) => matches!(**inner, Type::Never) || is_printable(inner),
         // An array/slice renders as `[e0, e1, ...]` when its elements are printable.
         Type::Slice(elem) | Type::Array(elem, _) => is_printable(elem),
         // A tuple renders as `[e0, e1, ...]` when every element is printable.
@@ -727,6 +728,34 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             .enumerate()
             .map(|(i, t)| t.ok_or_else(|| format!("cannot infer type of local _{i} in `{sym}`")))
             .collect::<Result<Vec<_>, _>>()?;
+
+        // A non-fallible callable with a non-null declared return cannot return an
+        // always-null value (`never?` -- a `null` literal or an absent structural
+        // field). This is the back-end backstop that keeps the deferred boundary
+        // (DESIGN.md 7.3) sound: a runtime type lacking a field the consumer reads
+        // at a non-null type is rejected here rather than returning a null
+        // reinterpreted as that type. Only *reachable* returns count: an `if` on a
+        // statically-false condition (an absent field reads as `never?`) makes its
+        // then-branch unreachable, so a `return absent.field` there is pruned, not
+        // an error. (A `T?` return is also not rejected -- it may be a narrowed,
+        // sound value; the front end's null check governs statically-typed code.)
+        if !fallible
+            && let Some(declared) = &ret
+            && !matches!(declared, Type::Nullable(_))
+        {
+            let reachable = reachable_blocks(body, &local_types, declared);
+            for (i, block) in body.blocks.iter().enumerate() {
+                if reachable[i]
+                    && let Terminator::Return(op) = &block.term
+                    && matches!(operand_type_of(op, &local_types), Type::Nullable(inner) if matches!(*inner, Type::Never))
+                {
+                    return Err(format!(
+                        "returns a null value where `{}` is required (in `{sym}`)",
+                        declared.display()
+                    ));
+                }
+            }
+        }
         // The instance's parameter types are the parameters' resolved types, not the
         // raw argument types. An annotated parameter keeps its declared type -- a
         // nullable `int32?` stays nullable even when a value or an omitted-null
@@ -1392,6 +1421,18 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         fields: &[(String, Operand)],
         local_types: &[Option<Type>],
     ) -> Result<Option<Type>, String> {
+        // An anonymous structure literal `{ f: v, ... }` (empty type name) is a
+        // structural record: its field types come straight from the field values.
+        if ty.is_empty() {
+            let mut out = Vec::with_capacity(fields.len());
+            for (name, op) in fields {
+                match self.operand_type(op, local_types)? {
+                    Some(t) => out.push((name.clone(), t)),
+                    None => return Ok(None),
+                }
+            }
+            return Ok(Some(prepoly_hir::structural_record(out)));
+        }
         let info = self
             .program
             .resolve_type(module, ty)
@@ -1757,18 +1798,21 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         if let Some(t) = n.substitution.get(field) {
             return Ok(Some(resolve_nominal(self.program, t)));
         }
-        let info = self
-            .program
-            .type_by_id(n.id)
-            .ok_or_else(|| format!("unknown record type id {}", n.id))?;
-        let TypeKind::Record { fields, .. } = &info.kind else {
-            return Err(format!("type id {} is not a record", n.id));
-        };
-        Ok(fields
-            .iter()
-            .find(|f| f.name == field)
-            .and_then(|f| f.resolved_ty.clone())
-            .map(|t| resolve_nominal(self.program, &t)))
+        // A declared record contributes its field's declared type (or `None` --
+        // deferred -- for a present-but-unannotated field); a structural record (no
+        // declaration, e.g. an anonymous structure) has only its substitution fields.
+        if let Some(info) = self.program.type_by_id(n.id)
+            && let TypeKind::Record { fields, .. } = &info.kind
+            && let Some(f) = fields.iter().find(|f| f.name == field)
+        {
+            return Ok(f
+                .resolved_ty
+                .clone()
+                .map(|t| resolve_nominal(self.program, &t)));
+        }
+        // Accessing a field the structure does not have reads as null (matches the
+        // type checker, which types such an access nullable).
+        Ok(Some(Type::null()))
     }
 
     /// Check operator/type constraints over a fully-typed body (the static
@@ -1973,7 +2017,7 @@ pub fn operand_type_of(op: &Operand, local_types: &[Type]) -> Type {
 /// contain (e.g. `a * 2` where `a` is a bare `null`) -- while monomorphization
 /// still types both arms so a fallible callable's `Result` payloads infer from
 /// whichever arm supplies each.
-pub fn reachable_blocks(body: &MirBody, local_types: &[Type]) -> Vec<bool> {
+pub fn reachable_blocks(body: &MirBody, local_types: &[Type], ret: &Type) -> Vec<bool> {
     let mut reached = vec![false; body.blocks.len()];
     let mut stack = vec![body.entry];
     while let Some(id) = stack.pop() {
@@ -1983,7 +2027,7 @@ pub fn reachable_blocks(body: &MirBody, local_types: &[Type]) -> Vec<bool> {
         match &body.block(id).term {
             Terminator::Goto(b) => stack.push(*b),
             Terminator::CondBranch { cond, then, els } => {
-                match operand_type_of(cond, local_types).static_truthiness() {
+                match cond_static_truthiness(body, local_types, ret, cond, *then) {
                     Some(true) => stack.push(*then),
                     Some(false) => stack.push(*els),
                     None => {
@@ -1996,6 +2040,63 @@ pub fn reachable_blocks(body: &MirBody, local_types: &[Type]) -> Vec<bool> {
         }
     }
     reached
+}
+
+/// The effective static truthiness of an `if` condition, used to fold a branch.
+/// Beyond the operand's own static truthiness, a *structural* `if` folds to false
+/// when its then-branch cannot type for this concrete value: its reachable return
+/// is a clear primitive-kind mismatch against the function's return type (a
+/// structural field that is absent -- already `never?` -- or present at the wrong
+/// type). The front end prunes the same dead arm; here the back end skips emitting
+/// it so a generic function applied to a non-fitting structure degrades gracefully
+/// (the guarded use is dead) rather than miscompiling.
+pub fn cond_static_truthiness(
+    body: &MirBody,
+    local_types: &[Type],
+    ret: &Type,
+    cond: &Operand,
+    then: BlockId,
+) -> Option<bool> {
+    if then_return_conflicts(body, local_types, ret, then) {
+        return Some(false);
+    }
+    operand_type_of(cond, local_types).static_truthiness()
+}
+
+/// Whether the then-branch reached unconditionally from `then` ends in a `return`
+/// whose value's primitive kind clearly differs from `ret` (no coercion bridges
+/// `string` vs `int`, etc.). A nested branch in the then-arm is not folded.
+fn then_return_conflicts(body: &MirBody, local_types: &[Type], ret: &Type, then: BlockId) -> bool {
+    let mut id = then;
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert(id.index()) {
+            return false;
+        }
+        match &body.block(id).term {
+            Terminator::Return(op) => {
+                return primitive_kind_conflict(&operand_type_of(op, local_types), ret);
+            }
+            Terminator::Goto(b) => id = *b,
+            _ => return false,
+        }
+    }
+}
+
+/// Whether `a` and `b` are concrete primitives of different kinds (string/bool/
+/// int/float), a mismatch no implicit conversion bridges. Non-primitive types are
+/// treated as non-conflicting (conservative -- the fold only targets clear cases).
+fn primitive_kind_conflict(a: &Type, b: &Type) -> bool {
+    fn kind(t: &Type) -> Option<u8> {
+        match t {
+            Type::Str => Some(0),
+            Type::Bool => Some(1),
+            Type::Int(_) => Some(2),
+            Type::Float(_) => Some(3),
+            _ => None,
+        }
+    }
+    matches!((kind(a), kind(b)), (Some(x), Some(y)) if x != y)
 }
 
 /// Check that a binary operator's operands have compatible, in-scope types.

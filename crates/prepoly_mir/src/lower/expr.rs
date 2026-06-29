@@ -404,6 +404,30 @@ impl<'a, 'p> FnLower<'a, 'p> {
                 && self.ctx.is_type_word(tname)
             {
                 let tn = self.resolve_self_name(tname);
+                // `T.from(v)` for a structure type `T`: build a `T` record by reading
+                // each of `T`'s declared fields from `v` (the front end checks `v`
+                // has them all). A record literal reuses construction/layout.
+                if method == "from"
+                    && let Some(field_names) = self.ctx.record_field_names(&self.module, &tn)
+                {
+                    let v = self
+                        .lower_args(args)
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(Operand::void);
+                    let subj = self.b.make_local(v);
+                    let fields = field_names
+                        .into_iter()
+                        .map(|name| {
+                            let load = self.b.emit(Rvalue::Load(Place::projected(
+                                subj,
+                                vec![Projection::Field(name.clone())],
+                            )));
+                            (name, load)
+                        })
+                        .collect();
+                    return Rvalue::Record { ty: tn, fields };
+                }
                 let qualifier = self.ctx.static_qualifier(&self.module, &tn);
                 let ops = self.lower_args(args);
                 return Rvalue::Call(

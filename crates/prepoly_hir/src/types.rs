@@ -12,6 +12,30 @@ pub const RESULT_TYPE_NAME: &str = "Result";
 pub const RESULT_OK_VALUE: &str = "Ok.value";
 pub const RESULT_ERR_ERROR: &str = "Err.error";
 
+/// Type id and name of a *structural* record: one with no declaration, whose
+/// layout and identity come from its field substitution rather than a nominal
+/// definition. Used for anonymous structures (`{ f: v }` / `anonymous { f: T }`)
+/// and records built at the deserialize boundary (DESIGN.md 7.3); both share this
+/// id/name so structurally-identical values are the same type. Negative so it
+/// never collides with a declared type's id.
+pub const STRUCTURAL_RECORD_ID: i32 = i32::MIN;
+pub const STRUCTURAL_RECORD_NAME: &str = "<structural>";
+
+/// Build a structural `Type::Record` from named field types (an anonymous
+/// structure). Field order is irrelevant -- the substitution is keyed by name and
+/// laid out in sorted name order by the back ends.
+pub fn structural_record(fields: Vec<(String, Type)>) -> Type {
+    let mut subst = Substitution::empty();
+    for (name, ty) in fields {
+        subst.insert(name, ty);
+    }
+    Type::Record(NominalType::with_substitution(
+        STRUCTURAL_RECORD_ID,
+        STRUCTURAL_RECORD_NAME,
+        subst,
+    ))
+}
+
 /// Placeholder `Unknown` id that [`resolve`] emits for the `infer` type word and
 /// for the error payload a `T!` annotation leaves open. It is not a real
 /// inference variable: each occurrence must be replaced with a distinct fresh
@@ -383,6 +407,15 @@ fn resolve_inner(
                 .map(|e| resolve_inner(e, nominal_info))
                 .collect::<Result<_, _>>()?,
         )),
+        // An anonymous structure resolves to a structural record whose field types
+        // are resolved in place.
+        TypeExpr::Anonymous(fields, _) => {
+            let mut resolved = Vec::with_capacity(fields.len());
+            for (name, fty) in fields {
+                resolved.push((name.clone(), resolve_inner(fty, nominal_info)?));
+            }
+            Ok(structural_record(resolved))
+        }
     }
 }
 

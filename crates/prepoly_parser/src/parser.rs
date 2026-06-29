@@ -85,6 +85,24 @@ impl Parser {
         std::mem::discriminant(self.peek()) == std::mem::discriminant(&k)
     }
 
+    /// True when the current `{` opens an anonymous-record literal (`{ field: ...`)
+    /// rather than a block: the next non-newline token is an identifier followed by
+    /// a `:`. Lookahead only -- the parser position is unchanged.
+    fn at_anon_record(&self) -> bool {
+        let skip_newlines = |mut i: usize| {
+            while i < self.tokens.len() && matches!(self.tokens[i].kind, TokenKind::Newline) {
+                i += 1;
+            }
+            i
+        };
+        let name = skip_newlines(self.pos + 1);
+        if name >= self.tokens.len() || !matches!(self.tokens[name].kind, TokenKind::Ident(_)) {
+            return false;
+        }
+        let colon = skip_newlines(name + 1);
+        colon < self.tokens.len() && matches!(self.tokens[colon].kind, TokenKind::Colon)
+    }
+
     /// Skip newline tokens when inside brackets. Maintains the invariant that
     /// `pos` never rests on a newline while `depth > 0`.
     fn norm(&mut self) {
@@ -777,9 +795,17 @@ impl Parser {
             TokenKind::LParen => self.parse_paren_or_closure(),
             TokenKind::LBracket => self.parse_array_lit(),
             TokenKind::LBrace => {
-                let b = self.parse_block()?;
-                let s = b.span;
-                Ok(Expr::Block(b, s))
+                // `{ field: value, ... }` in expression position is an anonymous
+                // record literal (a structural record value); otherwise a block.
+                // `no_struct` (an `if`/`while`/`for` header) keeps it a block.
+                if !self.no_struct && self.at_anon_record() {
+                    let (fields, hi) = self.parse_field_inits()?;
+                    Ok(Expr::TypeLit(String::new(), fields, span.merge(hi)))
+                } else {
+                    let b = self.parse_block()?;
+                    let s = b.span;
+                    Ok(Expr::Block(b, s))
+                }
             }
             TokenKind::If => self.parse_if(),
             TokenKind::Match => self.parse_match(),
@@ -1110,6 +1136,22 @@ impl Parser {
             Ok(TypeExpr::Fun(params, Box::new(ret), span.merge(hi)))
         } else {
             let (name, _) = self.ident()?;
+            // `anonymous { field: T, ... }` -- an inline structural record type.
+            if name == "anonymous" && self.at_p(TokenKind::LBrace) {
+                self.open(TokenKind::LBrace, "'{'")?;
+                let mut fields = Vec::new();
+                while !self.at_p(TokenKind::RBrace) {
+                    let (fname, _) = self.ident()?;
+                    self.expect(TokenKind::Colon, "':'")?;
+                    let fty = self.parse_type()?;
+                    fields.push((fname, fty));
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                }
+                let hi = self.close(TokenKind::RBrace, "'}'")?;
+                return Ok(TypeExpr::Anonymous(fields, span.merge(hi)));
+            }
             Ok(TypeExpr::Named(name, span))
         }
     }

@@ -116,9 +116,25 @@ impl<'p, 'm> Interp<'p, 'm> {
                 Terminator::Return(op) => return self.eval_return(f, frame, op),
                 Terminator::Goto(b) => block = *b,
                 Terminator::CondBranch { cond, then, els } => {
-                    let cty = operand_type_of(cond, &f.local_types);
-                    let v = self.eval_operand(f, frame, cond, &cty)?;
-                    block = if truthy(&v, &cty) { *then } else { *els };
+                    // Mirror the typed back end's fold (including the structural
+                    // graceful degradation: a then-branch that cannot type for this
+                    // value makes the condition statically false), then fall back to
+                    // a runtime truthiness test.
+                    block = match prepoly_engine::cond_static_truthiness(
+                        f.body,
+                        &f.local_types,
+                        &f.ret,
+                        cond,
+                        *then,
+                    ) {
+                        Some(true) => *then,
+                        Some(false) => *els,
+                        None => {
+                            let cty = operand_type_of(cond, &f.local_types);
+                            let v = self.eval_operand(f, frame, cond, &cty)?;
+                            if truthy(&v, &cty) { *then } else { *els }
+                        }
+                    };
                 }
                 Terminator::Unreachable => {
                     return Err("reached unreachable code (an unmatched `match`)".into());
@@ -790,9 +806,11 @@ fn length_of(v: &Value) -> Value {
 fn load_field(base: &Value, field: &str) -> Value {
     let key = field_key(field);
     match base {
-        Value::Record(m) => m.borrow().get(key).cloned().unwrap_or(Value::Void),
+        // A field the record does not have reads as null (an absent structural
+        // field; the type checker typed the access nullable).
+        Value::Record(m) => m.borrow().get(key).cloned().unwrap_or(Value::Null),
         Value::Variant(v) => v.fields.borrow().get(key).cloned().unwrap_or(Value::Void),
-        _ => Value::Void,
+        _ => Value::Null,
     }
 }
 

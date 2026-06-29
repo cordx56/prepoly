@@ -329,6 +329,11 @@ fn refs_type(ty: &TypeExpr, out: &mut HashSet<String>) {
                 refs_type(e, out);
             }
         }
+        TypeExpr::Anonymous(fields, _) => {
+            for (_, fty) in fields {
+                refs_type(fty, out);
+            }
+        }
     }
 }
 

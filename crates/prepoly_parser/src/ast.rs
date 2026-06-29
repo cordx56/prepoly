@@ -309,6 +309,9 @@ pub enum TypeExpr {
     Fallible(Box<TypeExpr>, Span),
     /// `[T0, T1, ...]` fixed-length heterogeneous tuple.
     Tuple(Vec<TypeExpr>, Span),
+    /// `anonymous { field: T, ... }` -- an inline anonymous structure type
+    /// (a structural record with the given fields, no nominal name).
+    Anonymous(Vec<(String, TypeExpr)>, Span),
 }
 
 impl TypeExpr {
@@ -319,7 +322,8 @@ impl TypeExpr {
             | TypeExpr::Fun(_, _, s)
             | TypeExpr::Nullable(_, s)
             | TypeExpr::Fallible(_, s)
-            | TypeExpr::Tuple(_, s) => *s,
+            | TypeExpr::Tuple(_, s)
+            | TypeExpr::Anonymous(_, s) => *s,
         }
     }
 }

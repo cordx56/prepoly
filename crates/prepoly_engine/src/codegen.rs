@@ -457,7 +457,7 @@ pub trait Codegen {
         // emit -- a bare `null` narrowed to `never` -- so it is skipped, its
         // block terminated as `unreachable` to stay well-formed. The matching
         // `CondBranch` folds to a direct jump (see `codegen_terminator`).
-        let reachable = crate::mono::reachable_blocks(f.body, &f.local_types);
+        let reachable = crate::mono::reachable_blocks(f.body, &f.local_types, &f.ret);
         for (i, live) in reachable.iter().enumerate() {
             let id = BlockId(i as u32);
             if *live {
@@ -662,8 +662,16 @@ pub trait Codegen {
             Terminator::CondBranch { cond, then, els } => {
                 // A statically-known condition folds to a direct jump, leaving the
                 // dead arm (skipped in `codegen_function`) without a predecessor.
+                // The fold also covers a structural `if` whose then-branch cannot
+                // type for this concrete value (see `cond_static_truthiness`).
                 let cty = operand_type_of(cond, &f.local_types);
-                match cty.static_truthiness() {
+                match crate::mono::cond_static_truthiness(
+                    f.body,
+                    &f.local_types,
+                    &f.ret,
+                    cond,
+                    *then,
+                ) {
                     Some(true) => self.emit_goto(*then),
                     Some(false) => self.emit_goto(*els),
                     // A bool branches directly; any other (runtime) type is reduced

@@ -113,7 +113,9 @@ fn check_constructions(program: &Program) -> Vec<TypeError> {
                 // type name (a direct table key) the precise checks run; a name
                 // defined in several modules is only checked for existence here
                 // and resolved precisely by module-aware inference (PLAN.md R2).
-                Expr::TypeLit(name, _, span) if name != "Self" => match self.program.types.get(name) {
+                // An empty name is an anonymous structure literal `{ f: v }`
+                // (a structural record), not a named-type construction.
+                Expr::TypeLit(name, _, span) if name != "Self" && !name.is_empty() => match self.program.types.get(name) {
                     Some(info) if info.is_sum() => self.errors.push(TypeError {
                         message: format!("`{name}` is a sum type; construct a variant with `{name}.Variant {{ ... }}`"),
                         span: *span,
@@ -1318,13 +1320,16 @@ mod tests {
     }
 
     #[test]
-    fn missing_record_field_access_is_reported() {
+    fn missing_record_field_access_is_nullable_not_an_error() {
+        // Accessing a field a structure does not have is not an error: it yields a
+        // nullable (null at runtime), so the access is allowed but the result must
+        // be null-checked before use as a non-null value.
         let e = errs(
-            "type Point = {\n    x: int32\n}\nfun main() {\n    let p = Point { x: 1 }\n    return p.y\n}\n",
+            "type Point = {\n    x: int32\n}\nfun main() {\n    let p = Point { x: 1 }\n    let q = p.y\n    if q {\n        return 1\n    }\n    return 0\n}\n",
         );
         assert!(
-            e.iter().any(|m| m.contains("`Point` has no field `y`")),
-            "{e:?}"
+            !e.iter().any(|m| m.contains("has no field")),
+            "missing field access should not be an error: {e:?}"
         );
     }
 

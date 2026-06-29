@@ -65,7 +65,7 @@ pub fn format_value(program: &Program, v: &Value, ty: &Type) -> String {
         Type::Record(n) => match v {
             Value::Record(fields) => {
                 let layout = record_field_layout(program, n);
-                render_named_fields(program, &n.name, &layout, &fields.borrow())
+                render_named_fields(program, record_header(n), &layout, &fields.borrow())
             }
             _ => n.name.clone(),
         },
@@ -109,6 +109,16 @@ fn int_signed(k: IntKind) -> bool {
 /// Build `<header> {\n    f: <v>,\n}` for the named fields (or `<header> {}` when
 /// the type has none). Each field value is rendered recursively and indented one
 /// level (four spaces after each newline) so a nested aggregate steps in.
+/// The label a record renders under: its nominal name, or `anonymous` for a
+/// structural record (an anonymous structure / `T.from` result).
+fn record_header(n: &NominalType) -> &str {
+    if n.name == prepoly_hir::STRUCTURAL_RECORD_NAME {
+        "anonymous"
+    } else {
+        &n.name
+    }
+}
+
 fn render_named_fields(
     program: &Program,
     header: &str,

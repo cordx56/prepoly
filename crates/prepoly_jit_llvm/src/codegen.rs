@@ -1522,7 +1522,16 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
         // Gather the shape up front so the `program` borrow ends before the
         // recursive field renderings below (which borrow `self` mutably).
         let record = match ty {
-            Type::Record(n) => Some((n.name.clone(), self.record_field_types(n))),
+            // A structural record (anonymous structure / `T.from` result) renders
+            // under the `anonymous` label rather than its internal `<structural>`.
+            Type::Record(n) => {
+                let header = if n.name == prepoly_hir::STRUCTURAL_RECORD_NAME {
+                    "anonymous".to_string()
+                } else {
+                    n.name.clone()
+                };
+                Some((header, self.record_field_types(n)))
+            }
             _ => None,
         };
         let sum = match ty {
@@ -2655,16 +2664,18 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
         match base_ty {
             Type::Record(_) => {
                 let Some((layout, _)) = self.record_layout(base_ty) else {
-                    return self.typed_unit();
+                    return self.const_null();
                 };
+                // A field the record's layout does not have yields null (an absent
+                // structural field; the type checker typed it nullable).
                 let Some((_, llty, offset)) = layout.iter().find(|f| f.0 == field) else {
-                    return self.typed_unit();
+                    return self.const_null();
                 };
                 let fp = self.field_ptr(base.into_pointer_value(), *offset);
                 self.builder.build_load(*llty, fp, "f").unwrap()
             }
             Type::Sum(n) => self.load_sum_field(base, n, field),
-            _ => self.typed_unit(),
+            _ => self.const_null(),
         }
     }
 
