@@ -284,6 +284,19 @@ impl fmt::Display for NominalType {
         if let Some((ok, err)) = self.result_payloads() {
             return write!(f, "Result<{}, {}>", ok.display(), err.display());
         }
+        // A structural/anonymous record has no declared name; render it as the
+        // `anonymous { field: Type, ... }` form the programmer writes, so a
+        // diagnostic reads naturally instead of exposing the `<structural>`
+        // placeholder. Fields are keyed in sorted name order by the substitution.
+        if self.name == STRUCTURAL_RECORD_NAME {
+            let fields = self
+                .substitution
+                .iter()
+                .map(|(key, ty)| format!("{key}: {}", ty.display()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return write!(f, "anonymous {{ {fields} }}");
+        }
         if self.substitution.is_empty() {
             return f.write_str(&self.name);
         }

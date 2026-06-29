@@ -159,6 +159,11 @@ pub unsafe extern "C-unwind" fn pp_file_close(file: *mut Header) -> *mut Header 
         let fd = file_fd(file);
         if fd > 2 {
             drop(File::from_raw_fd(fd));
+            // Invalidate the stored descriptor so a second `close()` cannot
+            // re-close a descriptor the OS may have reassigned to a later `open`,
+            // and so reads/writes after close fail (EBADF) instead of hitting an
+            // unrelated file.
+            *((file as *mut u8).offset(16) as *mut i64) = -1;
         }
         typed_result(true, |p| *(p as *mut i64) = 0)
     }

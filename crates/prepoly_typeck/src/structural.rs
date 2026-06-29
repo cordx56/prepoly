@@ -2,7 +2,12 @@
 //! required when S has every field and method of T with compatible types.
 //! Sum types are nominal and excluded.
 
-use prepoly_hir::{CallableSignature, NominalType, ParamInfo, Program, Type, TypeKind};
+use std::collections::HashMap;
+
+use prepoly_hir::{
+    CallableSignature, MethodInfo, NominalType, ParamInfo, Program, STRUCTURAL_RECORD_ID, Type,
+    TypeKind,
+};
 
 /// Whether `a` and `b` are mutually compatible, i.e. invariant. Mutable record
 /// fields and method parameters use this instead of one-directional
@@ -61,7 +66,7 @@ pub fn types_compatible(program: &Program, have: &Type, want: &Type) -> bool {
                 && types_compatible(program, hr, wr)
         }
         (Type::Record(sub), Type::Record(sup)) if !sub.same_nominal(sup) => {
-            record_satisfies(program, sub.name(), sup.name()).is_empty()
+            record_satisfies(program, sub, sup).is_empty()
         }
         (Type::Sum(a), Type::Sum(b)) => sum_assignable(program, a, b),
         _ => have == want,
@@ -179,57 +184,111 @@ fn annotated_type_relates(
     }
 }
 
-/// Check that record `sub` structurally satisfies record `sup` (every field /
-/// method of `sup` exists in `sub`). Returns the list of incompatible members.
-pub fn record_satisfies(program: &Program, sub: &str, sup: &str) -> Vec<String> {
+/// Check that record `sub` structurally satisfies record `sup`: `sub` has every
+/// field and method `sup` requires, with invariant member types. Members come
+/// from the type declaration for a named record and from the substitution for a
+/// structural/anonymous record (`anonymous { .. }`, record literals). The
+/// substitution -- not a `program.types` lookup by the shared placeholder name
+/// `<structural>` -- is the source of truth for an anonymous structure's fields,
+/// so it is checked field by field instead of slipping through as compatible with
+/// everything. Returns the list of incompatible members.
+pub fn record_satisfies(program: &Program, sub: &NominalType, sup: &NominalType) -> Vec<String> {
     let mut issues = Vec::new();
-    let (Some(s), Some(t)) = (program.types.get(sub), program.types.get(sup)) else {
-        return issues;
-    };
-    let (
-        TypeKind::Record {
-            fields: sf,
-            methods: sm,
-        },
-        TypeKind::Record {
-            fields: tf,
-            methods: tm,
-        },
-    ) = (&s.kind, &t.kind)
-    else {
-        return issues;
-    };
-    for f in tf {
-        match sf.iter().find(|x| x.name == f.name) {
-            None => issues.push(format!("field `{}`", f.name)),
+    let have_fields = record_fields(program, sub);
+    for want in record_fields(program, sup) {
+        match have_fields.iter().find(|h| h.name == want.name) {
+            None => issues.push(format!("field `{}`", want.name)),
             Some(have) => {
                 // Fields are mutable, so they are invariant: a covariant field
                 // would let writes through one alias install a value the other
                 // alias's type forbids.
                 if !annotated_type_invariant(
                     program,
-                    have.ty.is_some(),
-                    have.resolved_ty.as_ref(),
-                    f.ty.is_some(),
-                    f.resolved_ty.as_ref(),
+                    have.annotated,
+                    have.ty.as_ref(),
+                    want.annotated,
+                    want.ty.as_ref(),
                 ) {
-                    issues.push(format!("field `{}`", f.name));
+                    issues.push(format!("field `{}`", want.name));
                 }
             }
         }
     }
-    for (name, want) in tm {
-        match sm.get(name) {
-            None => issues.push(format!("method `{name}`")),
-            Some(have) => {
-                if !signature_satisfies(program, &have.signature, &want.signature) {
-                    issues.push(format!("method `{name}`"));
+    // Only a named record declares methods; a structural record requires and
+    // provides none.
+    if let Some(want_methods) = declared_methods(program, sup) {
+        let have_methods = declared_methods(program, sub);
+        for (name, want) in want_methods {
+            match have_methods.and_then(|m| m.get(name)) {
+                None => issues.push(format!("method `{name}`")),
+                Some(have) => {
+                    if !signature_satisfies(program, &have.signature, &want.signature) {
+                        issues.push(format!("method `{name}`"));
+                    }
                 }
             }
         }
     }
     if !issues.is_empty() {
-        tracing::debug!(sub, sup, ?issues, "record does not structurally satisfy");
+        tracing::debug!(
+            sub = sub.name(),
+            sup = sup.name(),
+            ?issues,
+            "record does not structurally satisfy"
+        );
     }
     issues
+}
+
+/// A record field normalized for structural comparison: whether it carries a type
+/// annotation and its resolved type when known. A declared-record field may be
+/// unannotated (flexible); a structural-record field always carries a concrete
+/// type taken from the substitution.
+struct NormField {
+    name: String,
+    annotated: bool,
+    ty: Option<Type>,
+}
+
+/// The fields of record nominal `nt`: from its substitution for a structural
+/// record, otherwise from its declaration. Empty when `nt` is neither a declared
+/// record nor structural (an unresolvable name), so no field is required of it.
+fn record_fields(program: &Program, nt: &NominalType) -> Vec<NormField> {
+    if nt.id == STRUCTURAL_RECORD_ID {
+        return nt
+            .substitution
+            .iter()
+            .map(|(name, ty)| NormField {
+                name: name.to_string(),
+                annotated: true,
+                ty: Some(ty.clone()),
+            })
+            .collect();
+    }
+    match program.types.get(nt.name()).map(|info| &info.kind) {
+        Some(TypeKind::Record { fields, .. }) => fields
+            .iter()
+            .map(|f| NormField {
+                name: f.name.clone(),
+                annotated: f.ty.is_some(),
+                ty: f.resolved_ty.clone(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The method table of a named record; `None` for a structural record or an
+/// unresolvable name (neither declares methods).
+fn declared_methods<'a>(
+    program: &'a Program,
+    nt: &NominalType,
+) -> Option<&'a HashMap<String, MethodInfo>> {
+    if nt.id == STRUCTURAL_RECORD_ID {
+        return None;
+    }
+    match program.types.get(nt.name()).map(|info| &info.kind) {
+        Some(TypeKind::Record { methods, .. }) => Some(methods),
+        _ => None,
+    }
 }

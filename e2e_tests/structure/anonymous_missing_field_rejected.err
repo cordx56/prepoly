@@ -1,0 +1,1 @@
+error: cannot use `anonymous { a: string }` where `anonymous { x: int32, y: int32 }` is required

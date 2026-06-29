@@ -282,6 +282,31 @@ impl<'p, 'm> Interp<'p, 'm> {
                 }
                 Ok(Value::Record(Rc::new(RefCell::new(map))))
             }
+            // `T.from(v)`: the same per-instance decision as the JIT. `dest_ty` is
+            // `T?`; using the source's static (per-instance) type, if it has every
+            // field `T` declares with a matching type, build the record by copying
+            // those fields (shared, like the JIT's retain), else yield null.
+            Rvalue::RecordFrom { source, .. } => {
+                let target = match dest_ty {
+                    Type::Nullable(inner) => inner.as_ref().clone(),
+                    other => other.clone(),
+                };
+                let src_ty = operand_type_of(source, &f.local_types);
+                if !record_from_succeeds(&src_ty, &target) {
+                    return Ok(Value::Null);
+                }
+                let src = self.eval_operand(f, frame, source, &src_ty)?;
+                let Value::Record(src_map) = src else {
+                    return Ok(Value::Null);
+                };
+                let mut map = HashMap::new();
+                for name in record_field_names(&target) {
+                    if let Some(v) = src_map.borrow().get(&name) {
+                        map.insert(name, v.clone());
+                    }
+                }
+                Ok(Value::Record(Rc::new(RefCell::new(map))))
+            }
             Rvalue::Variant {
                 variant, fields, ..
             } => {
@@ -551,6 +576,13 @@ impl<'p, 'm> Interp<'p, 'm> {
                 let ty = operand_type_of(&args[0], &f.local_types);
                 let v = self.eval_operand(f, frame, &args[0], &ty)?;
                 Ok(deep_copy_value(&v))
+            }
+            // `__nonnull(x)`: narrow a nullable to its inner value. A non-null
+            // nullable is represented transparently (the value itself), so this is
+            // the identity -- the if-let then-arm has already proven non-null.
+            "__nonnull" => {
+                let ty = operand_type_of(&args[0], &f.local_types);
+                self.eval_operand(f, frame, &args[0], &ty)
             }
             "result_is_ok" => {
                 let sty = operand_type_of(&args[0], &f.local_types);
@@ -1270,6 +1302,39 @@ fn record_field_type(record_ty: &Type, name: &str) -> Type {
         Type::Record(n) => n.substitution.get(name).cloned().unwrap_or(Type::Void),
         _ => Type::Void,
     }
+}
+
+/// The field names of a record type, in its substitution's (sorted) order.
+fn record_field_names(record_ty: &Type) -> Vec<String> {
+    match record_ty {
+        Type::Record(n) => n
+            .substitution
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// See through reference/mutability/const wrappers to the underlying type.
+fn strip_wrappers(ty: &Type) -> &Type {
+    match ty {
+        Type::Ref(inner) | Type::Mut(inner) | Type::ConstOf(inner) => strip_wrappers(inner),
+        other => other,
+    }
+}
+
+/// Whether `T.from(source)` succeeds for a per-instance `src_ty` and target record
+/// `target`: the source must be a record carrying every field `target` declares,
+/// each with a matching type. Mirrors the JIT's check so both back ends take the
+/// same branch.
+fn record_from_succeeds(src_ty: &Type, target: &Type) -> bool {
+    let (Type::Record(s), Type::Record(t)) = (strip_wrappers(src_ty), target) else {
+        return false;
+    };
+    t.substitution
+        .iter()
+        .all(|(name, tty)| s.substitution.get(name).is_some_and(|sty| sty == tty))
 }
 
 fn is_result_ty(ty: &Type) -> bool {

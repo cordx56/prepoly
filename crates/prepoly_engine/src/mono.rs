@@ -1069,6 +1069,14 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                     Some(op) => self.operand_type(op, local_types),
                     None => Ok(Some(Type::Void)),
                 },
+                // `__nonnull(x)` narrows a nullable to its inner type (the if-let
+                // binding of a nullable, proven non-null); a non-nullable is itself.
+                "__nonnull" => match args.first() {
+                    Some(op) => Ok(self
+                        .operand_type(op, local_types)?
+                        .map(|t| unwrap_nullable(&t).clone())),
+                    None => Ok(Some(Type::Void)),
+                },
                 // `r!` lowers to `result_is_ok(r)` + an Ok-payload load + Err
                 // propagation; the first is a tag test (bool).
                 "result_is_ok" => Ok(Some(Type::Bool)),
@@ -1196,6 +1204,15 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                 _ => Err("nested projections are unsupported on the typed backend".into()),
             },
             Rvalue::Record { ty, fields } => self.record_type(module, ty, fields, local_types),
+            // `T.from(v)` always types `T?`; the per-instance codegen yields the
+            // record (when the concrete source has every field) or null. Build `T`'s
+            // declared record type (the deserialize-boundary type) and wrap nullable.
+            Rvalue::RecordFrom { ty, .. } => match boundary_record_type(self.program, module, ty) {
+                Some(t) => Ok(Some(Type::Nullable(Box::new(t)))),
+                None => Err(format!(
+                    "`{ty}.from`: every field of the target record needs a declared type"
+                )),
+            },
             // A `Result` construction takes the enclosing fallible callable's
             // inferred `Result` type; other (annotated) sums resolve directly.
             Rvalue::Variant {

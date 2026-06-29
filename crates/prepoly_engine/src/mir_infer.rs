@@ -466,6 +466,11 @@ impl BodyTyper {
             Rvalue::Record { ty, .. } | Rvalue::Variant { ty, .. } => {
                 resolver.nominal(ty).unwrap_or_else(|| self.fresh())
             }
+            // `T.from(v)` yields `T?` (the record or null, decided per instance).
+            Rvalue::RecordFrom { ty, .. } => resolver
+                .nominal(ty)
+                .map(|t| Type::Nullable(Box::new(t)))
+                .unwrap_or_else(|| self.fresh()),
             Rvalue::Closure { .. } => self.fresh(),
         }
     }

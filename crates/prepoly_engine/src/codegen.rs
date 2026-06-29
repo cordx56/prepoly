@@ -750,6 +750,42 @@ pub trait Codegen {
                 }
                 rec
             }
+            // `T.from(v)`: a fallible structural conversion. `dest_ty` is `T?`; per
+            // instance the source's concrete type is known, so the branch is decided
+            // here. When the source record has every field `T` declares (with a
+            // matching type) the record is built by reading those fields and wrapped
+            // nullable; otherwise the conversion fails and yields null. This is the
+            // "branch by the actual argument type" resolved at monomorphization time.
+            Rvalue::RecordFrom { source, .. } => {
+                let target = match dest_ty {
+                    Type::Nullable(inner) => inner.as_ref().clone(),
+                    other => other.clone(),
+                };
+                let src_ty = operand_type_of(source, &f.local_types);
+                if !record_from_succeeds(&src_ty, &target) {
+                    return self.const_null();
+                }
+                let src = self.codegen_operand(program, f, source, &src_ty);
+                let field_names = record_field_names(&target);
+                let mut named: Vec<(&str, Self::Value)> = Vec::with_capacity(field_names.len());
+                let mut managed: Vec<Self::Value> = Vec::new();
+                for name in &field_names {
+                    let fty = record_field_type(&target, name);
+                    // The field is read out of `src` (an alias into the source
+                    // record), so the new record must retain a managed one.
+                    let v = self.load_field(src, &src_ty, name);
+                    if rc_managed(&fty) {
+                        managed.push(v);
+                    }
+                    named.push((name.as_str(), v));
+                }
+                let rec = self.make_record(&target, &named);
+                for v in managed {
+                    self.retain(v);
+                }
+                // Wrap the freshly built record into the nullable result (`T` -> `T?`).
+                self.coerce(rec, &target, dest_ty)
+            }
             // Construct a sum-type variant: `dest_ty` is the sum type.
             Rvalue::Variant {
                 variant, fields, ..
@@ -1067,6 +1103,16 @@ pub trait Codegen {
                 let ty = operand_type_of(&args[0], &f.local_types);
                 let v = self.codegen_operand(program, f, &args[0], &ty);
                 self.deep_copy(v, &ty)
+            }
+            // `__nonnull(x)`: narrow a nullable to its inner value -- the binding of
+            // an `if let p = <nullable>` on the (proven non-null) then-arm, so `p`
+            // has the value type, not the nullable. A non-nullable argument passes
+            // through (coercion from a type to itself is identity).
+            "__nonnull" => {
+                let ty = operand_type_of(&args[0], &f.local_types);
+                let v = self.codegen_operand(program, f, &args[0], &ty);
+                let inner = unwrap_nullable(&ty).clone();
+                self.coerce(v, &ty, &inner)
             }
             // `result_is_ok(r)` is the `Ok` tag test of the `r!` operator.
             "result_is_ok" => {
@@ -1438,6 +1484,41 @@ fn record_field_type(record_ty: &Type, name: &str) -> Type {
         Type::Record(n) => n.substitution.get(name).cloned().unwrap_or(Type::Void),
         _ => Type::Void,
     }
+}
+
+/// The field names of a record type, in its substitution's (sorted) order.
+fn record_field_names(record_ty: &Type) -> Vec<String> {
+    match record_ty {
+        Type::Record(n) => n
+            .substitution
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// See through reference/mutability/const wrappers (erased before the back ends,
+/// but peeled defensively) to the underlying type.
+fn strip_wrappers(ty: &Type) -> &Type {
+    match ty {
+        Type::Ref(inner) | Type::Mut(inner) | Type::ConstOf(inner) => strip_wrappers(inner),
+        other => other,
+    }
+}
+
+/// Whether `T.from(source)` succeeds for a concrete (per-instance) `src_ty` and
+/// target record `target`: the source must be a record carrying every field
+/// `target` declares, each with a matching type. A mismatch (a missing field or a
+/// differently-typed one) means the conversion yields null rather than reading a
+/// field that is absent or laid out differently.
+fn record_from_succeeds(src_ty: &Type, target: &Type) -> bool {
+    let (Type::Record(s), Type::Record(t)) = (strip_wrappers(src_ty), target) else {
+        return false;
+    };
+    t.substitution
+        .iter()
+        .all(|(name, tty)| s.substitution.get(name).is_some_and(|sty| sty == tty))
 }
 
 /// The string payload of a constant string operand (the variant/panic argument

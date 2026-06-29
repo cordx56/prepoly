@@ -17,22 +17,41 @@
 //! they do not replace the lock, so soundness is preserved. An object's region id
 //! lives in the otherwise-unused `nchild` header slot (0 = not in a region).
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use crate::rt::{Header, OWNER_BRIDGE, OWNER_CONTAINED, is_shared};
+use crate::rt::{Header, OWNER_BRIDGE, OWNER_CONTAINED, OWNER_LOCAL, is_shared};
 
-/// Per-region metadata, indexed by `region_id - 1` (ids are 1-based; 0 means "no
-/// region"). `lrc` includes the bridge's own external owner, so it starts at 1 and
-/// a region is closed at `lrc == 1` (no other reference in). `parent` is the 1-based
-/// id of the enclosing region, or 0 at the top level.
+/// Per-region metadata. `lrc` includes the bridge's own external owner, so it
+/// starts at 1 and a region is closed at `lrc == 1` (no other reference in).
+/// `parent` is the id of the enclosing region, or 0 at the top level. `bridge` and
+/// `prev_owner` record the bridge object and the owner class it had before the
+/// region re-tagged it `BRIDGE`, so close can restore it -- otherwise a cown stays
+/// `BRIDGE` after its first `with` and is no longer recognised as shared.
 struct RegionMeta {
     lrc: i64,
     parent: i64,
+    bridge: usize,
+    prev_owner: u8,
 }
 
-/// Region table. Guarded for growth and for the barrier's updates; a `with` body
-/// runs synchronously, so a single region sees little contention.
-static REGIONS: Mutex<Vec<RegionMeta>> = Mutex::new(Vec::new());
+/// Live regions by id, plus the next id to hand out. A region is inserted on
+/// `with` entry and removed on close ([`pp_region_close`]), so the table is bounded
+/// by the number of *currently open* regions rather than growing once per `with`
+/// for the program's lifetime. Ids are monotonic and never reused: an object still
+/// carrying a closed region's id in its `nchild` slot resolves to no entry (a
+/// no-op) instead of aliasing a different, live region.
+struct RegionTable {
+    regions: BTreeMap<i64, RegionMeta>,
+    next_id: i64,
+}
+
+/// Region table. Guarded for the barrier's updates; a `with` body runs
+/// synchronously, so a single region sees little contention.
+static REGIONS: Mutex<RegionTable> = Mutex::new(RegionTable {
+    regions: BTreeMap::new(),
+    next_id: 1,
+});
 
 /// Open a top-level region with `bridge` as its entry object; see
 /// [`pp_region_open_nested`].
@@ -52,9 +71,23 @@ pub unsafe extern "C-unwind" fn pp_region_open(bridge: *mut Header) -> i64 {
 /// `bridge` must be a valid object header (or null).
 pub unsafe extern "C-unwind" fn pp_region_open_nested(bridge: *mut Header, parent: i64) -> i64 {
     unsafe {
-        let mut regions = REGIONS.lock().unwrap();
-        regions.push(RegionMeta { lrc: 1, parent });
-        let id = regions.len() as i64;
+        let prev_owner = if bridge.is_null() {
+            OWNER_LOCAL
+        } else {
+            (*bridge).owner
+        };
+        let mut table = REGIONS.lock().unwrap();
+        let id = table.next_id;
+        table.next_id += 1;
+        table.regions.insert(
+            id,
+            RegionMeta {
+                lrc: 1,
+                parent,
+                bridge: bridge as usize,
+                prev_owner,
+            },
+        );
         if !bridge.is_null() {
             (*bridge).nchild = id as i32;
             // The bridge is the region's single external entry point (DESIGN.md 12.2).
@@ -67,8 +100,8 @@ pub unsafe extern "C-unwind" fn pp_region_open_nested(bridge: *mut Header, paren
 /// Record a borrow reaching into region `id` (DESIGN.md 12.6): raise its LRC, and
 /// when that is the region's *first* external borrow (LRC 1 -> 2), the borrow also
 /// reaches the parent, so recurse. `regions` is the already-held table guard.
-fn add_borrow(regions: &mut Vec<RegionMeta>, id: i64) {
-    let Some(meta) = regions.get_mut((id - 1) as usize) else {
+fn add_borrow(regions: &mut BTreeMap<i64, RegionMeta>, id: i64) {
+    let Some(meta) = regions.get_mut(&id) else {
         return;
     };
     meta.lrc += 1;
@@ -80,8 +113,8 @@ fn add_borrow(regions: &mut Vec<RegionMeta>, id: i64) {
 
 /// Drop a borrow into region `id` (DESIGN.md 12.6): lower its LRC, and when that
 /// removes the region's *last* external borrow (LRC 2 -> 1), recurse to the parent.
-fn remove_borrow(regions: &mut Vec<RegionMeta>, id: i64) {
-    let Some(meta) = regions.get_mut((id - 1) as usize) else {
+fn remove_borrow(regions: &mut BTreeMap<i64, RegionMeta>, id: i64) {
+    let Some(meta) = regions.get_mut(&id) else {
         return;
     };
     if meta.lrc <= 1 {
@@ -136,7 +169,7 @@ pub unsafe extern "C-unwind" fn pp_add_reference(src: *mut Header, tgt: *mut Hea
         // tracked by the LRC (propagated up the region tree).
         if sr == 0 {
             if tr != 0 {
-                add_borrow(&mut REGIONS.lock().unwrap(), tr);
+                add_borrow(&mut REGIONS.lock().unwrap().regions, tr);
             }
             return;
         }
@@ -147,7 +180,7 @@ pub unsafe extern "C-unwind" fn pp_add_reference(src: *mut Header, tgt: *mut Hea
             (*tgt).owner = OWNER_CONTAINED;
         } else {
             // tgt is in a different region than src: an external borrow into tr.
-            add_borrow(&mut REGIONS.lock().unwrap(), tr);
+            add_borrow(&mut REGIONS.lock().unwrap().regions, tr);
         }
     }
 }
@@ -168,7 +201,7 @@ pub unsafe extern "C-unwind" fn pp_remove_reference(src: *mut Header, old: *mut 
         // An external borrow existed only when `old` was in a different region than
         // `src` (and `src` did not share `old`'s region). Drop it.
         if or != 0 && or != sr {
-            remove_borrow(&mut REGIONS.lock().unwrap(), or);
+            remove_borrow(&mut REGIONS.lock().unwrap().regions, or);
         }
     }
 }
@@ -219,7 +252,7 @@ pub extern "C-unwind" fn pp_region_unborrow(id: i64) {
     if id <= 0 {
         return;
     }
-    remove_borrow(&mut REGIONS.lock().unwrap(), id);
+    remove_borrow(&mut REGIONS.lock().unwrap().regions, id);
 }
 
 /// Closedness verification on region release (DESIGN.md 12.5/12.6): a region is
@@ -230,10 +263,31 @@ pub extern "C-unwind" fn pp_region_close(id: i64) -> bool {
     if id <= 0 {
         return true;
     }
+    // The `with` scope is ending: drop the region's metadata (ids are monotonic and
+    // never reused, so this bounds the table to open regions without letting a stale
+    // `nchild` later alias a different live region) and restore the bridge's owner
+    // class so a cown is recognised as shared again after the scope.
+    let Some(meta) = REGIONS.lock().unwrap().regions.remove(&id) else {
+        return true;
+    };
+    if meta.bridge != 0 {
+        unsafe {
+            (*(meta.bridge as *mut Header)).owner = meta.prev_owner;
+        }
+    }
+    meta.lrc == 1
+}
+
+/// Non-destructive closedness query for tests, which check a region's closedness
+/// at several points during its life (the runtime's `pp_region_close` is called
+/// once, at scope exit, and disposes the region).
+#[cfg(test)]
+fn region_is_closed(id: i64) -> bool {
     REGIONS
         .lock()
         .unwrap()
-        .get((id - 1) as usize)
+        .regions
+        .get(&id)
         .is_none_or(|meta| meta.lrc == 1)
 }
 
@@ -253,13 +307,13 @@ mod tests {
             // Store `inner` into the region's bridge: `inner` joins the region.
             pp_region_write(bridge, inner);
             assert_eq!((*inner).nchild, id as i32, "inner transferred into region");
-            assert!(pp_region_close(id), "no escape -> closed");
+            assert!(region_is_closed(id), "no escape -> closed");
 
             // Now make `inner` reachable from an external (region-less) object: an
             // escape raises the LRC, so the region is no longer closed.
             let outside = pp_typed_alloc(16);
             pp_region_write(outside, inner);
-            assert!(!pp_region_close(id), "escaped reference -> not closed");
+            assert!(!region_is_closed(id), "escaped reference -> not closed");
         }
     }
 
@@ -276,25 +330,25 @@ mod tests {
             let child = pp_region_open_nested(child_bridge, parent);
             // Put an object into the child region.
             pp_region_write(child_bridge, child_inner);
-            assert!(pp_region_close(parent), "no borrows yet -> parent closed");
-            assert!(pp_region_close(child), "no borrows yet -> child closed");
+            assert!(region_is_closed(parent), "no borrows yet -> parent closed");
+            assert!(region_is_closed(child), "no borrows yet -> child closed");
 
             // An external object borrows into the child: the child opens, and the
             // borrow also reaches the parent, so the parent opens too.
             let outside = pp_typed_alloc(16);
             pp_region_write(outside, child_inner);
-            assert!(!pp_region_close(child), "borrow into child -> child open");
+            assert!(!region_is_closed(child), "borrow into child -> child open");
             assert!(
-                !pp_region_close(parent),
+                !region_is_closed(parent),
                 "borrow into child reaches parent -> parent open"
             );
 
             // Dropping the borrow closes the child, which propagates up and closes
             // the parent.
             pp_region_unborrow(child);
-            assert!(pp_region_close(child), "borrow dropped -> child closed");
+            assert!(region_is_closed(child), "borrow dropped -> child closed");
             assert!(
-                pp_region_close(parent),
+                region_is_closed(parent),
                 "last child borrow dropped -> parent closed"
             );
         }
@@ -310,17 +364,34 @@ mod tests {
             let inner = pp_typed_alloc(16);
             let id = pp_region_open(bridge);
             pp_add_reference(bridge, inner); // inner joins the region (Contained)
-            assert!(pp_region_close(id), "no escape yet");
+            assert!(region_is_closed(id), "no escape yet");
 
             // An external container references `inner`: the region opens.
             let container = pp_typed_alloc(24);
             pp_write_barrier(container, std::ptr::null_mut(), inner);
-            assert!(!pp_region_close(id), "escape borrow -> open");
+            assert!(!region_is_closed(id), "escape borrow -> open");
 
             // The container's field is overwritten, dropping the old reference to
             // `inner`: the borrow is released and the region closes.
             pp_write_barrier(container, inner, std::ptr::null_mut());
-            assert!(pp_region_close(id), "old reference removed -> closed");
+            assert!(region_is_closed(id), "old reference removed -> closed");
+        }
+    }
+
+    /// Closing a region disposes its metadata and the id is never reused, so the
+    /// table is bounded by the number of open regions rather than growing once per
+    /// `with` (the previous unbounded leak).
+    #[test]
+    fn closing_a_region_disposes_it_with_monotonic_ids() {
+        unsafe {
+            let id = pp_region_open(pp_typed_alloc(16));
+            assert!(pp_region_close(id), "no escape -> closed");
+            // The id is gone; querying it now reports "closed" (no entry) and a new
+            // region receives a strictly greater id, never the freed one.
+            assert!(region_is_closed(id), "disposed region resolves to no entry");
+            let id2 = pp_region_open(pp_typed_alloc(16));
+            assert!(id2 > id, "ids are monotonic and never reused");
+            pp_region_close(id2);
         }
     }
 }

@@ -39,7 +39,20 @@ pub fn decide(var: &str, live_after: bool, closure_body: &Block) -> Ownership {
     }
 }
 
-/// Whether `body` mutates `var` (assigns to it or one of its fields/elements).
+/// Builtins known to only read their arguments, so passing a capture to one is
+/// not a mutation. Everything else -- user functions and any other builtin -- is
+/// treated conservatively as possibly mutating an argument it receives by place:
+/// an unannotated parameter is a mutable reference by default (book: types.md), so
+/// `f(var)` may write through `var`. Over-approximating mutation is the safe
+/// direction -- it cowns (lock-guards) a capture rather than freezing it -- so a
+/// genuinely read-only capture is at worst needlessly locked, never raced.
+const READONLY_BUILTINS: &[&str] = &["println", "print"];
+
+/// Whether `body` mutates `var`: assigns to it (or a field/element of it), calls a
+/// method on it, or passes it (or a place rooted at it) to a function that is not
+/// known read-only. The whole expression tree is traversed, so a mutation reached
+/// through a `match`/`if let`/nested closure/array/record/interpolation is found
+/// (a gap here would freeze a mutated capture and let two threads race it).
 pub fn mutates(body: &Block, var: &str) -> bool {
     let mut found = false;
     scan_block(body, var, &mut found);
@@ -48,52 +61,91 @@ pub fn mutates(body: &Block, var: &str) -> bool {
 
 fn scan_block(b: &Block, var: &str, found: &mut bool) {
     for s in &b.stmts {
-        match s {
-            Stmt::Assign { target, value, .. } => {
-                if root_ident(target) == Some(var) {
-                    *found = true;
-                }
-                scan_expr(value, var, found);
-            }
-            Stmt::Expr(e) => scan_expr(e, var, found),
-            Stmt::Let { value, .. } => scan_expr(value, var, found),
-            Stmt::Return(Some(e), _) => scan_expr(e, var, found),
-            Stmt::While { cond, body, .. } => {
-                scan_expr(cond, var, found);
-                scan_block(body, var, found);
-            }
-            Stmt::For { iter, body, .. } => {
-                scan_expr(iter, var, found);
-                scan_block(body, var, found);
-            }
-            _ => {}
+        if *found {
+            return;
         }
+        scan_stmt(s, var, found);
     }
 }
 
-/// Look for a mutation of `var` inside an expression. A method call on `var`
-/// (`var.m(..)`) is conservatively treated as a mutation: without per-method
-/// `mutates_self` results, assuming it may mutate keeps a shared object cowned
-/// (and so lock-guarded) rather than frozen, which is the safe direction.
+fn scan_stmt(s: &Stmt, var: &str, found: &mut bool) {
+    match s {
+        Stmt::Let { value, .. } => scan_expr(value, var, found),
+        Stmt::Assign { target, value, .. } => {
+            if root_ident(target) == Some(var) {
+                *found = true;
+            }
+            scan_expr(target, var, found);
+            scan_expr(value, var, found);
+        }
+        Stmt::Expr(e) => scan_expr(e, var, found),
+        Stmt::While { cond, body, .. } => {
+            scan_expr(cond, var, found);
+            scan_block(body, var, found);
+        }
+        Stmt::For { iter, body, .. } => {
+            scan_expr(iter, var, found);
+            scan_block(body, var, found);
+        }
+        Stmt::Return(Some(e), _) => scan_expr(e, var, found),
+        Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_) => {}
+    }
+}
+
+/// Whether a call through `callee` is to a builtin known to only read its
+/// arguments, so a capture passed to it is not mutated.
+fn call_is_readonly(callee: &Expr) -> bool {
+    matches!(callee, Expr::Ident(n, _) if READONLY_BUILTINS.contains(&n.as_str()))
+}
+
+/// Look for a mutation of `var` inside an expression. Three forms count as a
+/// mutation: a method call on a place rooted at `var` (`var.m(..)`), `var` (or a
+/// place rooted at it) passed as an argument to a non-read-only call, and -- via
+/// `scan_stmt` -- an assignment to it. Every sub-expression is visited so a
+/// mutation nested anywhere is caught.
 fn scan_expr(e: &Expr, var: &str, found: &mut bool) {
+    if *found {
+        return;
+    }
     match e {
         Expr::Call(callee, args, _) => {
+            // A method call on a place rooted at `var` may mutate it.
             if let Expr::Field(base, _, _) = &**callee
                 && root_ident(base) == Some(var)
             {
                 *found = true;
             }
+            // Passing `var` (or `var.f` / `var[i]`) by reference to a function that
+            // is not known read-only may mutate it through a mutable-reference
+            // parameter. A value *derived* from `var` (e.g. `var + 1`, whose root
+            // is not an identifier) is a fresh value and cannot alias it.
+            if !call_is_readonly(callee) {
+                for a in args {
+                    if root_ident(&a.expr) == Some(var) {
+                        *found = true;
+                    }
+                }
+            }
             scan_expr(callee, var, found);
             args.iter().for_each(|a| scan_expr(&a.expr, var, found));
         }
-        Expr::Field(b, _, _)
-        | Expr::Index(b, _, _)
-        | Expr::Unary(_, b, _)
-        | Expr::ErrorProp(b, _) => scan_expr(b, var, found),
-        Expr::Binary(_, a, b, _) => {
-            scan_expr(a, var, found);
-            scan_expr(b, var, found);
+        Expr::Field(b, _, _) | Expr::Unary(_, b, _) | Expr::ErrorProp(b, _) => {
+            scan_expr(b, var, found)
         }
+        Expr::Index(b, idx, _) | Expr::Range(b, idx, _) | Expr::Binary(_, b, idx, _) => {
+            scan_expr(b, var, found);
+            scan_expr(idx, var, found);
+        }
+        Expr::Closure(_, body, _) => scan_expr(body, var, found),
+        Expr::Array(elems, _) => elems.iter().for_each(|el| scan_expr(el, var, found)),
+        Expr::TypeLit(_, fields, _) | Expr::VariantLit(_, _, fields, _) => {
+            fields.iter().for_each(|(_, v)| scan_expr(v, var, found))
+        }
+        Expr::Str(segs, _) => segs.iter().for_each(|seg| {
+            if let StrSeg::Expr(e) = seg {
+                scan_expr(e, var, found);
+            }
+        }),
         Expr::Block(block, _) => scan_block(block, var, found),
         Expr::If(c, t, e, _) => {
             scan_expr(c, var, found);
@@ -102,7 +154,23 @@ fn scan_expr(e: &Expr, var: &str, found: &mut bool) {
                 scan_expr(e, var, found);
             }
         }
-        _ => {}
+        Expr::IfLet(_, scrut, t, e, _) => {
+            scan_expr(scrut, var, found);
+            scan_block(t, var, found);
+            if let Some(e) = e {
+                scan_expr(e, var, found);
+            }
+        }
+        Expr::Match(scrut, arms, _) => {
+            scan_expr(scrut, var, found);
+            arms.iter().for_each(|arm| scan_expr(&arm.body, var, found));
+        }
+        Expr::Int(..)
+        | Expr::Float(..)
+        | Expr::Bool(..)
+        | Expr::Null(_)
+        | Expr::Ident(..)
+        | Expr::SelfExpr(_) => {}
     }
 }
 
@@ -156,9 +224,9 @@ pub fn analyze_spawns_stmts(stmts: &[Stmt], params: &HashSet<String>) -> Vec<Cap
 
 fn analyze_block(stmts: &[Stmt], locals: &HashSet<String>, out: &mut Vec<CaptureDecision>) {
     for (i, stmt) in stmts.iter().enumerate() {
-        if let Stmt::While { body, .. } | Stmt::For { body, .. } = stmt {
-            analyze_block(&body.stmts, locals, out);
-        }
+        // Descend into every nested block (loops, conditionals, match arms, block
+        // exprs), which may contain their own spawns.
+        nested_block_stmts(stmt, &mut |inner| analyze_block(inner, locals, out));
         let Some(closure_body) = spawn_closure_body(stmt) else {
             continue;
         };
@@ -183,18 +251,87 @@ fn analyze_block(stmts: &[Stmt], locals: &HashSet<String>, out: &mut Vec<Capture
 
 /// Collect names bound by `let`/`for` anywhere in a statement slice. Scoping is
 /// ignored (a superset is safe: it only widens the set of names treated as
-/// captured locals rather than globals).
+/// captured locals rather than globals). Every nested block -- loop bodies, `if`
+/// / `if let` branches, `match` arms, block expressions -- is descended into, so a
+/// capture bound inside one is still recognised as a transferable local.
 fn collect_local_bindings(stmts: &[Stmt], out: &mut HashSet<String>) {
     for stmt in stmts {
         match stmt {
             Stmt::Let { pat, .. } => collect_pattern_bindings(pat, out),
-            Stmt::For { var, body, .. } => {
+            Stmt::For { var, .. } => {
                 out.insert(var.clone());
-                collect_local_bindings(&body.stmts, out);
             }
-            Stmt::While { body, .. } => collect_local_bindings(&body.stmts, out),
             _ => {}
         }
+        nested_block_stmts(stmt, &mut |inner| collect_local_bindings(inner, out));
+    }
+}
+
+/// Apply `f` to every statement list directly nested in `stmt` through control
+/// flow: loop bodies, `if`/`if let` branches, `match` arms (block bodies), and
+/// block expressions. Spawn closures are *not* descended into here (a spawn inside
+/// a spawned closure is a separate site). The mutable twin is
+/// [`nested_block_stmts_mut`].
+fn nested_block_stmts(stmt: &Stmt, f: &mut dyn FnMut(&[Stmt])) {
+    match stmt {
+        Stmt::While { body, .. } | Stmt::For { body, .. } => f(&body.stmts),
+        Stmt::Expr(e) | Stmt::Let { value: e, .. } | Stmt::Return(Some(e), _) => {
+            nested_block_stmts_expr(e, f)
+        }
+        _ => {}
+    }
+}
+
+fn nested_block_stmts_expr(e: &Expr, f: &mut dyn FnMut(&[Stmt])) {
+    match e {
+        Expr::If(_, t, els, _) | Expr::IfLet(_, _, t, els, _) => {
+            f(&t.stmts);
+            if let Some(els) = els {
+                nested_block_stmts_expr(els, f);
+            }
+        }
+        Expr::Block(b, _) => f(&b.stmts),
+        Expr::Match(_, arms, _) => {
+            for arm in arms {
+                if let Expr::Block(b, _) = &arm.body {
+                    f(&b.stmts);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Mutable [`nested_block_stmts`]: apply `f` to every directly-nested statement
+/// list so a pass that rewrites the AST (auto-acquire) reaches spawns nested in
+/// conditionals and blocks, not only at the top level of a function or loop.
+fn nested_block_stmts_mut(stmt: &mut Stmt, f: &mut dyn FnMut(&mut Vec<Stmt>)) {
+    match stmt {
+        Stmt::While { body, .. } | Stmt::For { body, .. } => f(&mut body.stmts),
+        Stmt::Expr(e) | Stmt::Let { value: e, .. } | Stmt::Return(Some(e), _) => {
+            nested_block_stmts_expr_mut(e, f)
+        }
+        _ => {}
+    }
+}
+
+fn nested_block_stmts_expr_mut(e: &mut Expr, f: &mut dyn FnMut(&mut Vec<Stmt>)) {
+    match e {
+        Expr::If(_, t, els, _) | Expr::IfLet(_, _, t, els, _) => {
+            f(&mut t.stmts);
+            if let Some(els) = els {
+                nested_block_stmts_expr_mut(els, f);
+            }
+        }
+        Expr::Block(b, _) => f(&mut b.stmts),
+        Expr::Match(_, arms, _) => {
+            for arm in arms {
+                if let Expr::Block(b, _) = &mut arm.body {
+                    f(&mut b.stmts);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -284,10 +421,9 @@ pub fn auto_acquire(stmts: &mut Vec<Stmt>, params: &HashSet<String>) {
 fn auto_acquire_in(stmts: &mut Vec<Stmt>, locals: &HashSet<String>) {
     let mut i = 0;
     while i < stmts.len() {
-        // Recurse into loop bodies (which may themselves contain spawns).
-        if let Stmt::While { body, .. } | Stmt::For { body, .. } = &mut stmts[i] {
-            auto_acquire_in(&mut body.stmts, locals);
-        }
+        // Recurse into every nested block (loops, conditionals, match arms, block
+        // exprs), which may themselves contain spawns to promote.
+        nested_block_stmts_mut(&mut stmts[i], &mut |inner| auto_acquire_in(inner, locals));
         let (cowns, freezes) = spawn_capture_promotions(&stmts[i], locals);
         if cowns.is_empty() && freezes.is_empty() {
             i += 1;
@@ -485,6 +621,56 @@ mod tests {
             vec![CaptureDecision {
                 var: "c".into(),
                 ownership: Ownership::Cown
+            }]
+        );
+    }
+
+    #[test]
+    fn mutation_through_a_ref_function_call_counts_as_mutation() {
+        // Passing the capture to a function (whose default parameter is a mutable
+        // reference) may mutate it, so it must be cowned -- not frozen, which would
+        // let two threads race it. This is the form `ownership::mutates` previously
+        // missed (it only caught `c.m()` and `c = ..`).
+        let d = decisions(
+            "fun main() {\n    let c = make()\n    spawn(() -> { bump(c) })\n    use(c)\n}\n",
+        );
+        assert_eq!(
+            d,
+            vec![CaptureDecision {
+                var: "c".into(),
+                ownership: Ownership::Cown
+            }]
+        );
+    }
+
+    #[test]
+    fn mutation_inside_a_match_arm_counts_as_mutation() {
+        // A mutation nested in a `match` arm body must be found by the full-tree
+        // scan; missing it would freeze a mutated capture and race it.
+        let d = decisions(
+            "fun main() {\n    let c = make()\n    spawn(() -> { match 1 {\n        _ => { c.x = 1 }\n    } })\n    use(c)\n}\n",
+        );
+        assert_eq!(
+            d,
+            vec![CaptureDecision {
+                var: "c".into(),
+                ownership: Ownership::Cown
+            }]
+        );
+    }
+
+    #[test]
+    fn read_only_call_keeps_capture_frozen() {
+        // The read-only-builtin whitelist keeps a capture passed only to `println`
+        // frozen rather than needlessly cowning it.
+        let d = decisions(
+            "fun main() {\n    let c = make()\n    spawn(() -> { println(c) })\n    use(c)\n}\n",
+        );
+        assert_eq!(
+            d,
+            vec![CaptureDecision {
+                var: "c".into(),
+                ownership: Ownership::Freeze
             }]
         );
     }

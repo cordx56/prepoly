@@ -141,6 +141,12 @@ pub enum Rvalue {
         variant: String,
         fields: Vec<(String, Operand)>,
     },
+    /// `T.from(v)`: a fallible structural conversion to record type `T`. The result
+    /// is `T?` -- the record built by reading every field of `T` from `source` when
+    /// the (monomorphized) source type has them all, otherwise null. The
+    /// field-presence decision is made per instance by the back ends, so a `source`
+    /// missing a field becomes a runtime null rather than a static error.
+    RecordFrom { ty: String, source: Operand },
     /// A closure value: the lowered body plus the captured operands, in the same
     /// order as the body's capture locals.
     Closure {
@@ -228,6 +234,7 @@ impl fmt::Display for Rvalue {
             Rvalue::Global(name) => write!(f, "global {name}"),
             Rvalue::Array(es) => write!(f, "[{}]", join_operands(es)),
             Rvalue::Record { ty, fields } => write!(f, "{ty} {{ {} }}", join_fields(fields)),
+            Rvalue::RecordFrom { ty, source } => write!(f, "{ty}.from({source})"),
             Rvalue::Variant {
                 ty,
                 variant,

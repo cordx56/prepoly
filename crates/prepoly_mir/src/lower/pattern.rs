@@ -183,7 +183,7 @@ impl FnLower<'_, '_> {
         Operand::Local(res)
     }
 
-    fn is_variant_name(&self, name: &str) -> bool {
+    pub(crate) fn is_variant_name(&self, name: &str) -> bool {
         self.ctx.variant_names.contains(name)
     }
 

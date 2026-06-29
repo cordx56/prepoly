@@ -2423,7 +2423,25 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
                         false,
                     );
                     let f = self.abi.runtime_fn(&self.module, "pp_conv_float_from", ty);
-                    self.call_basic(f, &[xi.into(), is_float.into(), xf.into(), tag.into()])
+                    let wide =
+                        self.call_basic(f, &[xi.into(), is_float.into(), xf.into(), tag.into()]);
+                    // `pp_conv_float_from` returns an f64; a `float32` target must
+                    // truncate it to f32 before it is stored into the 4-byte slot.
+                    // The value is already f32-rounded in the runtime, so the
+                    // truncation is exact -- without it the f64 bit pattern is read
+                    // as f32 and every float32 reads as garbage.
+                    if matches!(k, FloatKind::F32) {
+                        self.builder
+                            .build_float_trunc(
+                                wide.into_float_value(),
+                                self.ctx.f32_type(),
+                                "f32from",
+                            )
+                            .unwrap()
+                            .into()
+                    } else {
+                        wide
+                    }
                 }
             }
             _ => self.typed_unit(),
@@ -2480,6 +2498,15 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
                 self.builder.position_at_end(then_bb);
                 let inner_val = self.nullable_unwrap(v, inner);
                 let s_some = self.to_string(inner_val, inner);
+                // `to_string` of a string is the identity -- an alias to the cell's
+                // owned string -- so the non-null branch must retain it to return an
+                // owned reference like the `null` branch and every other inner type
+                // (whose `to_string` is freshly allocated). Without this, releasing
+                // the result (e.g. an interpolation temporary) drops the cell's
+                // string a second time and corrupts the heap.
+                if matches!(inner.as_ref(), Type::Str) {
+                    self.retain(s_some);
+                }
                 let some_end = self.builder.get_insert_block().unwrap();
                 self.builder.build_unconditional_branch(merge_bb).unwrap();
 

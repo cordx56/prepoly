@@ -179,9 +179,19 @@ pub extern "C-unwind" fn pp_spawn(closure: *mut Header) {
 /// thread is again the sole mutator, so it runs a collection to reclaim any cycle
 /// garbage whose collection was deferred while spawned threads ran.
 pub extern "C-unwind" fn pp_join_all() {
-    let handles: Vec<_> = std::mem::take(&mut *threads().lock().unwrap());
-    for h in handles {
-        let _ = h.join();
+    // A spawned thread may itself spawn (a nested/late spawn), pushing a new handle
+    // after this drain started. Loop until the registry stays empty: each round
+    // joins the threads taken so far, during which any of them may have pushed more.
+    // Without this, a nested spawn is never joined -- its work is lost and it runs
+    // into process teardown, a use-after-free of runtime state.
+    loop {
+        let handles: Vec<_> = std::mem::take(&mut *threads().lock().unwrap());
+        if handles.is_empty() {
+            break;
+        }
+        for h in handles {
+            let _ = h.join();
+        }
     }
     crate::gc::pp_gc_collect();
 }
@@ -282,6 +292,37 @@ mod tests {
         }
         pp_join_all();
         assert_eq!(RAN.load(Ordering::SeqCst), N, "all spawned closures ran");
+    }
+
+    #[test]
+    fn join_all_drains_nested_spawns() {
+        // A spawned thread that itself spawns must have its child joined too: after
+        // `pp_join_all` the grandchild's effect is observed. Before the drain loop,
+        // the nested handle was pushed to the registry after the single `take` and
+        // never joined -- its work was lost and it ran into process teardown.
+        let _serial = serial_spawn();
+        static RAN: AtomicI64 = AtomicI64::new(0);
+        RAN.store(0, Ordering::SeqCst);
+
+        extern "C" fn grandchild(_env: *mut Header) {
+            RAN.fetch_add(1, Ordering::SeqCst);
+        }
+        extern "C" fn parent(_env: *mut Header) {
+            // Spawn a grandchild from inside this already-spawned thread.
+            let clo = unsafe { pp_obj_alloc(32) as *mut Header };
+            unsafe { *((clo as *mut u8).add(16) as *mut usize) = grandchild as *const () as usize };
+            pp_spawn(clo);
+        }
+
+        let clo = unsafe { pp_obj_alloc(32) as *mut Header };
+        unsafe { *((clo as *mut u8).add(16) as *mut usize) = parent as *const () as usize };
+        pp_spawn(clo);
+        pp_join_all();
+        assert_eq!(
+            RAN.load(Ordering::SeqCst),
+            1,
+            "the nested spawn was joined and its work ran"
+        );
     }
 
     #[test]

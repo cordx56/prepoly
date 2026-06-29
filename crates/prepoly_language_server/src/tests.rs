@@ -547,3 +547,15 @@ fn hover_ufcs_call_binds_receiver_as_first_argument() {
         "receiver binds the first parameter: {text}"
     );
 }
+
+/// A function that returns a locally-built collection (`result = []` grown by
+/// `push`) infers its element type from the call, so a `for` over the result of
+/// `slice` gives a concrete element rather than `unknown`.
+#[test]
+fn hover_infers_element_through_collection_building_call() {
+    let src = "const elems = [1]\nfor elem in elems.slice(0, 1) {\n    println(elem)\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "elem)", false); // the use in println(elem)
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover elem"));
+    assert!(text.contains("elem: int32"), "elem should be int32: {text}");
+}

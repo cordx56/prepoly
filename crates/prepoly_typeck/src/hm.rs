@@ -790,7 +790,13 @@ impl<'p> Hm<'p> {
             Expr::IfLet(pat, scrut, then, els, span) => {
                 let st = self.infer_expr(scrut);
                 self.scopes.push(HashMap::new());
-                self.bind_pattern(pat, &st);
+                // A plain binding on a nullable scrutinee narrows to the non-null
+                // type on the then-arm (the value is proven present).
+                let bind_ty = match (pat, &self.solver.resolve(&st)) {
+                    (Pattern::Binding(_, _), Type::Nullable(inner)) => (**inner).clone(),
+                    _ => st.clone(),
+                };
+                self.bind_pattern(pat, &bind_ty);
                 let then_ty = self.infer_block_value(then);
                 self.scopes.pop();
                 match els {
@@ -888,36 +894,25 @@ impl<'p> Hm<'p> {
         args: &[prepoly_parser::ast::Arg],
         span: Span,
     ) -> Option<Type> {
-        // `T.from(v)` for a record type `T`: a structural conversion. The result is
-        // `T`; `v`'s (structure) type must contain every field `T` declares, else a
-        // type error. (Numeric/string `from` is handled below.)
+        // `T.from(v)` for a record type `T`: a *fallible* structural conversion. The
+        // result is `T?` -- whether the value actually has every field `T` declares
+        // is decided per monomorphized argument type (it yields the record when the
+        // concrete argument has the fields, else null), so the front end does not
+        // reject a value missing a field: the caller narrows the nullable (an
+        // `if`/`if let`) and handles the failure. (Numeric/string `from` is below.)
         if method == "from" {
             let target = self
                 .program
                 .resolve_type(&self.module, type_name)
                 .and_then(|info| match &info.kind {
-                    TypeKind::Record { fields, .. } => Some((
-                        info.type_ref(),
-                        fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
-                    )),
+                    TypeKind::Record { .. } => Some(info.type_ref()),
                     _ => None,
                 });
-            if let Some((ty, field_names)) = target {
+            if let Some(ty) = target {
                 if let Some(arg) = args.first() {
-                    let v = self.infer_expr(&arg.expr);
-                    let v = self.solver.resolve(&v);
-                    for fname in &field_names {
-                        if !self.field_is_present(&v, fname) {
-                            self.error(
-                                format!(
-                                    "`{type_name}.from`: the value is missing field `{fname}` required by `{type_name}`"
-                                ),
-                                span,
-                            );
-                        }
-                    }
+                    self.infer_expr(&arg.expr);
                 }
-                return Some(ty);
+                return Some(Type::Nullable(Box::new(ty)));
             }
         }
         let int_kind = IntKind::from_name(type_name);
@@ -1228,22 +1223,6 @@ impl<'p> Hm<'p> {
         self.program
             .resolve_type(&self.module, name)
             .map(TypeInfo::type_ref)
-    }
-
-    /// Whether a (resolved) structure type genuinely declares `field` -- in its
-    /// substitution (a constructed/structural record) or its declaration (a bare
-    /// nominal). Unlike `record_field_type` this does not treat an absent field as
-    /// the nullable fallback, so `T.from` can detect a missing required field.
-    fn field_is_present(&self, ty: &Type, field: &str) -> bool {
-        let Type::Record(n) = ty else {
-            return false;
-        };
-        if n.substitution.get(field).is_some() {
-            return true;
-        }
-        matches!(self.program.type_by_id(n.id), Some(info)
-            if matches!(&info.kind, TypeKind::Record { fields, .. }
-                if fields.iter().any(|f| f.name == field)))
     }
 
     /// Whether `name` is a variant of the sum type `scrut` resolves to (so a bare

@@ -182,7 +182,19 @@ impl<'a, 'p> FnLower<'a, 'p> {
         let res = self.b.fresh_local(None);
         let subj = self.lower_expr(scrut);
         let subj = self.b.make_local(subj);
-        let cond = self.lower_pattern_cond(pat, subj);
+        // A plain (non-variant) binding in `if let` is a *presence* test, not the
+        // catch-all it is in `match`: `if let x = e` runs the then-arm only when `e`
+        // is present. Using the subject itself as the condition routes it through
+        // `CondBranch`'s truthiness -- a nullable tests non-null, while a
+        // non-nullable value folds to always-true (an irrefutable bind). This is
+        // what lets `if let p = T.from(v)` (whose result is `T?`) take the else arm
+        // when the conversion yields null. Other patterns test as usual.
+        let cond = match pat {
+            prepoly_parser::ast::Pattern::Binding(name, _) if !self.is_variant_name(name) => {
+                Operand::Local(subj)
+            }
+            _ => self.lower_pattern_cond(pat, subj),
+        };
         let then_bb = self.b.new_block();
         let else_bb = self.b.new_block();
         let merge_bb = self.b.new_block();
@@ -195,7 +207,20 @@ impl<'a, 'p> FnLower<'a, 'p> {
         let mut reached = false;
         self.b.switch_to(then_bb);
         self.push_scope();
-        self.lower_pattern_bind(pat, subj);
+        // A plain binding on a nullable scrutinee binds the *unwrapped* value (the
+        // then-arm has proven it non-null), so `p` has the value type rather than
+        // the nullable -- `__nonnull` narrows it (and is the identity for a
+        // non-nullable). Other patterns bind their parts as usual.
+        match pat {
+            prepoly_parser::ast::Pattern::Binding(name, _) if !self.is_variant_name(name) => {
+                let nn = self.b.emit(Rvalue::Call(
+                    Callee::Builtin("__nonnull".into()),
+                    vec![Operand::Local(subj)],
+                ));
+                self.bind_value(name, nn);
+            }
+            _ => self.lower_pattern_bind(pat, subj),
+        }
         let tv = self.lower_block_value(then);
         self.pop_scope();
         if !self.b.terminated() {
@@ -454,29 +479,18 @@ impl<'a, 'p> FnLower<'a, 'p> {
                 && self.ctx.is_type_word(tname)
             {
                 let tn = self.resolve_self_name(tname);
-                // `T.from(v)` for a structure type `T`: build a `T` record by reading
-                // each of `T`'s declared fields from `v` (the front end checks `v`
-                // has them all). A record literal reuses construction/layout.
-                if method == "from"
-                    && let Some(field_names) = self.ctx.record_field_names(&self.module, &tn)
-                {
-                    let v = self
+                // `T.from(v)` for a structure type `T`: a fallible structural
+                // conversion. The result is `T?` -- the record built from `v`'s
+                // fields when the (monomorphized) `v` has all of `T`'s, else null.
+                // The back ends read the fields and make the presence decision per
+                // instance, so the lowering only carries the target type and source.
+                if method == "from" && self.ctx.record_field_names(&self.module, &tn).is_some() {
+                    let source = self
                         .lower_args(args)
                         .into_iter()
                         .next()
                         .unwrap_or_else(Operand::void);
-                    let subj = self.b.make_local(v);
-                    let fields = field_names
-                        .into_iter()
-                        .map(|name| {
-                            let load = self.b.emit(Rvalue::Load(Place::projected(
-                                subj,
-                                vec![Projection::Field(name.clone())],
-                            )));
-                            (name, load)
-                        })
-                        .collect();
-                    return Rvalue::Record { ty: tn, fields };
+                    return Rvalue::RecordFrom { ty: tn, source };
                 }
                 let qualifier = self.ctx.static_qualifier(&self.module, &tn);
                 let ops = self.lower_args(args);

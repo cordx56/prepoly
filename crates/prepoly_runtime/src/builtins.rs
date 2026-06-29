@@ -224,10 +224,11 @@ pub unsafe extern "C-unwind" fn pp_conv_float_parse(s: *mut Header, tag: i64) ->
     let text = unsafe { typed_str(s) };
     unsafe {
         match text.trim().parse::<f64>() {
-            Ok(f) => {
-                let stored = if tag == TAG_F32 { (f as f32) as f64 } else { f };
-                typed_result(true, |p| *(p as *mut f64) = stored)
-            }
+            // The Ok payload type is `floatN`, so write it at that width: an f32
+            // result must occupy the 4-byte slot the back end reads, not an f64
+            // whose low half would be read as a garbage f32.
+            Ok(f) if tag == TAG_F32 => typed_result(true, |p| *(p as *mut f32) = f as f32),
+            Ok(f) => typed_result(true, |p| *(p as *mut f64) = f),
             Err(_) => typed_result_err(&format!("cannot parse `{text}` as float")),
         }
     }

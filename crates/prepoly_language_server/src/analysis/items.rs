@@ -45,6 +45,13 @@ pub struct Item {
     /// Names this item mentions (functions, types, methods/fields). An
     /// over-approximation -- extra names only cause extra re-checking.
     pub refs: HashSet<String>,
+    /// Names this item *defines* at the top level. For a function or type this is
+    /// just its own name; for the synthetic `<init>` item it is every module-level
+    /// `let`/`const` global it declares. Dependency resolution matches an item's
+    /// `refs` against these (not the item name), so a function that uses a global is
+    /// pulled in together with the `<init>` item that declares it -- otherwise it is
+    /// re-checked with the global out of scope and reports a spurious "unknown name".
+    pub defines: HashSet<String>,
     /// Diagnostics attributed to this item, in global span coordinates.
     pub diags: Vec<Diag>,
 }
@@ -101,17 +108,16 @@ pub fn split(module: &Module, main_src: &str, base: usize) -> Vec<Item> {
             span = span.merge(s.span());
         }
         let mut refs = HashSet::new();
+        let mut defines = HashSet::new();
         for s in &init_stmts {
             refs_stmt(s, &mut refs);
+            collect_stmt_defines(s, &mut defines);
         }
-        items.push(make_item(
-            "<init>".into(),
-            ItemKind::Init,
-            span,
-            main_src,
-            base,
-            refs,
-        ));
+        let mut item = make_item("<init>".into(), ItemKind::Init, span, main_src, base, refs);
+        // The init item defines the module-level globals, not the synthetic name, so
+        // a function that references a global resolves to (and pulls in) this item.
+        item.defines = defines;
+        items.push(item);
     }
     items
 }
@@ -129,13 +135,44 @@ fn make_item(
     let text = main_src.get(lo..hi).unwrap_or("");
     let mut h = DefaultHasher::new();
     text.hash(&mut h);
+    let mut defines = HashSet::new();
+    defines.insert(name.clone());
     Item {
         name,
         kind,
         span,
         hash: h.finish(),
         refs,
+        defines,
         diags: Vec::new(),
+    }
+}
+
+/// The top-level names a module-level statement binds (`let`/`const` globals), so
+/// the `<init>` item advertises them as its definitions.
+fn collect_stmt_defines(stmt: &Stmt, out: &mut HashSet<String>) {
+    if let Stmt::Let { pat, .. } = stmt {
+        collect_pattern_defines(pat, out);
+    }
+}
+
+fn collect_pattern_defines(pat: &Pattern, out: &mut HashSet<String>) {
+    match pat {
+        Pattern::Binding(name, _) => {
+            out.insert(name.clone());
+        }
+        Pattern::Record(_, fields, _) => {
+            for f in fields {
+                match &f.pat {
+                    Some(sub) => collect_pattern_defines(sub, out),
+                    None => {
+                        out.insert(f.name.clone());
+                    }
+                }
+            }
+        }
+        Pattern::Array(pats, _) => pats.iter().for_each(|p| collect_pattern_defines(p, out)),
+        Pattern::Wildcard(_) | Pattern::Literal(_, _) => {}
     }
 }
 
@@ -182,31 +219,41 @@ pub fn diff(prev: &ItemCache, new_items: &[Item]) -> Diff {
         };
     }
 
-    // Changed = source hash differs from the same-named previous item.
+    // Changed = source hash differs from the same-named previous item. Collect the
+    // names those changed items *define* (an item's own name, or the globals of a
+    // changed `<init>`), so a user of a changed global is re-checked too.
     let mut changed_names: HashSet<&str> = HashSet::new();
+    let mut changed_defs: HashSet<&str> = HashSet::new();
     for (name, &i) in &new_by_name {
         let pi = prev_by_name[name];
         if new_items[i].hash != prev.items[pi].hash {
             changed_names.insert(name);
+            for d in &new_items[i].defines {
+                changed_defs.insert(d);
+            }
         }
     }
 
-    // Affected = changed items plus every item that references a changed name.
+    // Affected = changed items plus every item that references a name *defined* by a
+    // changed item.
     let mut affected: HashSet<usize> = HashSet::new();
     for (name, &i) in &new_by_name {
         let is_changed = changed_names.contains(name.as_str());
         let uses_changed = new_items[i]
             .refs
             .iter()
-            .any(|r| changed_names.contains(r.as_str()));
+            .any(|r| changed_defs.contains(r.as_str()));
         if is_changed || uses_changed {
             affected.insert(i);
         }
     }
 
-    // Reduced = affected plus the forward dependency closure (definitions the
-    // affected items reference), so resolution sees every name they use.
-    let reduced = forward_closure(&affected, new_items, &new_by_name);
+    // Reduced = affected plus the forward dependency closure, resolved through
+    // *defined* names so a referenced global pulls in the `<init>` item that
+    // declares it -- otherwise the affected item is re-checked with the global out
+    // of scope and reports a spurious "unknown name".
+    let def_to_index = index_by_defines(new_items);
+    let reduced = forward_closure(&affected, new_items, &def_to_index);
 
     // Carry = unaffected items keep last diagnostics, shifted by their byte move.
     let mut carry = Vec::new();
@@ -252,6 +299,19 @@ fn index_by_name(items: &[Item]) -> HashMap<String, usize> {
     let mut map = HashMap::new();
     for (i, it) in items.iter().enumerate() {
         map.insert(it.name.clone(), i);
+    }
+    map
+}
+
+/// Map every *defined* name to its item index (a function/type name, or each global
+/// the `<init>` item declares), for resolving an item's `refs` to the item that
+/// provides the name.
+fn index_by_defines(items: &[Item]) -> HashMap<String, usize> {
+    let mut map = HashMap::new();
+    for (i, it) in items.iter().enumerate() {
+        for d in &it.defines {
+            map.insert(d.clone(), i);
+        }
     }
     map
 }
@@ -467,5 +527,63 @@ fn refs_pattern(p: &Pattern, out: &mut HashSet<String>) {
                 refs_pattern(p, out);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prepoly_parser::parse;
+
+    fn items_of(src: &str) -> Vec<Item> {
+        split(&parse(src).expect("parse"), src, 0)
+    }
+
+    /// Editing a function that references a module-level global must pull the
+    /// `<init>` item (which declares the global) into the reduced re-check set, so
+    /// the function is not re-checked with the global out of scope -- which used to
+    /// produce a spurious "unknown name" the full compiler never reports.
+    #[test]
+    fn editing_a_function_pulls_in_the_globals_it_uses() {
+        let v1 = "const LIMIT = 100\nfun use_it() {\n    return LIMIT\n}\n";
+        let v2 = "const LIMIT = 100\nfun use_it() {\n    return LIMIT + 0\n}\n";
+        let prev = ItemCache {
+            items: items_of(v1),
+        };
+        let new_items = items_of(v2);
+        let d = diff(&prev, &new_items);
+        assert!(
+            !d.full,
+            "a single-body edit is incremental, not from-scratch"
+        );
+        let init_idx = new_items
+            .iter()
+            .position(|it| it.kind == ItemKind::Init)
+            .expect("an <init> item for the global");
+        assert!(
+            d.reduced.contains(&init_idx),
+            "the <init> item declaring LIMIT must be re-checked in scope with its user"
+        );
+    }
+
+    /// Changing a global's value must re-check the functions that use it (the global
+    /// is one of `<init>`'s defined names), not carry over their stale diagnostics.
+    #[test]
+    fn editing_a_global_affects_its_users() {
+        let v1 = "const LIMIT = 100\nfun use_it() {\n    return LIMIT\n}\n";
+        let v2 = "const LIMIT = 200\nfun use_it() {\n    return LIMIT\n}\n";
+        let prev = ItemCache {
+            items: items_of(v1),
+        };
+        let new_items = items_of(v2);
+        let d = diff(&prev, &new_items);
+        let use_idx = new_items
+            .iter()
+            .position(|it| it.name == "use_it")
+            .expect("use_it item");
+        assert!(
+            d.affected.contains(&use_idx),
+            "a user of the changed global must be re-checked"
+        );
     }
 }

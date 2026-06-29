@@ -1,10 +1,18 @@
 //! End-to-end tests for record-field and sum-variant features. Each `*.pp` under
-//! `e2e_tests/` is run through the driver and its stdout compared byte-for-byte to
-//! a sibling `*.out`. Cases are grouped by subsystem: `e2e_tests/field/` (record
-//! and struct fields) and `e2e_tests/variant/` (sum types, variant construction,
-//! pattern matching, and variant-field access). Several cases pin behaviors that
-//! previously miscompiled (variant-qualified field binding, a sum common field at
-//! differing per-variant offsets, and nested refutable sub-patterns).
+//! `e2e_tests/` is run through the driver and checked against a sibling
+//! expectation. Two expectation kinds are supported:
+//!
+//! - `*.out`: the program must run successfully and its stdout must match the file
+//!   byte-for-byte (the common success case).
+//! - `*.err`: the program must *fail* (non-zero exit) and its stderr must contain
+//!   the file's trimmed contents as a substring. This pins the diagnostics for
+//!   programs that must be rejected -- e.g. the slice-element and anonymous-struct
+//!   type holes a value would otherwise corrupt the unboxed back end through.
+//!
+//! Cases are grouped by subsystem (`field/`, `variant/`, `types/`, `structure/`,
+//! `references/`, ...). `concurrency/` cases use `spawn`/`with`, which only the JIT
+//! back end runs, so that directory is skipped when the `jit` feature is off (the
+//! interpreter rejects concurrency at runtime).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,6 +24,8 @@ fn e2e_root() -> PathBuf {
 }
 
 /// Every `*.pp` under `dir`, recursively, in sorted order (so failures are stable).
+/// `concurrency/` is skipped without the `jit` feature: those cases need real
+/// threads that only the JIT back end provides.
 fn collect_cases(dir: &Path, out: &mut Vec<PathBuf>) {
     let mut entries: Vec<PathBuf> = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
@@ -24,10 +34,52 @@ fn collect_cases(dir: &Path, out: &mut Vec<PathBuf>) {
     entries.sort();
     for path in entries {
         if path.is_dir() {
+            if !cfg!(feature = "jit") && path.file_name().is_some_and(|n| n == "concurrency") {
+                continue;
+            }
             collect_cases(&path, out);
         } else if path.extension().is_some_and(|ext| ext == "pp") {
             out.push(path);
         }
+    }
+}
+
+/// Run a success case: the program must exit zero and print exactly `expected`.
+fn check_success(bin: &str, pp: &Path, expected: &str) {
+    let out = Command::new(bin).arg(pp).output().expect("spawn prepoly");
+    assert!(
+        out.status.success(),
+        "{} failed to run (status {:?})\nstderr:\n{}",
+        pp.display(),
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        expected,
+        "{} produced unexpected stdout",
+        pp.display(),
+    );
+}
+
+/// Run an error case: the program must exit non-zero and its stderr must contain
+/// every line of `expected` (trimmed) as a substring, so the diagnostic is pinned
+/// without coupling to the absolute source path the driver prints.
+fn check_error(bin: &str, pp: &Path, expected: &str) {
+    let out = Command::new(bin).arg(pp).output().expect("spawn prepoly");
+    assert!(
+        !out.status.success(),
+        "{} was expected to fail but succeeded\nstdout:\n{}",
+        pp.display(),
+        String::from_utf8_lossy(&out.stdout),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for needle in expected.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        assert!(
+            stderr.contains(needle),
+            "{} stderr did not contain `{needle}`\nstderr:\n{stderr}",
+            pp.display(),
+        );
     }
 }
 
@@ -44,25 +96,16 @@ fn e2e_cases_produce_expected_output() {
     );
 
     for pp in &cases {
-        let expected = fs::read_to_string(pp.with_extension("out")).unwrap_or_else(|e| {
-            panic!(
-                "missing/unreadable expected output for {}: {e}",
-                pp.display()
-            )
-        });
-        let out = Command::new(bin).arg(pp).output().expect("spawn prepoly");
-        assert!(
-            out.status.success(),
-            "{} failed to run (status {:?})\nstderr:\n{}",
-            pp.display(),
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr),
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout),
-            expected,
-            "{} produced unexpected stdout",
-            pp.display(),
-        );
+        match (
+            fs::read_to_string(pp.with_extension("out")).ok(),
+            fs::read_to_string(pp.with_extension("err")).ok(),
+        ) {
+            (Some(expected), None) => check_success(bin, pp, &expected),
+            (None, Some(expected)) => check_error(bin, pp, &expected),
+            (Some(_), Some(_)) => {
+                panic!("{} has both a .out and a .err expectation", pp.display())
+            }
+            (None, None) => panic!("missing .out/.err expectation for {}", pp.display()),
+        }
     }
 }

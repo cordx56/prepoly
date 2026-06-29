@@ -449,6 +449,13 @@ impl<'a> Checker<'a> {
                     self.infer_expr_light(value, env, errors);
                 }
                 Stmt::Expr(value) => {
+                    // Grow a locally-built collection's element type: a
+                    // `result = []` then `result.push(x)` pins `result`'s element
+                    // to `x`, so an unannotated function that returns the built
+                    // collection (e.g. `slice`/`map`) infers its element type from
+                    // the values pushed -- which the rest of this light pass would
+                    // otherwise miss, leaving the return an unconstrained `?[]`.
+                    self.track_collection_growth(value, env, errors);
                     self.infer_returns_expr(value, env, normal, errors);
                 }
                 Stmt::While { cond, body, .. } => {
@@ -514,6 +521,31 @@ impl<'a> Checker<'a> {
             }
             other => {
                 self.infer_expr_light(other, env, errors);
+            }
+        }
+    }
+
+    /// If `expr` is `recv.push(value)` or `recv.insert(idx, value)` where `recv`
+    /// is a slice/array, unify its element type with the pushed value's type.
+    /// This pins the (fresh, local) element variable of a collection being built
+    /// up, so the light return-inference pass sees the grown element type. It
+    /// only ever binds the local's own element variable, not the function's
+    /// parameter variables.
+    fn track_collection_growth(
+        &mut self,
+        expr: &Expr,
+        env: &HashMap<String, Type>,
+        errors: &mut Vec<(Type, Span)>,
+    ) {
+        if let Expr::Call(callee, args, _) = expr
+            && let Expr::Field(recv, method, _) = callee.as_ref()
+            && matches!(method.as_str(), "push" | "insert")
+            && let Some(value_arg) = args.last()
+        {
+            let recv_ty = self.infer_expr_light(recv, env, errors);
+            if let Some(elem) = prepoly_hir::index_element(&self.resolve(&recv_ty)) {
+                let value_ty = self.infer_expr_light(&value_arg.expr, env, errors);
+                let _ = self.solver.unify(&elem, &value_ty);
             }
         }
     }
@@ -1701,7 +1733,15 @@ impl<'a> Checker<'a> {
                 let mut then_scopes = scopes.clone();
                 then_scopes.push(HashMap::new());
                 self.const_scopes.push(HashSet::new());
-                self.bind_pattern(pat, &scrut_ty, &mut then_scopes);
+                // A plain binding on a nullable scrutinee is a presence test, so on
+                // the then-arm the value is proven non-null: bind it at the unwrapped
+                // type (e.g. `if let p = T.from(v)` gives `p: T`), so `p.field` is
+                // valid rather than a nullable-use error.
+                let bind_ty = match (pat, &self.resolve(&scrut_ty)) {
+                    (Pattern::Binding(_, _), Type::Nullable(inner)) => (**inner).clone(),
+                    _ => scrut_ty.clone(),
+                };
+                self.bind_pattern(pat, &bind_ty, &mut then_scopes);
                 let then_ty = self.check_block_expr(then, &mut then_scopes);
                 self.const_scopes.pop();
                 let else_ty = els
@@ -3028,19 +3068,9 @@ impl<'a> Checker<'a> {
             ("push", Some(elem)) => {
                 if let Some(arg) = args.first() {
                     let got = self.check_expr(&arg.expr, scopes);
-                    self.expect_expr_assignable(&got, elem, &arg.expr);
-                    // Pin the element type of an as-yet-unconstrained array
-                    // (e.g. one bound from `[]`) to the first pushed value, so a
-                    // later push of a different type is rejected. The element
-                    // variable lives in the array's `Slice` type, so the pin is
-                    // visible to every later use of the same binding (R3).
-                    if matches!(self.resolve(elem), Type::Unknown(_)) {
-                        let _ = self.solver.unify(elem, &got);
-                    }
+                    self.expect_element_assignable(&got, elem, &arg.expr);
                 }
-                for arg in args.iter().skip(1) {
-                    self.check_expr(&arg.expr, scopes);
-                }
+                self.reject_extra_args(method, args, 1, scopes, span);
                 Some(Type::Void)
             }
             ("pop", Some(elem)) => {
@@ -3057,14 +3087,9 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(value) = args.get(1) {
                     let got = self.check_expr(&value.expr, scopes);
-                    self.expect_expr_assignable(&got, elem, &value.expr);
-                    if matches!(self.resolve(elem), Type::Unknown(_)) {
-                        let _ = self.solver.unify(elem, &got);
-                    }
+                    self.expect_element_assignable(&got, elem, &value.expr);
                 }
-                for arg in args.iter().skip(2) {
-                    self.check_expr(&arg.expr, scopes);
-                }
+                self.reject_extra_args(method, args, 2, scopes, span);
                 Some(Type::Void)
             }
             // `arr.remove(idx) -> T`: removes and returns the element (DESIGN.md 9.1).
@@ -3102,38 +3127,26 @@ impl<'a> Checker<'a> {
         span: prepoly_lexer::Span,
         scopes: &mut ScopeStack,
     ) -> Type {
-        // `T.from(v)`: a structural conversion to record type `T`. Every field `T`
-        // declares must be present in `v`'s (structure) type; a missing field is a
-        // type error (DESIGN.md: the goal's `T.from` contract).
+        // `T.from(v)`: a *fallible* structural conversion to record type `T`. The
+        // result is `T?`: whether `v` actually has every field `T` declares is
+        // decided per monomorphized argument type (the conversion yields the record
+        // when the concrete argument has the fields, else null), so a missing field
+        // is not a static error -- the caller narrows the nullable (an `if`/`if let`)
+        // and handles the failure path.
         if method == "from" {
             let target = self
                 .program
                 .types
                 .get(qualifier)
                 .and_then(|info| match &info.kind {
-                    TypeKind::Record { fields, .. } => Some((
-                        info.type_ref(),
-                        info.name.clone(),
-                        fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
-                    )),
+                    TypeKind::Record { .. } => Some(info.type_ref()),
                     _ => None,
                 });
-            if let Some((ty, tname, field_names)) = target {
+            if let Some(ty) = target {
                 if let Some(arg) = args.first() {
-                    let v = self.check_expr(&arg.expr, scopes);
-                    let v = self.resolve(&v);
-                    for fname in &field_names {
-                        if !self.field_is_present(&v, fname) {
-                            self.errors.push(TypeError {
-                                message: format!(
-                                    "`{tname}.from`: the value is missing field `{fname}` required by `{tname}`"
-                                ),
-                                span,
-                            });
-                        }
-                    }
+                    self.check_expr(&arg.expr, scopes);
                 }
-                return ty;
+                return Type::Nullable(Box::new(ty));
             }
         }
         if let Some(ret) = self.primitive_static_call(qualifier, method, args, scopes) {
@@ -3356,7 +3369,25 @@ impl<'a> Checker<'a> {
     }
 
     fn instantiate_annotated_type(&self, annotated: &Type, actual: &Type) -> Type {
-        match (self.resolve(annotated), self.resolve(actual)) {
+        // Match against the actual value type, looking through `const`/`mut`/`ref`
+        // wrappers (an argument's mutability/reference does not change which
+        // element type a generic parameter is instantiated with).
+        let actual = peel_value_wrappers(&self.resolve(actual)).clone();
+        match (self.resolve(annotated), actual) {
+            // A bare `infer` parameter takes the argument's type.
+            (Type::Unknown(_), have) => have,
+            // A generic container parameter (`infer[]`, `infer[]?`, ...) is
+            // instantiated element-wise, so e.g. `slice(arr: infer[])` applied to
+            // an `int32[]` returns an `int32[]` rather than an unconstrained `?[]`.
+            (Type::Slice(want), Type::Slice(have) | Type::Array(have, _)) => {
+                Type::Slice(Box::new(self.instantiate_annotated_type(&want, &have)))
+            }
+            (Type::Array(want, n), Type::Array(have, _) | Type::Slice(have)) => {
+                Type::Array(Box::new(self.instantiate_annotated_type(&want, &have)), n)
+            }
+            (Type::Nullable(want), Type::Nullable(have)) => {
+                Type::Nullable(Box::new(self.instantiate_annotated_type(&want, &have)))
+            }
             (Type::Record(want), Type::Record(have)) => {
                 let mut substitution = want.substitution.clone();
                 if let Some(TypeKind::Record { fields, .. }) =
@@ -3783,6 +3814,100 @@ impl<'a> Checker<'a> {
         Subst::new().unify(a, b).is_ok()
             || crate::structural::types_compatible(self.program, a, b)
             || crate::structural::types_compatible(self.program, b, a)
+    }
+
+    /// Check a value pushed/inserted into a slice against its element type. Unlike
+    /// the bidirectional `expect_assignable` (whose reverse structural check the
+    /// per-call hm pass re-gates for ordinary flow positions, but not for slice
+    /// methods), this is one-directional: the value must be usable *as* the
+    /// element, so a structural supertype is rejected and cannot corrupt the
+    /// unboxed element layout. When the element type is still an open inference
+    /// variable it is pinned to the value through `solver.unify`, so the occurs
+    /// check fires -- pushing an array into itself (`a.push(a)`) is reported here
+    /// instead of leaving the element unbound to be mistyped at the call site.
+    fn expect_element_assignable(&mut self, got: &Type, elem: &Type, expr: &Expr) {
+        let got = self.resolve(got);
+        let want = self.resolve(elem);
+        if integer_literal_fits(expr, &want) {
+            return;
+        }
+        if want.is_unknown() {
+            // The element type is still open: pin it to the value. The only way
+            // `unify(var, got)` fails is the occurs check, i.e. `got` contains the
+            // element variable -- pushing the array into itself. Report that
+            // directly rather than as a generic mismatch on the `?` placeholder.
+            if self.solver.unify(elem, &got).is_err() {
+                self.errors.push(TypeError {
+                    message: "cannot push a value whose type contains this array; \
+                              the element type would be infinite"
+                        .to_string(),
+                    span: expr.span(),
+                });
+            }
+            return;
+        }
+        if got.is_null() && !matches!(want, Type::Nullable(_)) {
+            self.report_element_mismatch(&got, &want, expr.span());
+            return;
+        }
+        if matches!(got, Type::Nullable(_)) && !matches!(want, Type::Nullable(_)) {
+            self.report_nullable_use(expr.span());
+            return;
+        }
+        if let Type::Nullable(inner) = &want
+            && (self.assignable_into(&got, inner) || matches!(got, Type::Never))
+        {
+            return;
+        }
+        if self.assignable_into(&got, &want) {
+            return;
+        }
+        self.report_element_mismatch(&got, &want, expr.span());
+    }
+
+    /// One-directional assignability: whether `got` is usable where `want` is
+    /// required, by inference-variable unification or structural subtyping, and
+    /// without the reverse structural check `can_unify` adds.
+    fn assignable_into(&self, got: &Type, want: &Type) -> bool {
+        Subst::new().unify(got, want).is_ok()
+            || crate::structural::types_compatible(self.program, got, want)
+    }
+
+    fn report_element_mismatch(&mut self, got: &Type, want: &Type, span: prepoly_lexer::Span) {
+        self.errors.push(TypeError {
+            message: format!(
+                "cannot use `{}` where `{}` is required",
+                got.display(),
+                want.display()
+            ),
+            span,
+        });
+    }
+
+    /// Report (and still type-check, to surface their own errors) arguments beyond
+    /// the fixed arity of a builtin slice mutator, so `a.push(x, y)` is rejected
+    /// rather than silently dropping `y` -- which previously let `a.push(a, 2)`
+    /// parse as a self-push.
+    fn reject_extra_args(
+        &mut self,
+        method: &str,
+        args: &[Arg],
+        arity: usize,
+        scopes: &mut ScopeStack,
+        span: prepoly_lexer::Span,
+    ) {
+        for arg in args.iter().skip(arity) {
+            self.check_expr(&arg.expr, scopes);
+        }
+        if args.len() > arity {
+            self.errors.push(TypeError {
+                message: format!(
+                    "method `{method}` takes {arity} argument(s), found {}",
+                    args.len()
+                ),
+                span,
+            });
+        }
     }
 
     /// Resolve a type through the persistent substitution, following solved
@@ -4465,21 +4590,6 @@ impl<'a> Checker<'a> {
             .map(|t| t.type_ref())
     }
 
-    /// Whether a (resolved) structure type genuinely declares `field` (in its
-    /// substitution or its declaration), not the absent-field fallback. Used by
-    /// `T.from` to detect a missing required field.
-    fn field_is_present(&self, ty: &Type, field: &str) -> bool {
-        let Type::Record(n) = ty else {
-            return false;
-        };
-        if n.substitution.get(field).is_some() {
-            return true;
-        }
-        matches!(self.program.type_by_id(n.id), Some(info)
-            if matches!(&info.kind, TypeKind::Record { fields, .. }
-                if fields.iter().any(|f| f.name == field)))
-    }
-
     fn is_type_word(&self, name: &str) -> bool {
         self.program.has_type_named(name)
             || name == "Self"
@@ -4645,6 +4755,14 @@ fn is_concrete_type(ty: &Type) -> bool {
 fn peel_ref_mut(ty: &Type) -> &Type {
     match ty {
         Type::Ref(inner) | Type::Mut(inner) => peel_ref_mut(inner),
+        other => other,
+    }
+}
+
+/// Peel `const`/`mut`/`ref` value wrappers to reach the underlying value type.
+fn peel_value_wrappers(ty: &Type) -> &Type {
+    match ty {
+        Type::ConstOf(inner) | Type::Mut(inner) | Type::Ref(inner) => peel_value_wrappers(inner),
         other => other,
     }
 }
