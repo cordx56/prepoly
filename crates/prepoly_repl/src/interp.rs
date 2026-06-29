@@ -800,9 +800,9 @@ fn truthy(v: &Value, ty: &Type) -> bool {
 /// `Rc` share is sound.
 fn deep_copy_value(v: &Value) -> Value {
     match v {
-        Value::Array(a) => {
-            Value::Array(Rc::new(RefCell::new(a.borrow().iter().map(deep_copy_value).collect())))
-        }
+        Value::Array(a) => Value::Array(Rc::new(RefCell::new(
+            a.borrow().iter().map(deep_copy_value).collect(),
+        ))),
         Value::Record(r) => Value::Record(Rc::new(RefCell::new(
             r.borrow()
                 .iter()

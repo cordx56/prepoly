@@ -172,6 +172,39 @@ pub unsafe extern "C-unwind" fn pp_arr_copy(
     }
 }
 
+/// A fresh growable array deep-copying each element of `arr`. When `copy_fn` is 0
+/// the elements are plain bytes and the buffer is copied directly; otherwise each
+/// element is a heap pointer and `copy_fn` (a `fn(*Header) -> *Header`) produces an
+/// independent copy of it, recursing for nested aggregates.
+///
+/// # Safety
+/// `arr` must be a growable-array object whose elements are `elem_size` bytes each;
+/// when `copy_fn != 0` it must be a valid `extern "C-unwind" fn(*mut Header) ->
+/// *mut Header` and the elements must be `*mut Header` pointers.
+pub unsafe extern "C-unwind" fn pp_arr_deep_copy(
+    arr: *mut Header,
+    elem_size: i64,
+    copy_fn: usize,
+) -> *mut Header {
+    unsafe {
+        let len = *((arr as *mut u8).offset(16) as *mut i64);
+        let src = *((arr as *mut u8).offset(32) as *mut *mut u8);
+        let new = pp_arr_new(elem_size, len);
+        let dst = *((new as *mut u8).offset(32) as *mut *mut u8);
+        if copy_fn == 0 {
+            std::ptr::copy_nonoverlapping(src, dst, (len * elem_size) as usize);
+        } else {
+            let f: extern "C-unwind" fn(*mut Header) -> *mut Header = std::mem::transmute(copy_fn);
+            for i in 0..len {
+                let elem = *(src.offset((i * elem_size) as isize) as *mut *mut Header);
+                let copied = if elem.is_null() { elem } else { f(elem) };
+                *(dst.offset((i * elem_size) as isize) as *mut *mut Header) = copied;
+            }
+        }
+        new
+    }
+}
+
 /// Append `elem_size` bytes from `elem` to the array, growing (doubling) the
 /// element buffer if full.
 ///

@@ -500,9 +500,10 @@ impl<'a, 'p> FnLower<'a, 'p> {
         };
         for (op, needs) in ops.iter_mut().zip(copies.iter()) {
             if *needs {
-                *op = self
-                    .b
-                    .emit(Rvalue::Call(Callee::Builtin("__deep_copy".into()), vec![op.clone()]));
+                *op = self.b.emit(Rvalue::Call(
+                    Callee::Builtin("__deep_copy".into()),
+                    vec![op.clone()],
+                ));
             }
         }
     }

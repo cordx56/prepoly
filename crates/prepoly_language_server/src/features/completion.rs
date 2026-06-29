@@ -52,8 +52,12 @@ pub fn completion(
 
     if let Some(ctx) = import_context(prefix) {
         return match ctx {
-            ImportContext::Names { module, prefix } => import_name_items(&module, &prefix, doc_path),
-            ImportContext::Path { parents, prefix } => import_path_items(&parents, &prefix, doc_path),
+            ImportContext::Names { module, prefix } => {
+                import_name_items(&module, &prefix, doc_path)
+            }
+            ImportContext::Path { parents, prefix } => {
+                import_path_items(&parents, &prefix, doc_path)
+            }
         };
     }
     if let Some(items) = member_completion(doc, analyzer, offset) {
@@ -409,10 +413,9 @@ fn type_qualified_items(
 /// its underlying type for member lookup.
 fn strip(ty: &Type) -> Type {
     match ty {
-        Type::Nullable(inner)
-        | Type::ConstOf(inner)
-        | Type::Mut(inner)
-        | Type::Ref(inner) => strip(inner),
+        Type::Nullable(inner) | Type::ConstOf(inner) | Type::Mut(inner) | Type::Ref(inner) => {
+            strip(inner)
+        }
         other => other.clone(),
     }
 }

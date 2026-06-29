@@ -274,8 +274,7 @@ impl<'p> Hm<'p> {
         // `error(x)`/`expr!`, OR its declared return is already a `Result` (a `T!`
         // annotation, or an explicit Result). The latter makes a bare value unify
         // with `Result.Ok { value: v }` even when the body raises no error.
-        self.fallible =
-            block_is_fallible(body) || is_result(&self.solver.resolve(&declared));
+        self.fallible = block_is_fallible(body) || is_result(&self.solver.resolve(&declared));
         tracing::debug!(context, fallible = self.fallible, "checking callable body");
         if self.fallible {
             let inferred = Type::result(self.ok.clone(), self.err.clone());

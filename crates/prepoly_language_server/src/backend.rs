@@ -234,8 +234,7 @@ impl LanguageServer for Backend {
         // analysis it produces stays inside that synchronous call and is dropped
         // before this handler awaits.
         let path = uri_to_path(&uri);
-        let items =
-            features::completion::completion(&entry.document, &entry.analyzer, &path, pos);
+        let items = features::completion::completion(&entry.document, &entry.analyzer, &path, pos);
         Ok(Some(CompletionResponse::Array(items)))
     }
 

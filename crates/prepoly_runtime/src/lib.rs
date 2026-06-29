@@ -31,6 +31,7 @@ pub fn symbols() -> Vec<(&'static str, usize)> {
         mem::pp_obj_free,
         alloc::pp_arr_new,
         alloc::pp_arr_copy,
+        alloc::pp_arr_deep_copy,
         alloc::pp_arr_push,
         alloc::pp_arr_insert,
         alloc::pp_arr_remove,

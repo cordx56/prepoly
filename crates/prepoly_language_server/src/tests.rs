@@ -305,12 +305,24 @@ fn completion_offers_array_members() {
     let off = src.find("a.\n").unwrap() + 2;
     let items = completion::completion(&doc, &analyzer, &path(), doc.position_at(off));
     let labels = labels(&items);
-    assert!(labels.contains(&"push".to_string()), "builtin push: {labels:?}");
-    assert!(labels.contains(&"len".to_string()), "builtin len: {labels:?}");
+    assert!(
+        labels.contains(&"push".to_string()),
+        "builtin push: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"len".to_string()),
+        "builtin len: {labels:?}"
+    );
     assert!(labels.contains(&"map".to_string()), "UFCS map: {labels:?}");
-    assert!(labels.contains(&"filter".to_string()), "UFCS filter: {labels:?}");
+    assert!(
+        labels.contains(&"filter".to_string()),
+        "UFCS filter: {labels:?}"
+    );
     // A member list must not leak the global symbol list (e.g. type names).
-    assert!(!labels.contains(&"int32".to_string()), "no globals: {labels:?}");
+    assert!(
+        !labels.contains(&"int32".to_string()),
+        "no globals: {labels:?}"
+    );
 }
 
 /// After `p.` on a record value, offer that record's methods.
@@ -334,7 +346,10 @@ fn completion_offers_record_methods() {
     let off = src.find("p.\n").unwrap() + 2;
     let items = completion::completion(&doc, &analyzer, &path(), doc.position_at(off));
     let labels = labels(&items);
-    assert!(labels.contains(&"dist".to_string()), "record method: {labels:?}");
+    assert!(
+        labels.contains(&"dist".to_string()),
+        "record method: {labels:?}"
+    );
 }
 
 /// After a sum type name (`Shape.`), offer its variants.
@@ -354,6 +369,28 @@ fn completion_offers_sum_variants() {
     let off = src.find("Shape.\n").unwrap() + "Shape.".len();
     let items = completion::completion(&doc, &analyzer, &path(), doc.position_at(off));
     let labels = labels(&items);
-    assert!(labels.contains(&"Circle".to_string()), "variant Circle: {labels:?}");
-    assert!(labels.contains(&"Square".to_string()), "variant Square: {labels:?}");
+    assert!(
+        labels.contains(&"Circle".to_string()),
+        "variant Circle: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"Square".to_string()),
+        "variant Square: {labels:?}"
+    );
+}
+
+/// `s: ref(mut(infer[]))` with `s.push("b")` infers `ref(mut(string[]))`: the
+/// push pins the element through the `ref`/`mut` wrappers, and the final
+/// re-resolution makes every occurrence of `s` reflect it.
+#[test]
+fn hover_infers_ref_mut_array_element() {
+    let src = "fun f(s: ref(mut(infer[]))) {\n    s.push(\"b\")\n    println(s)\n}\n\nf([\"a\"])\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "(s)", false);
+    let h = hover::hover(&doc, &full, pos).expect("hover over s");
+    let text = hover_text(&h);
+    assert!(
+        text.contains("ref(mut(string[]))"),
+        "element should be inferred as string: {text}"
+    );
 }

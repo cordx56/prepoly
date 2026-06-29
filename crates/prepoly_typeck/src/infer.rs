@@ -115,6 +115,13 @@ pub fn analyze(program: &Program) -> Inference {
         }
     }
     checker.const_scopes.clear();
+    // Each expression's type was resolved against the substitution as it was
+    // recorded, but a variable can be pinned *after* an expression that mentions
+    // it was checked (e.g. an array element fixed by a later `push`). Re-resolve
+    // every recorded type against the final substitution so the typed program
+    // reflects the fully solved types -- which hover and the other LSP features
+    // read directly.
+    checker.finalize_typed();
     Inference {
         errors: checker.errors,
         typed: checker.typed,
@@ -1339,6 +1346,22 @@ impl<'a> Checker<'a> {
             ty
         };
         self.typed.push_expr(expr, ty, constness);
+    }
+
+    /// Re-resolve every recorded expression type against the final substitution.
+    /// Run once after all checking, so a type recorded before one of its
+    /// variables was pinned still reflects the solved type. `resolve` is deep and
+    /// preserves the `ConstOf` wrapper, so constness is unchanged.
+    fn finalize_typed(&mut self) {
+        let resolved: Vec<Type> = self
+            .typed
+            .expressions
+            .iter()
+            .map(|e| self.solver.resolve(&e.ty))
+            .collect();
+        for (e, ty) in self.typed.expressions.iter_mut().zip(resolved) {
+            e.ty = ty;
+        }
     }
 
     fn expr_constness(&self, expr: &Expr) -> Constness {
@@ -2955,7 +2978,12 @@ impl<'a> Checker<'a> {
         span: prepoly_lexer::Span,
     ) -> Option<Type> {
         let resolved = self.resolve(recv_ty);
-        let (elem, is_fixed) = match &resolved {
+        // `ref(..)`/`mut(..)` are transparent wrappers, so a method on
+        // `ref(mut(T[]))` reaches the same collection as one on `T[]`. Peeling
+        // them lets `push`/`len`/... be recognised -- and lets `push` pin the
+        // element variable to the pushed value -- through a reference.
+        let base = peel_ref_mut(&resolved);
+        let (elem, is_fixed) = match base {
             Type::Slice(inner) => (Some((**inner).clone()), false),
             Type::Array(inner, _) => (Some((**inner).clone()), true),
             _ => (None, false),
@@ -3039,7 +3067,7 @@ impl<'a> Checker<'a> {
                 });
                 Some(Type::Int(IntKind::I64))
             }
-            _ if method == "len" && matches!(resolved, Type::Str) => {
+            _ if method == "len" && matches!(base, Type::Str) => {
                 args.iter().for_each(|arg| {
                     self.check_expr(&arg.expr, scopes);
                 });
@@ -4559,6 +4587,15 @@ fn is_concrete_type(ty: &Type) -> bool {
         Type::Fun(params, ret) => params.iter().all(is_concrete_type) && is_concrete_type(ret),
         Type::Tuple(elems) => elems.iter().all(is_concrete_type),
         _ => true,
+    }
+}
+
+/// Peel the transparent reference wrappers `ref(..)`/`mut(..)` to reach the
+/// underlying value type, for receiver-kind dispatch.
+fn peel_ref_mut(ty: &Type) -> &Type {
+    match ty {
+        Type::Ref(inner) | Type::Mut(inner) => peel_ref_mut(inner),
+        other => other,
     }
 }
 

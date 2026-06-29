@@ -52,12 +52,14 @@ fn within(outer: Span, inner: Span) -> bool {
     inner.lo >= outer.lo && inner.hi <= outer.hi
 }
 
-/// The parameters and body of the function or method whose body contains
-/// `global_off`.
+/// The parameters and body of the function or method whose declaration (its
+/// signature *and* body) contains `global_off`. Including the signature lets a
+/// cursor on a parameter resolve to that function, so a parameter's inferred
+/// type can be recovered from its uses.
 pub fn enclosing(main_ast: &Module, global_off: usize) -> Option<(Vec<&Param>, &Block)> {
     for item in &main_ast.items {
         match item {
-            TopLevel::Fun(f) if contains(f.body.span, global_off) => {
+            TopLevel::Fun(f) if contains(f.span, global_off) => {
                 return Some((f.params.iter().collect(), &f.body));
             }
             TopLevel::Type(t) => {
@@ -68,7 +70,7 @@ pub fn enclosing(main_ast: &Module, global_off: usize) -> Option<(Vec<&Param>, &
                 for m in members {
                     if let Member::Method(method) = m
                         && let Some(body) = &method.body
-                        && contains(body.span, global_off)
+                        && contains(method.span, global_off)
                     {
                         return Some((method.params.iter().collect(), body));
                     }

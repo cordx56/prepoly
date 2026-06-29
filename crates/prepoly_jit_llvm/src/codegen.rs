@@ -113,6 +113,11 @@ pub struct LlvmCodegen<'ctx, 'p> {
     /// self-referential type recurse through a call; cleared per module like
     /// destructors (the function is local to the module that defines it).
     to_string_fns: std::collections::HashMap<String, FunctionValue<'ctx>>,
+    /// Per-type deep-copy functions (`fn(*Header) -> *Header`): a fresh, independent
+    /// copy of an aggregate value (recursing into managed fields/elements), used to
+    /// pass a non-reference argument by value. Memoized to terminate on recursive
+    /// types and cleared per module.
+    deep_copy_fns: std::collections::HashMap<String, FunctionValue<'ctx>>,
     /// Per-type cycle-collector trace functions (DESIGN.md 8.3): visit a value's
     /// managed children. Memoized like destructors, cleared per module.
     tracers: std::collections::HashMap<String, Option<FunctionValue<'ctx>>>,
@@ -138,6 +143,7 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
             cur_fn: None,
             destructors: std::collections::HashMap::new(),
             to_string_fns: std::collections::HashMap::new(),
+            deep_copy_fns: std::collections::HashMap::new(),
             tracers: std::collections::HashMap::new(),
             region_barriers: false,
             mir: MirState::default(),
@@ -1515,6 +1521,166 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
         self.builder.build_load(llty, slot, "sumfld_v").unwrap()
     }
 
+    /// A memoized per-type deep-copy function `fn(*Header) -> *Header`. An
+    /// aggregate (record, sum, tuple, array) is rebuilt with each managed field or
+    /// element deep-copied (recursing through this same memoized table, so a
+    /// self-referential type terminates); a string/closure is shared with its count
+    /// raised. Used to pass a non-reference argument by value.
+    fn get_or_emit_deep_copy(&mut self, ty: &Type) -> FunctionValue<'ctx> {
+        let key = mangle_fn(&format!("dcopy_{}", ty.display()));
+        if let Some(f) = self.deep_copy_fns.get(&key) {
+            return *f;
+        }
+        let ptrt = self.abi.ptr();
+        let fty = ptrt.fn_type(&[ptrt.into()], false);
+        let f = self.module.add_function(&key, fty, None);
+        self.deep_copy_fns.insert(key, f);
+
+        let saved_block = self.builder.get_insert_block();
+        let saved_fn = self.cur_fn;
+        self.cur_fn = Some(f);
+        let entry = self.ctx.append_basic_block(f, "entry");
+        self.builder.position_at_end(entry);
+        let obj = f.get_nth_param(0).unwrap().into_pointer_value();
+
+        let result = match ty {
+            Type::Record(n) => {
+                let fields = self.record_field_types(n);
+                let copied: Vec<(String, BasicValueEnum<'ctx>)> = fields
+                    .iter()
+                    .map(|(name, fty, offset)| {
+                        let llty = self.abi.typed_basic(fty);
+                        let fv = self
+                            .builder
+                            .build_load(llty, self.field_ptr(obj, *offset), "f")
+                            .unwrap();
+                        (name.clone(), self.deep_copy(fv, fty))
+                    })
+                    .collect();
+                let refs: Vec<(&str, BasicValueEnum<'ctx>)> =
+                    copied.iter().map(|(n, v)| (n.as_str(), *v)).collect();
+                self.make_record(ty, &refs)
+            }
+            Type::Tuple(elems) => {
+                let copied: Vec<BasicValueEnum<'ctx>> = elems
+                    .iter()
+                    .enumerate()
+                    .map(|(i, ety)| {
+                        let ev = self.tuple_field(obj.into(), elems, i);
+                        self.deep_copy(ev, ety)
+                    })
+                    .collect();
+                self.make_tuple(elems, &copied)
+            }
+            Type::Sum(n) => self.deep_copy_sum(f, ty, n, obj),
+            Type::Slice(_) | Type::Array(..) => {
+                let elem = prepoly_engine::element_type(ty);
+                let (esize, _) = type_size_align(&elem);
+                // A managed element is copied through its own deep-copy function
+                // (recursing for nesting); a scalar element is copied byte-wise.
+                let copy_fn = if prepoly_engine::rc_managed(&elem) {
+                    let ef = self.get_or_emit_deep_copy(&elem);
+                    self.builder
+                        .build_ptr_to_int(
+                            ef.as_global_value().as_pointer_value(),
+                            self.abi.i64t(),
+                            "copyfn",
+                        )
+                        .unwrap()
+                        .into()
+                } else {
+                    self.i64c(0)
+                };
+                let dty = ptrt.fn_type(
+                    &[ptrt.into(), self.abi.i64t().into(), self.abi.i64t().into()],
+                    false,
+                );
+                let df = self.abi.runtime_fn(&self.module, "pp_arr_deep_copy", dty);
+                self.builder
+                    .build_call(
+                        df,
+                        &[obj.into(), self.i64c(esize as i64).into(), copy_fn.into()],
+                        "arrdcopy",
+                    )
+                    .unwrap()
+                    .try_as_basic_value()
+                    .unwrap_basic()
+            }
+            // A string/closure (or any other managed value) is immutable or never
+            // mutated through this copy, so it is shared with its count raised.
+            _ => {
+                self.retain(obj.into());
+                obj.into()
+            }
+        };
+        self.builder.build_return(Some(&result)).unwrap();
+
+        self.cur_fn = saved_fn;
+        if let Some(b) = saved_block {
+            self.builder.position_at_end(b);
+        }
+        f
+    }
+
+    /// The sum arm of [`get_or_emit_deep_copy`]: switch on the discriminant tag and
+    /// rebuild the active variant with each of its fields deep-copied.
+    fn deep_copy_sum(
+        &mut self,
+        f: FunctionValue<'ctx>,
+        sum_ty: &Type,
+        n: &NominalType,
+        obj: PointerValue<'ctx>,
+    ) -> BasicValueEnum<'ctx> {
+        let ptrt = self.abi.ptr();
+        let slot = self.builder.build_alloca(ptrt, "sumcopy").unwrap();
+        let i32t = self.ctx.i32_type();
+        let tag = self
+            .builder
+            .build_load(i32t, self.field_ptr(obj, 16), "tag")
+            .unwrap()
+            .into_int_value();
+        let variants = self.sum_variant_fields(n);
+        let merge = self.ctx.append_basic_block(f, "dcopy_merge");
+        let default = self.ctx.append_basic_block(f, "dcopy_unknown");
+        let blocks: Vec<_> = variants
+            .iter()
+            .map(|_| self.ctx.append_basic_block(f, "dcopy_variant"))
+            .collect();
+        let cases: Vec<_> = variants
+            .iter()
+            .zip(&blocks)
+            .map(|((tag_v, _, _), bb)| (i32t.const_int(*tag_v as u64, true), *bb))
+            .collect();
+        self.builder.build_switch(tag, default, &cases).unwrap();
+        for ((_, vname, vfields), bb) in variants.iter().zip(&blocks) {
+            self.builder.position_at_end(*bb);
+            let copied: Vec<(String, BasicValueEnum<'ctx>)> = vfields
+                .iter()
+                .map(|(fname, fty, offset)| {
+                    let llty = self.abi.typed_basic(fty);
+                    let fv = self
+                        .builder
+                        .build_load(llty, self.field_ptr(obj, *offset), "vf")
+                        .unwrap();
+                    (fname.clone(), self.deep_copy(fv, fty))
+                })
+                .collect();
+            let refs: Vec<(&str, BasicValueEnum<'ctx>)> =
+                copied.iter().map(|(n, v)| (n.as_str(), *v)).collect();
+            let v = self.make_variant(sum_ty, vname, &refs);
+            self.builder.build_store(slot, v).unwrap();
+            self.builder.build_unconditional_branch(merge).unwrap();
+        }
+        // An unknown tag should be unreachable for a well-typed value; share it.
+        self.builder.position_at_end(default);
+        self.retain(obj.into());
+        self.builder.build_store(slot, obj).unwrap();
+        self.builder.build_unconditional_branch(merge).unwrap();
+
+        self.builder.position_at_end(merge);
+        self.builder.build_load(ptrt, slot, "sumcopy_v").unwrap()
+    }
+
     /// A memoized per-type `to_string` renderer for a record or sum. A record
     /// renders as `T {\n    field: <value>,\n}` and a sum as
     /// `T.Variant {\n    field: <value>,\n}` (a field-less variant as bare
@@ -1724,6 +1890,7 @@ impl<'ctx, 'p> prepoly_engine::RuntimeJit for LlvmCodegen<'ctx, 'p> {
         // per-type `to_string` renderers are module-local for the same reason.
         let saved_destructors = std::mem::take(&mut self.destructors);
         let saved_to_string_fns = std::mem::take(&mut self.to_string_fns);
+        let saved_deep_copy_fns = std::mem::take(&mut self.deep_copy_fns);
 
         self.begin_program(program);
         self.codegen_function(program, f);
@@ -1738,6 +1905,7 @@ impl<'ctx, 'p> prepoly_engine::RuntimeJit for LlvmCodegen<'ctx, 'p> {
         self.mir.init_symbols = saved_inits;
         self.destructors = saved_destructors;
         self.to_string_fns = saved_to_string_fns;
+        self.deep_copy_fns = saved_deep_copy_fns;
         verified?;
 
         // Keep the module alive and hand it to the live engine.
@@ -3088,45 +3256,20 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
     }
 
     fn deep_copy(&mut self, value: BasicValueEnum<'ctx>, ty: &Type) -> BasicValueEnum<'ctx> {
-        let inner = unwrap_copy_wrappers(ty);
-        match inner {
-            // An array/slice argument is passed by deep copy: a new buffer with the
-            // same elements (managed elements retained, see `pp_arr_copy`).
-            Type::Slice(_) | Type::Array(..) => {
-                let elem = prepoly_engine::element_type(inner);
-                let (esize, _) = type_size_align(&elem);
-                let managed = prepoly_engine::rc_managed(&elem) as u64;
-                let fty = self.abi.ptr().fn_type(
-                    &[
-                        self.abi.ptr().into(),
-                        self.abi.i64t().into(),
-                        self.abi.i64t().into(),
-                    ],
-                    false,
-                );
-                let f = self.abi.runtime_fn(&self.module, "pp_arr_copy", fty);
-                self.builder
-                    .build_call(
-                        f,
-                        &[
-                            value.into(),
-                            self.i64c(esize as i64).into(),
-                            self.i64c(managed as i64).into(),
-                        ],
-                        "arrcopy",
-                    )
-                    .unwrap()
-                    .try_as_basic_value()
-                    .unwrap_basic()
-            }
-            // Non-array values are not copied (only array parameters are wrapped).
-            // A managed value is retained so the caller-side temporary owns its own
-            // reference; a scalar is returned unchanged.
-            other if prepoly_engine::rc_managed(other) => {
-                self.retain(value);
-                value
-            }
-            _ => value,
+        let inner = unwrap_copy_wrappers(ty).clone();
+        // A managed value (aggregate, string, or closure) is copied by its memoized
+        // per-type deep-copy function -- an aggregate gets a fresh, independent value
+        // with managed fields/elements copied recursively, a string/closure is shared
+        // with its count raised. A scalar is returned unchanged.
+        if prepoly_engine::rc_managed(&inner) && value.is_pointer_value() {
+            let f = self.get_or_emit_deep_copy(&inner);
+            self.builder
+                .build_call(f, &[value.into()], "dcopy")
+                .unwrap()
+                .try_as_basic_value()
+                .unwrap_basic()
+        } else {
+            value
         }
     }
 

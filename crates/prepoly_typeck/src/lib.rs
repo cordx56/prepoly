@@ -739,8 +739,7 @@ mod tests {
             let src = format!("const a = [1]\nfun main() {{\n    a.{method}\n}}\n");
             let e = errs(&src);
             assert!(
-                e.iter()
-                    .any(|m| m.contains("on const value `a`")),
+                e.iter().any(|m| m.contains("on const value `a`")),
                 "`a.{method}` on a const array should be rejected: {e:?}"
             );
         }
@@ -764,15 +763,19 @@ mod tests {
         // Mutability is inferred from use: `f` pushes to its parameter, so the
         // parameter is mutable and passing a const array is rejected -- the same
         // rule whether the push is written directly or behind a function.
-        let e = errs("fun f(arr) {\n    arr.push(99)\n}\nconst a = [1]\nfun main() {\n    f(a)\n}\n");
+        let e =
+            errs("fun f(arr) {\n    arr.push(99)\n}\nconst a = [1]\nfun main() {\n    f(a)\n}\n");
         assert!(
-            e.iter()
-                .any(|m| m.contains("`a`") && m.contains("mutable")),
+            e.iter().any(|m| m.contains("`a`") && m.contains("mutable")),
             "passing a const array to a function that pushes should be rejected: {e:?}"
         );
         // A `let` array satisfies the mutable parameter.
-        let ok = errs("fun f(arr) {\n    arr.push(99)\n}\nfun main() {\n    let a = [1]\n    f(a)\n}\n");
-        assert!(ok.is_empty(), "a mutable array argument must be allowed: {ok:?}");
+        let ok =
+            errs("fun f(arr) {\n    arr.push(99)\n}\nfun main() {\n    let a = [1]\n    f(a)\n}\n");
+        assert!(
+            ok.is_empty(),
+            "a mutable array argument must be allowed: {ok:?}"
+        );
     }
 
     #[test]
@@ -791,7 +794,10 @@ mod tests {
         let ok = errs(
             "fun f(arr: ref(mut(int32[]))) {\n    arr.push(2)\n}\nfun main() {\n    let a = [1]\n    f(a)\n}\n",
         );
-        assert!(ok.is_empty(), "a `let` argument to a `ref(mut(T))` parameter must be allowed: {ok:?}");
+        assert!(
+            ok.is_empty(),
+            "a `let` argument to a `ref(mut(T))` parameter must be allowed: {ok:?}"
+        );
     }
 
     #[test]
@@ -801,7 +807,10 @@ mod tests {
         let ok = errs(
             "fun f(arr: int32[]) {\n    arr.push(2)\n}\nconst a = [1]\nfun main() {\n    f(a)\n}\n",
         );
-        assert!(ok.is_empty(), "a const argument to a copied array parameter must be allowed: {ok:?}");
+        assert!(
+            ok.is_empty(),
+            "a const argument to a copied array parameter must be allowed: {ok:?}"
+        );
     }
 
     #[test]
@@ -810,7 +819,10 @@ mod tests {
         // through-reference mutation, so the parameter is not mutable and a copied
         // const primitive argument stays valid.
         let ok = errs("fun f(x) {\n    x = 5\n}\nconst c = 1\nfun main() {\n    f(c)\n}\n");
-        assert!(ok.is_empty(), "a const primitive to a reassigning function must be allowed: {ok:?}");
+        assert!(
+            ok.is_empty(),
+            "a const primitive to a reassigning function must be allowed: {ok:?}"
+        );
     }
 
     #[test]

@@ -1013,7 +1013,7 @@ type Counter = {
 
 let total = Counter { n: 0 }
 
-fun bump(c: Counter) {
+fun bump(c: ref(mut(Counter))) {
     let i = 0
     while i < 500 {
         with(c, (h) -> {

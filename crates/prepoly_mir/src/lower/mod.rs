@@ -144,12 +144,14 @@ impl<'p> ProgramCtx<'p> {
         use prepoly_parser::ast::TypeExpr;
         match t {
             // A reference borrows; a `mut(T)` is a mutable place whose copy-ness is
-            // that of `T`. A non-reference array/slice parameter is passed by deep
-            // copy. (Records, sums, and tuples are not yet copied at the back end, so
-            // they keep their current shared passing until that is implemented.)
+            // that of `T`. Any non-reference heap aggregate -- array/slice, tuple,
+            // anonymous structure, or a named record/sum -- is passed by deep copy.
             TypeExpr::Ref(..) => false,
             TypeExpr::Mut(inner, _) => self.type_needs_copy(module, inner),
-            TypeExpr::Array(..) => true,
+            TypeExpr::Array(..) | TypeExpr::Tuple(..) | TypeExpr::Anonymous(..) => true,
+            TypeExpr::Named(n, _) => self.program.resolve_type(module, n).is_some_and(|info| {
+                matches!(info.kind, TypeKind::Record { .. } | TypeKind::Sum { .. })
+            }),
             _ => false,
         }
     }

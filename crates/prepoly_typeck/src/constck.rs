@@ -432,8 +432,7 @@ fn mutating_function_params(program: &Program) -> HashMap<String, HashSet<usize>
                 // its reference also requires one -- unless it is passed by deep copy
                 // (a non-reference array/slice), where the mutation hits only the
                 // callee's own copy.
-                param_is_mut_ref(p)
-                    || (mutates_root(&f.decl.body, &p.name) && !param_is_copied(p))
+                param_is_mut_ref(p) || (mutates_root(&f.decl.body, &p.name) && !param_is_copied(p))
             })
             .map(|(i, _)| i)
             .collect();
