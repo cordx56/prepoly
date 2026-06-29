@@ -89,7 +89,7 @@ impl TypedExprKind {
             Expr::Index(..) => Self::Index,
             Expr::ErrorProp(..) => Self::ErrorPropagate,
             Expr::Closure(..) => Self::Closure,
-            Expr::Array(..) => Self::Array,
+            Expr::Array(..) | Expr::Range(..) => Self::Array,
             Expr::TypeLit(name, ..) => Self::TypeLiteral(name.clone()),
             Expr::VariantLit(ty, variant, ..) => Self::VariantLiteral {
                 ty: ty.clone(),

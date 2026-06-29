@@ -831,11 +831,24 @@ impl Parser {
 
     fn parse_array_lit(&mut self) -> PResult<Expr> {
         let lo = self.open(TokenKind::LBracket, "'['")?;
-        let mut elems = Vec::new();
-        while !self.at_p(TokenKind::RBracket) {
-            elems.push(self.parse_expr()?);
-            if !self.eat(TokenKind::Comma) {
-                break;
+        if self.at_p(TokenKind::RBracket) {
+            let hi = self.close(TokenKind::RBracket, "']'")?;
+            return Ok(Expr::Array(Vec::new(), lo.merge(hi)));
+        }
+        let first = self.parse_expr()?;
+        // `[lo..hi]` -- an integer range, distinguished from a list by the `..`.
+        if self.eat(TokenKind::DotDot) {
+            let end = self.parse_expr()?;
+            let hi = self.close(TokenKind::RBracket, "']'")?;
+            return Ok(Expr::Range(Box::new(first), Box::new(end), lo.merge(hi)));
+        }
+        let mut elems = vec![first];
+        if self.eat(TokenKind::Comma) {
+            while !self.at_p(TokenKind::RBracket) {
+                elems.push(self.parse_expr()?);
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
             }
         }
         let hi = self.close(TokenKind::RBracket, "']'")?;
@@ -973,6 +986,14 @@ impl Parser {
                 if name == "_" {
                     return Ok(Pattern::Wildcard(span));
                 }
+                // A qualified variant pattern `T.A { ... }` / `T.A`: the variant
+                // name alone identifies it (its owning type is resolved later), so
+                // the `T.` qualifier is consumed and the variant name kept.
+                let name = if self.eat(TokenKind::Dot) {
+                    self.ident()?.0
+                } else {
+                    name
+                };
                 if self.at_p(TokenKind::LBrace) {
                     let (fields, hi) = self.parse_field_pats()?;
                     Ok(Pattern::Record(name, fields, span.merge(hi)))
@@ -1044,6 +1065,10 @@ impl Parser {
         self.open(TokenKind::LBrace, "'{'")?;
         let mut fields = Vec::new();
         while !self.at_p(TokenKind::RBrace) {
+            // `..` -- match the remaining fields without binding them.
+            if self.eat(TokenKind::DotDot) {
+                break;
+            }
             let (name, fspan) = self.ident()?;
             let pat = if self.eat(TokenKind::Colon) {
                 Some(self.parse_pattern()?)

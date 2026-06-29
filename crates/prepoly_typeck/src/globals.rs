@@ -130,7 +130,7 @@ fn collect_expr_refs(
         Expr::Unary(_, inner, _) | Expr::ErrorProp(inner, _) | Expr::Field(inner, _, _) => {
             collect_expr_refs(inner, globals, bound, out);
         }
-        Expr::Binary(_, l, r, _) | Expr::Index(l, r, _) => {
+        Expr::Binary(_, l, r, _) | Expr::Index(l, r, _) | Expr::Range(l, r, _) => {
             collect_expr_refs(l, globals, bound, out);
             collect_expr_refs(r, globals, bound, out);
         }

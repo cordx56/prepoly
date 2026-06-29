@@ -192,6 +192,27 @@ pub fn inferred_return(full: &FullAnalysis, name: &str) -> Option<Type> {
     ret
 }
 
+/// The inferred type of parameter `name` of a function whose body is `body_span`,
+/// recovered from a use of the parameter in the body (the signature tables hold
+/// only the annotation). Prefers the first use that has a structural type over a
+/// bare inference variable, and the generic check's recording (earlier in the
+/// list) over a call-site monomorphization -- so e.g. a `for`-iterated parameter
+/// shows as the general `T[]` rather than a concrete element type.
+pub fn inferred_param_type(full: &FullAnalysis, body_span: Span, name: &str) -> Option<Type> {
+    let uses = || {
+        full.typed
+            .expressions
+            .iter()
+            .filter(move |e| {
+                matches!(&e.kind, TypedExprKind::Ident(n) if n == name) && within(body_span, e.span)
+            })
+    };
+    uses()
+        .find(|e| !matches!(e.ty, Type::Unknown(_)))
+        .or_else(|| uses().next())
+        .map(|e| e.ty.clone())
+}
+
 /// Visit every expression in the module (pre-order), for span-based lookups.
 pub fn walk_exprs(main_ast: &Module, visit: &mut impl FnMut(&Expr)) {
     for item in &main_ast.items {

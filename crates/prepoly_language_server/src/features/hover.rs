@@ -14,7 +14,7 @@ use tower_lsp_server::ls_types::{
 use crate::analysis::FullAnalysis;
 use crate::document::Document;
 use crate::features::nav;
-use crate::render::{UnknownNamer, render_signature_with, render_type, render_type_def};
+use crate::render::{UnknownNamer, render_signature_full, render_type, render_type_def};
 
 /// Build the hover response for `pos` in `doc`, using the full analysis.
 pub fn hover(doc: &Document, full: &FullAnalysis, pos: Position) -> Option<Hover> {
@@ -98,15 +98,30 @@ fn ident_hover(
     None
 }
 
-/// Render a free function's signature for hover, filling an unannotated return
-/// type with the type inference recovered from its call sites.
+/// Render a free function's signature for hover, filling unannotated parameters
+/// and return type with the types inference recovered from the body and call
+/// sites (e.g. a `for`-iterated parameter shows as `T[]` rather than a bare
+/// `unknown`).
 fn function_signature(full: &FullAnalysis, f: &prepoly_hir::FunInfo) -> String {
-    let inferred = if f.signature.ret_ty.is_none() {
+    let body_span = f.decl.body.span;
+    let params: Vec<Option<prepoly_hir::Type>> = f
+        .signature
+        .params
+        .iter()
+        .map(|p| {
+            if p.resolved_ty.is_some() || p.name == "self" {
+                None
+            } else {
+                nav::inferred_param_type(full, body_span, &p.name)
+            }
+        })
+        .collect();
+    let ret = if f.signature.ret_ty.is_none() {
         nav::inferred_return(full, &f.signature.name)
     } else {
         None
     };
-    render_signature_with(&f.signature, inferred.as_ref())
+    render_signature_full(&f.signature, &params, ret.as_ref())
 }
 
 /// Map a global span back to a document-local range, when it lies in the active

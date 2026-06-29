@@ -368,6 +368,7 @@ impl<'a> Lexer<'a> {
             (b'/', Some(b'=')) => (TokenKind::SlashEq, 2),
             (b'%', Some(b'=')) => (TokenKind::PercentEq, 2),
             (b'-', Some(b'>')) => (TokenKind::Arrow, 2),
+            (b'.', Some(b'.')) => (TokenKind::DotDot, 2),
             (b'+', _) => (TokenKind::Plus, 1),
             (b'-', _) => (TokenKind::Minus, 1),
             (b'*', _) => (TokenKind::Star, 1),

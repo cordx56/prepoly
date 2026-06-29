@@ -385,7 +385,7 @@ fn refs_expr(e: &Expr, out: &mut HashSet<String>) {
             }
         }
         Expr::Unary(_, e, _) | Expr::ErrorProp(e, _) => refs_expr(e, out),
-        Expr::Binary(_, a, b, _) | Expr::Index(a, b, _) => {
+        Expr::Binary(_, a, b, _) | Expr::Index(a, b, _) | Expr::Range(a, b, _) => {
             refs_expr(a, out);
             refs_expr(b, out);
         }

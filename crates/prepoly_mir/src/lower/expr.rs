@@ -41,6 +41,7 @@ impl<'a, 'p> FnLower<'a, 'p> {
             Expr::ErrorProp(inner, _) => self.lower_error_prop(inner),
             Expr::Closure(params, body, _) => self.lower_closure(params, body),
             Expr::Array(es, _) => self.lower_array(es),
+            Expr::Range(lo, hi, _) => self.lower_range(lo, hi),
             Expr::TypeLit(name, fields, _) => self.lower_record(name, fields),
             Expr::VariantLit(ty, variant, fields, _) => self.lower_variant(ty, variant, fields),
             Expr::If(cond, then, els, _) => self.lower_if(cond, then, els.as_deref()),
@@ -338,6 +339,55 @@ impl<'a, 'p> FnLower<'a, 'p> {
             ops.push(v);
         }
         self.b.emit(Rvalue::Array(ops))
+    }
+
+    /// Lower `[lo..hi]` to an index loop that fills a fresh array with the
+    /// half-open integer range: `arr = []; i = lo; while i < hi { arr.push(i);
+    /// i += 1 }`. The empty array's element type is inferred from the push.
+    fn lower_range(&mut self, lo: &Expr, hi: &Expr) -> Operand {
+        let arr_op = self.b.emit(Rvalue::Array(Vec::new()));
+        let arr = self.b.make_local(arr_op);
+        let lo_op = self.lower_expr(lo);
+        let i = self.b.make_local(lo_op);
+        let hi_op = self.lower_expr(hi);
+        let end = self.b.make_local(hi_op);
+
+        let cond_bb = self.b.new_block();
+        let body_bb = self.b.new_block();
+        let incr_bb = self.b.new_block();
+        let end_bb = self.b.new_block();
+        self.b.terminate(Terminator::Goto(cond_bb));
+
+        self.b.switch_to(cond_bb);
+        let c = self.b.emit(Rvalue::Bin(
+            BinOp::Lt,
+            Operand::Local(i),
+            Operand::Local(end),
+        ));
+        self.b.terminate(Terminator::CondBranch {
+            cond: c,
+            then: body_bb,
+            els: end_bb,
+        });
+
+        self.b.switch_to(body_bb);
+        self.b.emit(Rvalue::Call(
+            Callee::Method("push".into()),
+            vec![Operand::Local(arr), Operand::Local(i)],
+        ));
+        self.b.terminate(Terminator::Goto(incr_bb));
+
+        self.b.switch_to(incr_bb);
+        let next = self.b.emit(Rvalue::Bin(
+            BinOp::Add,
+            Operand::Local(i),
+            Operand::Const(Literal::Int(1)),
+        ));
+        self.b.push(MirStmt::Assign(i, Rvalue::Use(next)));
+        self.b.terminate(Terminator::Goto(cond_bb));
+
+        self.b.switch_to(end_bb);
+        Operand::Local(arr)
     }
 
     fn lower_record(&mut self, name: &str, fields: &[(String, Expr)]) -> Operand {

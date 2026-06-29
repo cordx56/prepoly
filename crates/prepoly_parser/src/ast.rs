@@ -216,6 +216,9 @@ pub enum Expr {
     /// Closure `(params) -> body`; the body is any expression (a block is one).
     Closure(Vec<Param>, Box<Expr>, Span),
     Array(Vec<Expr>, Span),
+    /// `[lo..hi]` -- a half-open integer range built into the array
+    /// `[lo, lo+1, ..., hi-1]` (empty when `lo >= hi`).
+    Range(Box<Expr>, Box<Expr>, Span),
     /// `Type { field: value, ... }` record/struct literal (also `Self { ... }`).
     TypeLit(String, Vec<(String, Expr)>, Span),
     /// `Type.Variant { field: value, ... }` sum-type variant construction.
@@ -245,6 +248,7 @@ impl Expr {
             | Expr::ErrorProp(_, s)
             | Expr::Closure(_, _, s)
             | Expr::Array(_, s)
+            | Expr::Range(_, _, s)
             | Expr::TypeLit(_, _, s)
             | Expr::VariantLit(_, _, _, s)
             | Expr::If(_, _, _, s)

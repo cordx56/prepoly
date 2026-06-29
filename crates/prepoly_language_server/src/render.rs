@@ -113,20 +113,27 @@ fn render_nominal(n: &prepoly_hir::NominalType, namer: &mut UnknownNamer) -> Str
 /// signature tables, so it is rendered as a fresh `unknown_N` numbered by
 /// position. An explicitly annotated slot is rendered from its resolved type.
 pub fn render_signature(sig: &CallableSignature) -> String {
-    render_signature_with(sig, None)
+    render_signature_full(sig, &[], None)
 }
 
-/// Like [`render_signature`], but an unannotated return type is rendered from
-/// `inferred_ret` when given -- the type inference recovered for the function
-/// (see `nav::inferred_return`) -- instead of a fresh `unknown_N`. The signature
-/// tables hold only annotations, so this is how an inferred-but-unannotated
-/// return such as a fallible `string` reaches hover output.
-pub fn render_signature_with(sig: &CallableSignature, inferred_ret: Option<&Type>) -> String {
+/// Render a signature, filling unannotated slots from inference when available.
+///
+/// The signature tables hold only annotations, so an unannotated parameter or
+/// return reads as absent there. `inferred_params[i]` (by position) and
+/// `inferred_ret` supply the types inference recovered for them (see
+/// `nav::inferred_param_type`/`nav::inferred_return`); a slot with neither an
+/// annotation nor an inferred type falls back to a fresh `unknown_N`.
+pub fn render_signature_full(
+    sig: &CallableSignature,
+    inferred_params: &[Option<Type>],
+    inferred_ret: Option<&Type>,
+) -> String {
     let mut namer = UnknownNamer::default();
     let params = sig
         .params
         .iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(i, p)| {
             // The method receiver is written bare in source and its type is the
             // enclosing type, so it is shown as `self` without consuming an
             // `unknown_N` slot -- the first real unannotated parameter is then
@@ -134,9 +141,11 @@ pub fn render_signature_with(sig: &CallableSignature, inferred_ret: Option<&Type
             if p.name == "self" && p.resolved_ty.is_none() {
                 return "self".to_string();
             }
-            let ty = match &p.resolved_ty {
-                Some(t) => render_type(t, &mut namer),
-                None => namer.fresh(),
+            let inferred = inferred_params.get(i).and_then(|o| o.as_ref());
+            let ty = match (&p.resolved_ty, inferred) {
+                (Some(t), _) => render_type(t, &mut namer),
+                (None, Some(t)) => render_type(t, &mut namer),
+                (None, None) => namer.fresh(),
             };
             format!("{}: {ty}", p.name)
         })

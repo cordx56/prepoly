@@ -462,6 +462,21 @@ fn resolve_named(
     })
 }
 
+/// The type yielded by indexing into `ty`. Reference and mutability wrappers are
+/// seen through and re-applied to the element, so indexing a reference to an array
+/// yields a reference to the element of the same kind: `ref(T[])[i]` is `ref(T)`
+/// and `ref(mut(T[]))[i]` is `ref(mut(T))`. `None` when `ty` is not an array/slice
+/// (possibly under such wrappers).
+pub fn index_element(ty: &Type) -> Option<Type> {
+    match ty {
+        Type::Slice(e) | Type::Array(e, _) => Some((**e).clone()),
+        Type::Ref(inner) => index_element(inner).map(|e| Type::Ref(Box::new(e))),
+        Type::Mut(inner) => index_element(inner).map(|e| Type::Mut(Box::new(e))),
+        Type::ConstOf(inner) => index_element(inner).map(|e| Type::ConstOf(Box::new(e))),
+        _ => None,
+    }
+}
+
 /// Replace every `infer` placeholder ([`INFER_VAR`]) in a resolved type with a
 /// distinct fresh type from `fresh`, recursing into composite types and into a
 /// `Result`'s payload substitution. So each `infer` (and each `T!` error payload)

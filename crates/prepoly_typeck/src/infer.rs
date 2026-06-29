@@ -549,7 +549,9 @@ impl<'a> Checker<'a> {
             Expr::Call(callee, args, _) => self.infer_call_light(callee, args, env, errors),
             Expr::Field(base, name, _) => self.infer_field_light(base, name, env, errors),
             Expr::Index(base, _, _) => match self.infer_expr_light(base, env, errors) {
-                Type::Array(inner, _) | Type::Slice(inner) => *inner,
+                ref bt if prepoly_hir::index_element(bt).is_some() => {
+                    prepoly_hir::index_element(bt).unwrap()
+                }
                 Type::Str => Type::Str,
                 _ => self.fresh_unknown(),
             },
@@ -592,6 +594,9 @@ impl<'a> Checker<'a> {
                     .map(|e| self.infer_expr_light(e, env, errors))
                     .unwrap_or_else(|| self.fresh_unknown()),
             )),
+            Expr::Range(lo, _, _) => {
+                Type::Slice(Box::new(self.infer_expr_light(lo, env, errors)))
+            }
             Expr::TypeLit(name, fields, _) => self.infer_type_lit_light(name, fields, env, errors),
             Expr::VariantLit(name, variant, fields, _) => {
                 self.infer_variant_lit_light(name, variant, fields, env, errors)
@@ -1237,13 +1242,25 @@ impl<'a> Checker<'a> {
                 let iter_ty = self.check_expr(iter, scopes);
                 let item_ty = match self.resolve(&iter_ty) {
                     Type::Array(inner, _) | Type::Slice(inner) => *inner,
+                    Type::Unknown(_) => {
+                        // The only iterable types are arrays and slices, so an
+                        // as-yet-unconstrained iterand must be a sequence:
+                        // constrain it to a slice of a fresh element type. An
+                        // unannotated parameter iterated by `for` is then inferred
+                        // as `T[]` with the loop variable as its element `T`, and
+                        // a non-iterable argument is rejected where the slice
+                        // constraint fails to unify.
+                        let elem = self.fresh_unknown();
+                        let _ = self
+                            .solver
+                            .unify(&iter_ty, &Type::Slice(Box::new(elem.clone())));
+                        elem
+                    }
                     other => {
-                        if !is_maybe_iterable(&other) {
-                            self.errors.push(TypeError {
-                                message: format!("cannot iterate over `{}`", other.display()),
-                                span: iter.span(),
-                            });
-                        }
+                        self.errors.push(TypeError {
+                            message: format!("cannot iterate over `{}`", other.display()),
+                            span: iter.span(),
+                        });
                         self.fresh_unknown()
                     }
                 };
@@ -1538,8 +1555,10 @@ impl<'a> Checker<'a> {
                 }
                 let idx_ty = self.check_expr(idx, scopes);
                 self.expect_int_index(&idx_ty, idx.span());
+                if let Some(elem) = prepoly_hir::index_element(&resolved) {
+                    return elem;
+                }
                 match resolved {
-                    Type::Array(inner, _) | Type::Slice(inner) => *inner,
                     Type::Str => Type::Str,
                     Type::Nullable(_) => {
                         self.report_nullable_use(*span);
@@ -1637,6 +1656,16 @@ impl<'a> Checker<'a> {
                     }
                     Type::Slice(Box::new(elem_ty))
                 }
+            }
+            Expr::Range(lo, hi, _) => {
+                // `[lo..hi]` -- both bounds are integers of a shared type, the
+                // element type of the resulting array.
+                let lo_ty = self.check_expr(lo, scopes);
+                let hi_ty = self.check_expr(hi, scopes);
+                self.expect_int_index(&lo_ty, lo.span());
+                self.expect_int_index(&hi_ty, hi.span());
+                self.expect_expr_assignable(&hi_ty, &lo_ty, hi);
+                Type::Slice(Box::new(lo_ty))
             }
             Expr::TypeLit(name, fields, span) => self.check_record_lit(name, fields, *span, scopes),
             Expr::VariantLit(t, variant, fields, span) => {
@@ -1810,8 +1839,11 @@ impl<'a> Checker<'a> {
                 let base_ty = self.check_expr(base, scopes);
                 let idx_ty = self.check_expr(idx, scopes);
                 self.expect_int_index(&idx_ty, idx.span());
-                match self.resolve(&base_ty) {
-                    Type::Array(inner, _) | Type::Slice(inner) => *inner,
+                let resolved = self.resolve(&base_ty);
+                if let Some(elem) = prepoly_hir::index_element(&resolved) {
+                    return elem;
+                }
+                match resolved {
                     Type::Nullable(_) => {
                         self.report_nullable_use(*span);
                         self.fresh_unknown()
@@ -4635,15 +4667,19 @@ fn primitive_static_return(tname: &str, method: &str) -> Option<Type> {
 }
 
 fn integer_literal_fits(expr: &Expr, want: &Type) -> bool {
-    let target = match want {
-        Type::Int(kind) => Some(*kind),
-        Type::Nullable(inner) => match &**inner {
+    // See through a nullable cell and the reference/mutability wrappers: assigning
+    // an integer literal to a `ref(mut(int32))` element (an array index through a
+    // mutable reference) targets the underlying `int32`.
+    fn int_kind(t: &Type) -> Option<IntKind> {
+        match t {
             Type::Int(kind) => Some(*kind),
+            Type::Nullable(inner) | Type::Ref(inner) | Type::Mut(inner) | Type::ConstOf(inner) => {
+                int_kind(inner)
+            }
             _ => None,
-        },
-        _ => None,
-    };
-    match (expr, target) {
+        }
+    }
+    match (expr, int_kind(want)) {
         (Expr::Int(value, _), Some(kind)) => int_fits_kind(*value, kind),
         _ => false,
     }
@@ -4895,9 +4931,6 @@ fn env_from_scopes(scopes: &ScopeStack) -> HashMap<String, Type> {
     env
 }
 
-fn is_maybe_iterable(ty: &Type) -> bool {
-    matches!(ty, Type::Array(..) | Type::Slice(..) | Type::Unknown(_))
-}
 
 fn is_maybe_indexable(ty: &Type) -> bool {
     matches!(

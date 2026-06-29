@@ -99,6 +99,7 @@ pub enum TokenKind {
     FatArrow, // =>
     Question, // ?
     Dot,
+    DotDot, // ..
     Comma,
     Colon,
     LParen,

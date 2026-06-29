@@ -597,6 +597,16 @@ impl<'p> Hm<'p> {
                     Type::Slice(Box::new(elem))
                 }
             }
+            Expr::Range(lo, hi, span) => {
+                // `[lo..hi]` builds an array of the (integer) bound type. Both
+                // bounds share one integer type, which is the element type.
+                let int_v = self.literal_var(true, *span);
+                let lo_ty = self.infer_expr(lo);
+                let hi_ty = self.infer_expr(hi);
+                self.unify(&lo_ty, &int_v, lo.span());
+                self.unify(&hi_ty, &int_v, hi.span());
+                Type::Slice(Box::new(int_v))
+            }
             Expr::If(cond, then, els, span) => {
                 // A condition may be a bool or a nullable (truthy = non-null), so
                 // it is inferred but not constrained to `bool`.
@@ -1304,7 +1314,18 @@ impl<'p> Hm<'p> {
     fn finalize_literals(&mut self) {
         let lit_vars = std::mem::take(&mut self.lit_vars);
         for (id, is_int, span) in lit_vars {
-            let resolved = self.solver.resolve(&Type::Unknown(id));
+            // See through the transparent reference/mutability wrappers: a literal
+            // forced to a `ref(mut(int32))` (an array element behind a mutable
+            // reference) is still an integer literal at an integer type.
+            let mut resolved = self.solver.resolve(&Type::Unknown(id));
+            let resolved = loop {
+                match resolved {
+                    Type::Ref(inner) | Type::Mut(inner) | Type::ConstOf(inner) => {
+                        resolved = self.solver.resolve(&inner);
+                    }
+                    other => break other,
+                }
+            };
             match (&resolved, is_int) {
                 (Type::Unknown(_), true) => {
                     tracing::debug!(
@@ -1400,10 +1421,7 @@ fn strip_nullable(ty: Type) -> Type {
 /// The element type of a slice or fixed array, if `ty` is one. Lets value flow
 /// reconcile slices, fixed arrays, and array literals by their elements.
 fn array_elem(ty: &Type) -> Option<Type> {
-    match ty {
-        Type::Slice(e) | Type::Array(e, _) => Some((**e).clone()),
-        _ => None,
-    }
+    prepoly_hir::index_element(ty)
 }
 
 /// The compile-time value of a constant non-negative integer index expression

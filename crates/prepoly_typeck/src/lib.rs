@@ -317,7 +317,7 @@ fn collect_expr(expr: &Expr, out: &mut Vec<TypeExpr>) {
             }
         }
         Expr::Unary(_, inner, _) | Expr::ErrorProp(inner, _) => collect_expr(inner, out),
-        Expr::Binary(_, left, right, _) => {
+        Expr::Binary(_, left, right, _) | Expr::Range(left, right, _) => {
             collect_expr(left, out);
             collect_expr(right, out);
         }

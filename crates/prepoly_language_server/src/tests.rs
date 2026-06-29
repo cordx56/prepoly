@@ -394,3 +394,40 @@ fn hover_infers_ref_mut_array_element() {
         "element should be inferred as string: {text}"
     );
 }
+
+/// `for e in a` over an unannotated `a` infers `a: unknown_0[]` and
+/// `e: unknown_0` (same element), and the function type as
+/// `(a: unknown_0[]) -> void`.
+#[test]
+fn hover_infers_for_loop_iterand_and_element() {
+    let src = "fun for_type(a) {\n    for e in a {\n        println(e)\n    }\n}\n\nfor_type([1, 2, 3])\n";
+    let full = full_analysis(src);
+
+    let (doc, pos) = position(src, "a {", false);
+    let a = hover_text(&hover::hover(&doc, &full, pos).expect("hover a"));
+    assert!(a.contains("a: unknown_0[]"), "iterand: {a}");
+
+    let (doc, pos) = position(src, "e in", false);
+    let e = hover_text(&hover::hover(&doc, &full, pos).expect("hover e"));
+    assert!(e.contains("e: unknown_0"), "element: {e}");
+
+    let (doc, pos) = position(src, "for_type(a)", false);
+    let sig = hover_text(&hover::hover(&doc, &full, pos).expect("hover fn"));
+    assert!(
+        sig.contains("fun for_type(a: unknown_0[]) -> void"),
+        "signature: {sig}"
+    );
+}
+
+/// Iterating a non-iterable value is reported as an error (so passing a
+/// non-iterable argument to a `for`-iterated parameter is rejected).
+#[test]
+fn for_over_non_iterable_is_an_error() {
+    let mut a = DocAnalyzer::new(path());
+    let src = "fun for_type(a) {\n    for e in a {\n        println(e)\n    }\n}\n\nfor_type(5)\n";
+    let diags = a.diagnostics(src);
+    assert!(
+        diags.iter().any(|(m, _)| m.contains("cannot iterate")),
+        "expected a cannot-iterate error: {diags:?}"
+    );
+}

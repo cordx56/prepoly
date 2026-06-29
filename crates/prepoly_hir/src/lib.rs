@@ -16,7 +16,8 @@ pub use lower::{LowerError, lower};
 pub use typed::{Constness, Ownership, RegionId, TypedExpr, TypedExprKind, TypedProgram};
 pub use types::{
     FloatKind, INFER_VAR, IntKind, NominalInfo, NominalKind, NominalType, STRUCTURAL_RECORD_ID,
-    STRUCTURAL_RECORD_NAME, Substitution, Type, freshen_infer, resolve, structural_record,
+    STRUCTURAL_RECORD_NAME, Substitution, Type, freshen_infer, index_element, resolve,
+    structural_record,
 };
 
 /// Re-exported so back ends can name source spans (e.g. typed-literal codegen
