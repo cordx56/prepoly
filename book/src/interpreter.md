@@ -3,6 +3,14 @@
 Unfortunately, we don't provide pre-built binaries yet.
 So here we describe how to build and install the prepoly interpreter.
 
+## Clone the repository
+
+First, clone the prepoly interpreter source code:
+
+```bash
+git clone https://github.com/cordx56/prepoly.git
+```
+
 ## Install the Rust compiler
 
 The prepoly interpreter is written in the Rust language.

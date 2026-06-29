@@ -256,10 +256,20 @@ pub fn call_args_at_span(full: &FullAnalysis, call_span: Span) -> Option<Vec<Typ
         if result.is_some() {
             return;
         }
-        if let Expr::Call(_, args, span) = e
+        if let Expr::Call(callee, args, span) = e
             && *span == call_span
         {
-            result = Some(args.iter().map(|a| arg_type(full, a.expr.span())).collect());
+            let mut types = Vec::new();
+            // A method/UFCS call `recv.f(args)` passes `recv` as the first
+            // argument (`f`'s first parameter), so include the receiver's type
+            // before the explicit arguments -- otherwise the arguments map to the
+            // wrong parameters and the receiver-typed first parameter (e.g.
+            // `slice`'s `arr: infer[]`) is never bound.
+            if let Expr::Field(recv, _, _) = callee.as_ref() {
+                types.push(arg_type(full, recv.span()));
+            }
+            types.extend(args.iter().map(|a| arg_type(full, a.expr.span())));
+            result = Some(types);
         }
     };
     walk_exprs(&full.main_ast, &mut visit);

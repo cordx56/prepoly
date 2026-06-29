@@ -531,3 +531,19 @@ fn hover_recursive_call_has_no_variable_bindings() {
         "concrete call still binds: {concrete}"
     );
 }
+
+/// A UFCS/method call `recv.f(args)` passes the receiver as `f`'s first
+/// argument, so hovering it binds the receiver-typed first parameter (here
+/// `slice`'s `arr: infer[]`), not the first explicit argument.
+#[test]
+fn hover_ufcs_call_binds_receiver_as_first_argument() {
+    let src = "const elems = [1]\nfor elem in elems.slice(0, 1) {\n    println(elem)\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "slice(0", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover slice"));
+    assert!(text.contains("fun slice("), "signature: {text}");
+    assert!(
+        text.contains("unknown_0 = int32"),
+        "receiver binds the first parameter: {text}"
+    );
+}
