@@ -1,10 +1,10 @@
 type Account = {
     owner: string
     balance: int32
+}
 
-    deposit(self, amount: int32) {
-        self.balance += amount
-    }
+fun Account.deposit(self, amount: int32) {
+    self.balance += amount
 }
 
 fun main() {

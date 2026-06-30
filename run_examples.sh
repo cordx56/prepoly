@@ -24,7 +24,7 @@ examples=(
     examples/15_numeric_conversions.pp
     examples/16_method_inference.pp
     examples/17_higher_order.pp
-    examples/18_ufcs.pp
+    examples/18_methods.pp
     examples/modules/main.pp
 )
 

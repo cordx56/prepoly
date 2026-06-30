@@ -426,11 +426,11 @@ fn same_type_name_in_two_modules_constructs_and_dispatches() {
         &[
             (
                 "a/shape.pp",
-                "type Shape = {\n    side: float64\n    area(self) -> float64 { return self.side * self.side }\n}\nfun make_a(s: float64) -> Shape { return Shape { side: s } }\n",
+                "type Shape = {\n    side: float64\n}\nfun Shape.area(self) -> float64 { return self.side * self.side }\nfun make_a(s: float64) -> Shape { return Shape { side: s } }\n",
             ),
             (
                 "b/shape.pp",
-                "type Shape = {\n    r: float64\n    area(self) -> float64 { return 3.0 * self.r }\n}\nfun make_b(r: float64) -> Shape { return Shape { r: r } }\n",
+                "type Shape = {\n    r: float64\n}\nfun Shape.area(self) -> float64 { return 3.0 * self.r }\nfun make_b(r: float64) -> Shape { return Shape { r: r } }\n",
             ),
             (
                 "main.pp",
@@ -469,11 +469,11 @@ fn importing_same_name_from_two_modules_is_ambiguous() {
 
 #[test]
 fn stdlib_string_function_rejects_wrong_argument_type() {
-    // Annotated public stdlib signatures enforce their contracts, so
-    // calling `split` with a non-string argument is a static error.
+    // Annotated public stdlib signatures enforce their contracts, so calling the
+    // `string.split` method with a non-string separator is a static error.
     let main = setup(
         "stdlib_string_contract",
-        &[("main.pp", "fun main() { let _ = split(123, \",\") }\n")],
+        &[("main.pp", "fun main() { let _ = \"a,b\".split(123) }\n")],
     );
     let (ok, out) = check(&main);
     assert!(!ok, "expected failure");

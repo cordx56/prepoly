@@ -205,18 +205,19 @@ fn typed_records_with_methods_and_constructors() {
 type Vec2 = {
     x
     y
-    new(x, y) {
-        return Self { x: x, y: y }
-    }
-    sum(self) {
-        return self.x + self.y
-    }
-    scaled(self, k) {
-        return Self { x: self.x * k, y: self.y * k }
-    }
-    bump(self) {
-        self.x = self.x + 1
-    }
+}
+
+fun Vec2.new(x, y) {
+    return Self { x: x, y: y }
+}
+fun Vec2.sum(self) {
+    return self.x + self.y
+}
+fun Vec2.scaled(self, k) {
+    return Self { x: self.x * k, y: self.y * k }
+}
+fun Vec2.bump(self) {
+    self.x = self.x + 1
 }
 
 fun demo() {
@@ -1005,9 +1006,10 @@ fn typed_concurrency_spawn_and_with() {
     let src = "\
 type Counter = {
     n: int32
-    add(self, k: int32) {
-        self.n += k
-    }
+}
+
+fun Counter.add(self, k: int32) {
+    self.n += k
 }
 
 let total = Counter { n: 0 }
@@ -1100,7 +1102,8 @@ fun scaled() {
 #[test]
 fn sync_makes_spawned_results_observable() {
     let _guard = JIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let src = "type Counter = {\n  n: int32\n  bump(self) {\n    self.n += 1\n  }\n}\n\
+    let src = "type Counter = {\n  n: int32\n}\n\
+               fun Counter.bump(self) {\n    self.n += 1\n  }\n\
                fun counted() -> int32 {\n\
                \x20 let c = Counter { n: 0 }\n\
                \x20 spawn(() -> { with(c, (c) -> { c.bump() }) })\n\

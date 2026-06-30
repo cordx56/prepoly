@@ -110,7 +110,8 @@ fn method_hover(doc: &Document, full: &FullAnalysis, local: usize, global: usize
     }
     let recv_hi = full.main_base + (span.lo - 1);
     let recv_ty = receiver_type_at(full, recv_hi)?;
-    let sig = record_method(full, &recv_ty, &name)?;
+    let sig =
+        record_method(full, &recv_ty, &name).or_else(|| primitive_method(full, &recv_ty, &name))?;
     let ret = enclosing_call_ty(full, global);
     let rendered = render_signature_full(sig, &[], ret.as_ref());
     Some(markup(rendered, Some(doc.range_of(span))))
@@ -148,6 +149,26 @@ fn record_method<'a>(
         TypeKind::Record { methods, .. } => methods.get(name).map(|m| &m.signature),
         _ => None,
     }
+}
+
+/// The signature of a stdlib method implemented on a primitive/array receiver
+/// (`fun string.split`, `fun infer[].slice`), looked up by the receiver's class.
+/// `None` when `recv_ty` is not a primitive/array or has no such method.
+fn primitive_method<'a>(
+    full: &'a FullAnalysis,
+    recv_ty: &Type,
+    name: &str,
+) -> Option<&'a CallableSignature> {
+    let mut t = recv_ty;
+    while let Type::Ref(i) | Type::Mut(i) | Type::ConstOf(i) | Type::Nullable(i) = t {
+        t = i;
+    }
+    let class = t.primitive_class()?;
+    let symbol = full
+        .program
+        .primitive_methods
+        .get(&(class.to_string(), name.to_string()))?;
+    full.program.functions.get(symbol).map(|f| &f.signature)
 }
 
 /// The result type of the innermost call expression covering `global` (the method

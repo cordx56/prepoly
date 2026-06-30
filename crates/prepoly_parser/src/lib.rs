@@ -16,24 +16,43 @@ mod tests {
     }
 
     #[test]
-    fn record_type_with_methods() {
+    fn record_type_with_method_signature_and_impl() {
+        // A type body holds fields and method *signatures* (interface
+        // requirements, no body); bodies are implemented with `fun T.m(...)`.
         let m = module(
-            "type Point = {\n    x: float64\n    y: float64\n    new(x: float64, y: float64) {\n        return Self { x: x, y: y }\n    }\n    dist(self, o: Point) -> float64 {\n        return self.x\n    }\n}\n",
+            "type Point = {\n    x: float64\n    y: float64\n    dist(self, o: Point) -> float64\n}\nfun Point.new(x: float64, y: float64) {\n    return Self { x: x, y: y }\n}\n",
         );
         match &m.items[0] {
             TopLevel::Type(t) => {
                 assert_eq!(t.name, "Point");
                 match &t.body {
                     TypeBody::Record(members) => {
-                        assert_eq!(members.len(), 4);
+                        assert_eq!(members.len(), 3);
                         assert!(matches!(members[0], Member::Field(_)));
-                        assert!(matches!(members[2], Member::Method(_)));
+                        match &members[2] {
+                            Member::Method(method) => assert!(method.body.is_none()),
+                            _ => panic!("expected method signature"),
+                        }
                     }
                     _ => panic!("expected record"),
                 }
             }
             _ => panic!("expected type decl"),
         }
+        match &m.items[1] {
+            TopLevel::Fun(f) => {
+                assert_eq!(f.name, "new");
+                assert!(f.recv.is_some(), "method impl records its receiver");
+            }
+            _ => panic!("expected fun decl"),
+        }
+    }
+
+    #[test]
+    fn in_type_method_body_is_rejected() {
+        // A method body inside the type body is no longer accepted; it must be
+        // `fun T.m(...)`.
+        assert!(parse("type P = {\n    x: int32\n    get(self) { return self.x }\n}\n").is_err());
     }
 
     #[test]

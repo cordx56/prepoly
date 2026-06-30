@@ -19,6 +19,7 @@ fn empty_program() -> Program {
         inits: Vec::new(),
         module_imports: HashMap::new(),
         import_origins: HashMap::new(),
+        primitive_methods: HashMap::new(),
     }
 }
 
@@ -160,9 +161,10 @@ fn whole_program_routes_calls_and_constructs() {
 type Point = {
     x
     y
-    new(x, y) {
-        return Self { x: x, y: y }
-    }
+}
+
+fun Point.new(x, y) {
+    return Self { x: x, y: y }
 }
 
 fun mk() {
@@ -191,9 +193,10 @@ let counter = 0
 
 type Box = {
     value
-    get(self) {
-        return self.value
-    }
+}
+
+fun Box.get(self) {
+    return self.value
 }
 ";
     let text = lower_whole(src);

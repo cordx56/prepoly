@@ -1,7 +1,9 @@
 // Interface enforcement: `type User: Showable, Comparable` requires User to
-// provide every member of each interface (checked at compile time). No
-// implementation is inherited. Structural subtyping then lets a function that
-// only needs `to_string` accept any type that has it.
+// provide every member of each interface (checked at compile time). An interface
+// declares method signatures (no body); the implementing type supplies the
+// bodies with `fun User.m(...)`. No implementation is inherited. Structural
+// subtyping then lets a function that only needs `to_string` accept any type
+// that has it.
 
 type Showable = {
     to_string(self) -> string
@@ -14,18 +16,18 @@ type Comparable = {
 type User: Showable, Comparable = {
     name: string
     age: int32
+}
 
-    new(name: string, age: int32) {
-        return Self { name: name, age: age }
-    }
+fun User.new(name: string, age: int32) {
+    return Self { name: name, age: age }
+}
 
-    to_string(self) -> string {
-        return "{self.name} (age {self.age})"
-    }
+fun User.to_string(self) -> string {
+    return "{self.name} (age {self.age})"
+}
 
-    compare(self, other) -> int32 {
-        return self.age - other.age
-    }
+fun User.compare(self, other) -> int32 {
+    return self.age - other.age
 }
 
 // Accepts anything with a `to_string` method (structural subtyping).

@@ -90,26 +90,29 @@ untouched(xs)              // xs is still [1, 2, 3]
 
 ## Types
 
-`type` defines both records and sum types. A member written with `(params)` is
-a method; one without is a field. A method whose first parameter is `self` is an
-instance method (called `value.method(...)`); otherwise it is a static method
-(called `Type.method(...)`). `Self` inside a body refers to the type being
-defined.
+`type` defines both records and sum types. A type body holds fields and method
+*signatures* (interface requirements); a member written with `(params)` and no
+body is a signature, one without parens is a field. Methods are implemented
+OUTSIDE the type with `fun T.m(...)`, in the same module that declares `T`. A
+method whose first parameter is `self` is an instance method (called
+`value.method(...)`); otherwise it is a static method (called `Type.method(...)`).
+`Self` inside a body refers to the type. A method is in scope wherever the type
+is, with no separate import.
 
 ```
 type Account = {
     owner: string
     balance: int32
+}
 
-    open(owner: string) -> Account {     // static method (no self)
-        return Self { owner: owner, balance: 0 }
-    }
-    deposit(self, amount: int32) {       // instance method
-        self.balance += amount
-    }
-    describe(self) -> string {
-        return "{self.owner}: {self.balance}"
-    }
+fun Account.open(owner: string) -> Account {   // static method (no self)
+    return Self { owner: owner, balance: 0 }
+}
+fun Account.deposit(self, amount: int32) {      // instance method
+    self.balance += amount
+}
+fun Account.describe(self) -> string {
+    return "{self.owner}: {self.balance}"
 }
 
 let acc = Account.open("Alice")
@@ -131,9 +134,9 @@ type Shape =
 let s = Shape.Circle { radius: 2.0 }     // construct as Type.Variant { ... }
 ```
 
-Variants are nominal. A variant may carry methods in its own field block, but
-sum-wide trailing method blocks are not implemented. Sum types may be recursive
-(a variant field can be the type itself).
+Variants are nominal. A method on a sum type is implemented with `fun T.m(self)`
+and applies to every variant (its body typically `match`es on `self`). Sum types
+may be recursive (a variant field can be the type itself).
 
 ### Interfaces and structural subtyping
 
@@ -143,12 +146,13 @@ interfaces: `type B: A, C`. This works for records and for every variant of a
 sum type.
 
 ```
-type Showable = { to_string(self) -> string }
+type Showable = { to_string(self) -> string }   // a method signature: a requirement
 
 type User: Showable = {
     name: string
-    to_string(self) -> string { return self.name }
 }
+
+fun User.to_string(self) -> string { return self.name }
 ```
 
 Separately, a plain function with an UNANNOTATED parameter accepts ANY value
@@ -280,15 +284,19 @@ let f = () -> { println("no args") }
 A closure passed as a parameter is called as the local value even if its name
 collides with a global function.
 
-## UFCS (uniform function call syntax)
+## Methods
 
-`recv.f(args)` resolves to the free function `f(recv, args)` when `recv` has no
-method `f`. This is how the standard-library array/string helpers are reached
-(`arr.map(g)` calls the free `map`). Define your own the same way:
+Implement a method with `fun T.m(self, ...)` in the same module that declares
+`T`, and call it as `recv.m(args)`. There is no UFCS: a plain free function is
+NOT callable as `recv.f(...)`. The standard-library array/string helpers are
+methods on those types (`arr.map(g)`, `s.split(",")`); the standard library may
+add methods to primitive types, which user code cannot. Define your own the same
+way:
 
 ```
-fun length_sq(v: Vec2) -> float64 { return v.x * v.x + v.y * v.y }
-let sq = v.length_sq()                        // dispatches to length_sq(v)
+type Vec2 = { x: float64, y: float64 }
+fun Vec2.length_sq(self) -> float64 { return self.x * self.x + self.y * self.y }
+let sq = v.length_sq()
 ```
 
 ## Modules

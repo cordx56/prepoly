@@ -360,6 +360,43 @@ impl Type {
         matches!(self, Type::Unknown(_))
     }
 
+    /// The dispatch class for a primitive/array receiver, used to route a
+    /// `recv.m()` call to a stdlib method implemented with `fun T.m(...)`.
+    /// Scalars map to their type word; every array (fixed or slice) maps to
+    /// `"array"`. Returns `None` for nominal records/sums (dispatched by their
+    /// unique symbol) and for types that cannot carry methods.
+    pub fn primitive_class(&self) -> Option<&'static str> {
+        match self {
+            Type::Bool => Some("bool"),
+            Type::Str => Some("string"),
+            Type::Int(k) => Some(k.name()),
+            Type::Float(k) => Some(k.name()),
+            Type::Array(..) | Type::Slice(_) => Some("array"),
+            _ => None,
+        }
+    }
+
+    /// The dispatch class for a `fun T.m(...)` receiver type word: a primitive
+    /// scalar (`"string"`, `"int32"`, ...) or `"array"` for an array receiver
+    /// (`T[]`). Returns `None` for a name that is not a primitive type word, so
+    /// the caller treats it as a nominal user type. The `array` flag is set by
+    /// the parser when the receiver was written `T[]`.
+    pub fn primitive_class_of_name(name: &str, array: bool) -> Option<&'static str> {
+        if array {
+            return Some("array");
+        }
+        if let Some(k) = IntKind::from_name(name) {
+            return Some(k.name());
+        }
+        match name {
+            "bool" => Some("bool"),
+            "float32" => Some("float32"),
+            "float64" => Some("float64"),
+            "string" => Some("string"),
+            _ => None,
+        }
+    }
+
     pub fn is_null(&self) -> bool {
         matches!(self, Type::Nullable(inner) if matches!(inner.as_ref(), Type::Never))
     }
@@ -514,6 +551,15 @@ fn resolve_named(
             None => return Err(format!("unknown type `{name}`")),
         },
     })
+}
+
+/// The storage symbol for a stdlib method implemented on a primitive/array
+/// receiver (`fun T.m`): the method name qualified by its dispatch `class`, so it
+/// never clashes with a free function or another class's method of the same
+/// name. Shared by HIR lowering and the back ends so they agree on the symbol a
+/// `recv.m()` call resolves to.
+pub fn prim_method_symbol(class: &str, method: &str) -> String {
+    format!("{method}@prim.{class}")
 }
 
 /// The result type of an arithmetic or comparison operation between two numeric

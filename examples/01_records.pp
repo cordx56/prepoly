@@ -1,32 +1,33 @@
 // Record types: fields, static and instance methods, `Self`, mutation, const.
 // Records have reference semantics; mutating through one binding is visible
-// through any other that shares the object.
+// through any other that shares the object. Methods are implemented with
+// `fun T.m(...)` in the same module as the type.
 
 type Account = {
     owner: string
     balance: int32
+}
 
-    // A static method has no `self` parameter and is called as `Type.method`.
-    open(owner: string) -> Account {
-        return Self { owner: owner, balance: 0 }
-    }
+// A static method has no `self` parameter and is called as `Type.method`.
+fun Account.open(owner: string) -> Account {
+    return Self { owner: owner, balance: 0 }
+}
 
-    // Instance methods take `self` first and are called as `value.method`.
-    deposit(self, amount: int32) {
-        self.balance += amount
-    }
+// Instance methods take `self` first and are called as `value.method`.
+fun Account.deposit(self, amount: int32) {
+    self.balance += amount
+}
 
-    withdraw(self, amount: int32) -> bool {
-        if amount > self.balance {
-            return false
-        }
-        self.balance -= amount
-        return true
+fun Account.withdraw(self, amount: int32) -> bool {
+    if amount > self.balance {
+        return false
     }
+    self.balance -= amount
+    return true
+}
 
-    describe(self) -> string {
-        return "{self.owner}: {self.balance}"
-    }
+fun Account.describe(self) -> string {
+    return "{self.owner}: {self.balance}"
 }
 
 fun main() {

@@ -298,20 +298,22 @@ impl Parser {
             } else {
                 None
             };
-            // Interface methods declare only a signature (no block body).
-            let (body, hi) = if self.at_p(TokenKind::LBrace) {
-                let b = self.parse_block()?;
-                let s = b.span;
-                (Some(b), s)
-            } else {
-                (None, ret.as_ref().map(|r| r.span()).unwrap_or(lo))
-            };
+            // A type body declares fields and method *signatures* (interface
+            // requirements) only. A method with a body is implemented outside the
+            // type with `fun T.m(...)`, not inside the braces.
+            if self.at_p(TokenKind::LBrace) {
+                return Err(self.error(format!(
+                    "implement method `{name}` with `fun T.{name}(...)` outside the type body, \
+                     not inside it"
+                )));
+            }
+            let hi = ret.as_ref().map(|r| r.span()).unwrap_or(lo);
             Ok(Member::Method(Method {
                 span: lo.merge(hi),
                 name,
                 params,
                 ret,
-                body,
+                body: None,
             }))
         } else {
             let ty = if self.eat(TokenKind::Colon) {
@@ -351,7 +353,23 @@ impl Parser {
 
     fn parse_fun_decl(&mut self) -> PResult<FunDecl> {
         let lo = self.expect(TokenKind::Fun, "'fun'")?.span;
-        let (name, _) = self.ident()?;
+        let (first, first_span) = self.ident()?;
+        // `fun T.m(...)` / `fun T[].m(...)` implements method `m` on the receiver
+        // type `T` (an `T[]` receiver is the array type, used by stdlib for
+        // primitive-array methods). Without a receiver, `first` is the free
+        // function's own name.
+        let (recv, name) = if self.at_p(TokenKind::LBracket) || self.at_p(TokenKind::Dot) {
+            let mut recv_ty = TypeExpr::Named(first, first_span);
+            if self.eat(TokenKind::LBracket) {
+                let hi = self.expect(TokenKind::RBracket, "']'")?.span;
+                recv_ty = TypeExpr::Array(Box::new(recv_ty), None, first_span.merge(hi));
+            }
+            self.expect(TokenKind::Dot, "'.'")?;
+            let (m, _) = self.ident()?;
+            (Some(recv_ty), m)
+        } else {
+            (None, first)
+        };
         self.open(TokenKind::LParen, "'('")?;
         let params = self.parse_param_list(TokenKind::RParen)?;
         self.close(TokenKind::RParen, "')'")?;
@@ -364,6 +382,7 @@ impl Parser {
         Ok(FunDecl {
             span: lo.merge(body.span),
             name,
+            recv,
             params,
             ret,
             body,
@@ -1159,6 +1178,13 @@ impl Parser {
             let ret = self.parse_type()?;
             let hi = ret.span();
             Ok(TypeExpr::Fun(params, Box::new(ret), span.merge(hi)))
+        } else if self.at_p(TokenKind::SelfLower) || self.at_p(TokenKind::SelfUpper) {
+            // `self`/`Self` in type position denote the enclosing type, so a
+            // closure-typed field may take the enclosing type as a parameter,
+            // e.g. `join: (self, string) -> string`. Both spellings resolve to
+            // `Self`.
+            self.bump();
+            Ok(TypeExpr::Named("Self".to_string(), span))
         } else {
             let (name, _) = self.ident()?;
             // `mut(T)` -- a mutable `T`; `ref(T)` / `ref(mut(T))` -- a reference.

@@ -6,11 +6,11 @@
 type Counter = {
     count: int32
     total: int32
+}
 
-    add(self, n: int32) {
-        self.count += 1
-        self.total += n
-    }
+fun Counter.add(self, n: int32) {
+    self.count += 1
+    self.total += n
 }
 
 fun main() {

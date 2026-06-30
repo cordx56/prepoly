@@ -1,43 +1,44 @@
-// Standard string utilities built on the `_string_*` runtime primitives.
-// All string indices are UTF-8 byte offsets: `len`, slicing, `find`, indexing,
-// and `_string_char_at` agree on byte positions, and the per-character helpers
-// advance by each character's byte length. Part of the implicit prelude.
+// Standard string utilities built on the `_string_*` runtime primitives, exposed
+// as methods on `string` with `fun string.m`. All string indices are UTF-8 byte
+// offsets: `len`, slicing, `find`, indexing, and `_string_char_at` agree on byte
+// positions, and the per-character helpers advance by each character's byte
+// length. Part of the implicit prelude.
 
-// Split `s` on every occurrence of `sep`.
-fun split(s: string, sep: string) -> string[] {
+// Split `self` on every occurrence of `sep`.
+fun string.split(self, sep: string) -> string[] {
     let result = []
     // An empty separator has a match at every position, so `_string_find` always
     // returns 0 and `start` never advances -- an infinite loop. Treat it as no
     // split (the whole string), mirroring `replace`'s empty-`old` guard.
     if len(sep) == 0 {
-        result.push(s)
+        result.push(self)
         return result
     }
     let start: int64 = 0
-    while start < len(s) {
-        let rest = _string_slice(s, start, len(s))
+    while start < len(self) {
+        let rest = _string_slice(self, start, len(self))
         let pos = _string_find(rest, sep)
         if pos != null {
-            result.push(_string_slice(s, start, start + pos))
+            result.push(_string_slice(self, start, start + pos))
             start = start + pos + len(sep)
         } else {
-            result.push(_string_slice(s, start, len(s)))
-            start = len(s)
+            result.push(_string_slice(self, start, len(self)))
+            start = len(self)
         }
     }
-    if len(s) == 0 {
+    if len(self) == 0 {
         result.push("")
     }
     return result
 }
 
 // Strip leading and trailing ASCII whitespace.
-fun trim(s: string) -> string {
+fun string.trim(self) -> string {
     let one: int64 = 1
     let start: int64 = 0
-    let end = len(s)
+    let end = len(self)
     while start < end {
-        let c = _string_char_at(s, start)
+        let c = _string_char_at(self, start)
         if c == " " || c == "\t" || c == "\n" || c == "\r" {
             start += one
         } else {
@@ -45,66 +46,66 @@ fun trim(s: string) -> string {
         }
     }
     while end > start {
-        let c = _string_char_at(s, end - one)
+        let c = _string_char_at(self, end - one)
         if c == " " || c == "\t" || c == "\n" || c == "\r" {
             end -= one
         } else {
             break
         }
     }
-    return _string_slice(s, start, end)
+    return _string_slice(self, start, end)
 }
 
-fun starts_with(s: string, prefix: string) -> bool {
-    if len(prefix) > len(s) {
+fun string.starts_with(self, prefix: string) -> bool {
+    if len(prefix) > len(self) {
         return false
     }
-    return _string_slice(s, 0, len(prefix)) == prefix
+    return _string_slice(self, 0, len(prefix)) == prefix
 }
 
-fun ends_with(s: string, suffix: string) -> bool {
-    if len(suffix) > len(s) {
+fun string.ends_with(self, suffix: string) -> bool {
+    if len(suffix) > len(self) {
         return false
     }
-    return _string_slice(s, len(s) - len(suffix), len(s)) == suffix
+    return _string_slice(self, len(self) - len(suffix), len(self)) == suffix
 }
 
 // `s.find(sub)`: the byte offset of the first occurrence of substring `sub` in
 // `s`, or null if absent. This is the string substring search, distinct from the
 // polymorphic element-membership `contains` (use `s.find(sub) != null` for a
 // substring test).
-fun find(s: string, sub: string) -> int64? {
-    return _string_find(s, sub)
+fun string.find(self, sub: string) -> int64? {
+    return _string_find(self, sub)
 }
 
 // Replace every occurrence of `old` with `new`.
-fun replace(s: string, old: string, new: string) -> string {
+fun string.replace(self, old: string, new: string) -> string {
     if len(old) == 0 {
-        return s
+        return self
     }
     let result = ""
     let start: int64 = 0
-    while start < len(s) {
-        let rest = _string_slice(s, start, len(s))
+    while start < len(self) {
+        let rest = _string_slice(self, start, len(self))
         let pos = _string_find(rest, old)
         if pos != null {
-            result = result + _string_slice(s, start, start + pos) + new
+            result = result + _string_slice(self, start, start + pos) + new
             start = start + pos + len(old)
         } else {
-            result = result + _string_slice(s, start, len(s))
-            start = len(s)
+            result = result + _string_slice(self, start, len(self))
+            start = len(self)
         }
     }
     return result
 }
 
-// The characters of `s` as a one-element-per-character array. Advances by each
+// The characters of `self` as a one-element-per-character array. Advances by each
 // character's byte length so multibyte UTF-8 characters are handled correctly.
-fun chars(s: string) -> string[] {
+fun string.chars(self) -> string[] {
     let result = []
     let i: int64 = 0
-    while i < len(s) {
-        if let c = _string_char_at(s, i) {
+    while i < len(self) {
+        if let c = _string_char_at(self, i) {
             result.push(c)
             i += len(c)
         } else {
@@ -114,11 +115,12 @@ fun chars(s: string) -> string[] {
     return result
 }
 
-// Join `parts` with `sep` between each.
-fun join(parts: string[], sep: string) -> string {
+// Join the string elements of `self` with `sep` between each. A method on the
+// array type, so `parts.join(", ")` reaches it.
+fun string[].join(self, sep: string) -> string {
     let result = ""
     let first = true
-    for p in parts {
+    for p in self {
         if first {
             result = result + p
             first = false
@@ -132,8 +134,8 @@ fun join(parts: string[], sep: string) -> string {
 // ASCII upper-casing implemented over the UTF-8 byte view. An ASCII case change
 // preserves UTF-8 validity, so the byte->string conversion cannot fail; matching
 // (rather than `!`) keeps `to_upper` non-fallible, returning `string` not `string!`.
-fun to_upper(s: string) -> string {
-    let bytes = _string_bytes(s)
+fun string.to_upper(self) -> string {
+    let bytes = _string_bytes(self)
     let result = []
     for b in bytes {
         if b >= 97 && b <= 122 {
@@ -144,12 +146,12 @@ fun to_upper(s: string) -> string {
     }
     return match _string_from_bytes(result) {
         Ok { value } => value,
-        Err { error } => s,
+        Err { error } => self,
     }
 }
 
-fun to_lower(s: string) -> string {
-    let bytes = _string_bytes(s)
+fun string.to_lower(self) -> string {
+    let bytes = _string_bytes(self)
     let result = []
     for b in bytes {
         if b >= 65 && b <= 90 {
@@ -160,6 +162,6 @@ fun to_lower(s: string) -> string {
     }
     return match _string_from_bytes(result) {
         Ok { value } => value,
-        Err { error } => s,
+        Err { error } => self,
     }
 }

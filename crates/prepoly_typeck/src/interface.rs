@@ -11,6 +11,19 @@ use crate::TypeError;
 pub fn check(program: &Program) -> Vec<TypeError> {
     let mut errors = Vec::new();
     for info in program.types.values() {
+        // Two interfaces a type implements may declare the same field name with
+        // incompatible types. Each parent is otherwise checked independently
+        // against the implementer, so this conflict between the parents
+        // themselves would go unreported (an unannotated implementing field even
+        // bypasses the per-parent invariance check). Detect it directly from the
+        // parents' own declarations, before checking each parent.
+        check_parent_field_conflicts(
+            info.name.as_str(),
+            &info.interfaces,
+            program,
+            info.span,
+            &mut errors,
+        );
         for iface_name in &info.interfaces {
             let Some(iface) = program.types.get(iface_name) else {
                 errors.push(TypeError {
@@ -66,6 +79,56 @@ pub fn check(program: &Program) -> Vec<TypeError> {
         }
     }
     errors
+}
+
+/// Report when two of `interfaces` declare the same field name with mutually
+/// incompatible types. Fields are mutable, so a value reaching a type through one
+/// parent interface could be written through the other; the two field types must
+/// therefore be invariant. Only fields that both parents annotate with a known
+/// resolved type can conflict; unannotated or still-unknown fields are skipped.
+fn check_parent_field_conflicts(
+    who: &str,
+    interfaces: &[String],
+    program: &Program,
+    span: prepoly_lexer::Span,
+    errors: &mut Vec<TypeError>,
+) {
+    // field name -> (parent interface name, resolved field type)
+    let mut seen: HashMap<&str, (&str, &prepoly_hir::Type)> = HashMap::new();
+    for iface_name in interfaces {
+        let Some(iface) = program.types.get(iface_name) else {
+            continue;
+        };
+        let TypeKind::Record { fields, .. } = &iface.kind else {
+            continue;
+        };
+        for f in fields {
+            let Some(ty) = &f.resolved_ty else { continue };
+            if ty.is_unknown() {
+                continue;
+            }
+            match seen.get(f.name.as_str()) {
+                Some((prev_iface, prev_ty)) => {
+                    if !crate::structural::types_invariant(program, prev_ty, ty) {
+                        errors.push(TypeError {
+                            message: format!(
+                                "`{who}` inherits conflicting types for field `{}`: `{}` requires `{}` but `{}` requires `{}`",
+                                f.name,
+                                prev_iface,
+                                prev_ty.display(),
+                                iface_name,
+                                ty.display(),
+                            ),
+                            span,
+                        });
+                    }
+                }
+                None => {
+                    seen.insert(f.name.as_str(), (iface_name.as_str(), ty));
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

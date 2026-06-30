@@ -26,8 +26,8 @@ use prepoly_parser::ast::{BinOp, UnaryOp};
 
 use crate::mono::{
     MonoFunction, MonoProgram, binary_operand_type, float_kind_name, instance_symbol,
-    int_kind_name, is_comparison, method_symbol, numeric_conv_ret, operand_type_of, static_symbol,
-    unwrap_nullable,
+    int_kind_name, is_comparison, method_symbol, numeric_conv_ret, operand_type_of,
+    prim_method_instance, static_symbol, unwrap_nullable,
 };
 
 /// Whether a type is a reference-counted heap object the back end tracks with
@@ -126,9 +126,7 @@ fn binds_alias(rv: &Rvalue, local_types: &[Type]) -> bool {
     // non-string argument the conversion allocates a fresh owned string, not an alias.
     let str_identity_arg = match rv {
         Rvalue::Call(Callee::Builtin(name), args) if name == "to_string" => args.first(),
-        Rvalue::Call(Callee::Static { ty, method }, args)
-            if ty == "string" && method == "from" =>
-        {
+        Rvalue::Call(Callee::Static { ty, method }, args) if ty == "string" && method == "from" => {
             args.first()
         }
         _ => None,
@@ -1036,12 +1034,16 @@ pub trait Codegen {
                     _ => self.file_close(file),
                 };
             }
-            // Instance method (`arg_types[0]` is the receiver), or -- when no such
-            // method instance exists -- a UFCS call to the free function `name`.
+            // Instance method (`arg_types[0]` is the receiver). A nominal method
+            // instance is keyed by `method_symbol`; a stdlib primitive/array
+            // method (`fun string.split`) by its class-qualified symbol. The type
+            // checker has already rejected any other `recv.m()`.
             Callee::Method(name) => {
                 let msym = method_symbol(name, &arg_types);
                 if program.lookup(&msym).is_some() {
                     msym
+                } else if let Some(psym) = prim_method_instance(program, name, &arg_types) {
+                    psym
                 } else {
                     instance_symbol(name, &arg_types)
                 }

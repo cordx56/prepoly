@@ -350,6 +350,22 @@ pub fn static_symbol(ty: &str, method: &str, type_args: &[Type]) -> String {
     instance_symbol(&format!("{SYNTH_SIGIL}s_{ty}_{method}"), type_args)
 }
 
+/// The monomorphized instance symbol for a `recv.name(args)` call that resolves
+/// to a stdlib primitive/array method, when such an instance exists in
+/// `program`. The receiver's class ([`Type::primitive_class`]) plus the method
+/// name reconstruct the body's class-qualified symbol (the same scheme HIR
+/// lowering used), which `instance_symbol` keys by argument types. Lets the back
+/// ends route the call without carrying the HIR `primitive_methods` table.
+pub fn prim_method_instance(
+    program: &MonoProgram,
+    name: &str,
+    arg_types: &[Type],
+) -> Option<String> {
+    let class = arg_types.first()?.primitive_class()?;
+    let sym = instance_symbol(&prepoly_hir::prim_method_symbol(class, name), arg_types);
+    program.lookup(&sym).map(|_| sym)
+}
+
 /// Instance symbol of a closure: distinct per closure id, captured types, and
 /// parameter types. Derivable from types alone so the monomorphizer and back end
 /// agree.
@@ -1303,13 +1319,21 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                 );
             }
         }
-        // UFCS: `recv.name(args)` resolves to the free function `name(recv, args)`
-        // when the receiver has no such method.
-        if self.by_fn.contains_key(name) {
-            return self.resolve_free(cur_sym, cur_ret, name, arg_types);
+        // A stdlib method on a primitive/array receiver (`fun string.split`,
+        // `fun infer[].map`), dispatched by the receiver's class. Its body is an
+        // ordinary function stored under a class-qualified symbol; instantiate it
+        // for the call's argument tuple.
+        if let Some(class) = arg_types[0].primitive_class()
+            && let Some(sym) = self
+                .program
+                .primitive_methods
+                .get(&(class.to_string(), name.to_string()))
+        {
+            let sym = sym.clone();
+            return self.resolve_free(cur_sym, cur_ret, &sym, arg_types);
         }
         Err(format!(
-            "no method or function `{name}` for `{}`",
+            "no method `{name}` for `{}`",
             arg_types[0].display()
         ))
     }
@@ -1718,8 +1742,26 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         idx: usize,
         caller_local_types: &[Option<Type>],
     ) -> Result<Option<Vec<Type>>, String> {
-        let Some(func) = self.by_fn.get(base) else {
-            return Ok(None);
+        // `base` is the callee name. For a stdlib primitive/array method passed a
+        // closure (`arr.map(f)`), its body lives under the class-qualified symbol,
+        // not the bare name; recover it from the receiver argument's class.
+        let func = match self.by_fn.get(base) {
+            Some(f) => *f,
+            None => {
+                let recv_class = pass_args
+                    .first()
+                    .and_then(|a| self.operand_type(a, caller_local_types).ok().flatten())
+                    .and_then(|t| t.primitive_class());
+                let sym = recv_class.and_then(|class| {
+                    self.program
+                        .primitive_methods
+                        .get(&(class.to_string(), base.to_string()))
+                });
+                match sym.and_then(|s| self.by_fn.get(s.as_str())) {
+                    Some(f) => *f,
+                    None => return Ok(None),
+                }
+            }
         };
         let body = &func.body;
         let mut seeded: Vec<Option<Type>> = vec![None; body.locals.len()];
@@ -2585,7 +2627,8 @@ mod tests {
     /// model's consistency check reports nothing.
     #[test]
     fn valid_program_passes_the_jit_time_check() {
-        let src = "type Point = {\n  x: int32\n  y: int32\n  sum(self) -> int32 {\n    return self.x + self.y\n  }\n}\n\
+        let src = "type Point = {\n  x: int32\n  y: int32\n}\n\
+                   fun Point.sum(self) -> int32 {\n    return self.x + self.y\n  }\n\
                    fun add(a: int32, b: int32) -> int32 {\n  return a + b\n}\n\
                    fun main() {\n  let p = Point { x: 1, y: 2 }\n  let s = add(p.x, p.y)\n  println(string.from(s))\n}\n";
         let ast = prepoly_parser::parse(src).expect("parse");

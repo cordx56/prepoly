@@ -244,6 +244,14 @@ pub struct Program {
     /// On an ambiguous import the first origin is kept; the ambiguity itself is
     /// reported separately.
     pub import_origins: HashMap<Vec<String>, HashMap<String, Vec<String>>>,
+    /// Methods the standard library implements on primitive/array types with
+    /// `fun T.m(...)` (e.g. `fun string.split` / `fun infer[].map`). Keyed by
+    /// `(dispatch class, method name)` -> the implementing function's storage
+    /// symbol; the body itself lives in `functions` under that symbol. The
+    /// dispatch class is the receiver's primitive class ([`Type::primitive_class`]):
+    /// a scalar type word (`"string"`, `"int32"`, ...) or `"array"`. Used to
+    /// route a `recv.m()` call on a primitive receiver, replacing UFCS.
+    pub primitive_methods: HashMap<(String, String), String>,
 }
 
 impl Program {

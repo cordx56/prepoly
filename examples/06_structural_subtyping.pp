@@ -5,17 +5,19 @@
 
 type ConsoleLogger = {
     prefix: string
-    log(self, msg: string) {
-        println("[{self.prefix}] {msg}")
-    }
+}
+
+fun ConsoleLogger.log(self, msg: string) {
+    println("[{self.prefix}] {msg}")
 }
 
 type TaggedLogger = {
     prefix: string
     tag: string
-    log(self, msg: string) {
-        println("[{self.prefix}/{self.tag}] {msg}")
-    }
+}
+
+fun TaggedLogger.log(self, msg: string) {
+    println("[{self.prefix}/{self.tag}] {msg}")
 }
 
 fun run_with(logger, task: string) {

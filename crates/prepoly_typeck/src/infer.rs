@@ -9,9 +9,10 @@
 //! explicit types.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use prepoly_hir::{
-    CallableSignature, Constness, FloatKind, IntKind, NominalType, ParamInfo, Program,
+    CallableSignature, Constness, FloatKind, FunInfo, IntKind, NominalType, ParamInfo, Program,
     Substitution, Type, TypeKind, TypedProgram, common_numeric_type,
 };
 use prepoly_lexer::Span;
@@ -49,6 +50,29 @@ struct ResolvedMethod {
 enum ReturnContext {
     Inferred,
     Explicit(Type),
+}
+
+/// The pieces of a callable whose first parameter is filled by a receiver,
+/// cloned out of a `FunInfo` so the call can be checked while the checker is
+/// mutably borrowed. Shared by UFCS and primitive-method dispatch.
+struct ReceiverCall {
+    symbol: String,
+    module: Vec<String>,
+    signature_params: Vec<ParamInfo>,
+    declared_ret: Option<Type>,
+    decl: Rc<FunDecl>,
+}
+
+impl ReceiverCall {
+    fn from_fun(info: &FunInfo) -> Self {
+        Self {
+            symbol: info.symbol.clone(),
+            module: info.module.clone(),
+            signature_params: info.signature.params.clone(),
+            declared_ret: info.signature.ret_ty.clone(),
+            decl: info.decl.clone(),
+        }
+    }
 }
 
 pub fn check(program: &Program) -> Vec<TypeError> {
@@ -1356,9 +1380,78 @@ impl<'a> Checker<'a> {
             self.record_expr_type(expr, &ty);
             return ty;
         }
+        // A closure in a position that wants a function type is checked against
+        // that type: each parameter takes the expected parameter type (so an
+        // unannotated `self`/value parameter is typed without a separate
+        // annotation) and the body is checked against the expected return, so a
+        // block-bodied closure's `return` reconciles with it rather than leaving
+        // the closure's result `void`.
+        if let Expr::Closure(params, body, _) = expr
+            && let Type::Fun(want_params, want_ret) = self.resolve(want)
+        {
+            return self.check_closure_against(expr, params, body, &want_params, &want_ret, scopes);
+        }
         let got = self.check_expr(expr, scopes);
         self.expect_expr_assignable(&got, want, expr);
         got
+    }
+
+    /// Check a closure literal against an expected function type, binding each
+    /// parameter to the expected parameter type and the body to the expected
+    /// return. Returns `Type::Fun(param_types, want_ret)`.
+    fn check_closure_against(
+        &mut self,
+        expr: &Expr,
+        params: &[Param],
+        body: &Expr,
+        want_params: &[Type],
+        want_ret: &Type,
+        scopes: &mut ScopeStack,
+    ) -> Type {
+        self.report_duplicate_params("closure", params);
+        let mut closure_scope: HashMap<String, Type> = HashMap::new();
+        let mut param_types = Vec::with_capacity(params.len());
+        for (i, p) in params.iter().enumerate() {
+            let expected = want_params
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| self.fresh_unknown());
+            // An explicit parameter annotation still applies and is checked
+            // against the expected type; an unannotated parameter takes it.
+            let ty = match &p.ty {
+                Some(te) => {
+                    let annotated = self
+                        .resolve_type(te)
+                        .unwrap_or_else(|_| self.fresh_unknown());
+                    self.expect_assignable(&annotated, &expected, p.span);
+                    annotated
+                }
+                None => expected,
+            };
+            closure_scope.insert(p.name.clone(), ty.clone());
+            param_types.push(ty);
+        }
+        let mut inferred_env = env_from_scopes(scopes);
+        inferred_env.extend(closure_scope.clone());
+        let mut propagated_errors = Vec::new();
+        self.infer_expr_light(body, &inferred_env, &mut propagated_errors);
+        let mut closure_scopes = scopes.clone();
+        closure_scopes.push(closure_scope);
+        self.const_scopes.push(HashSet::new());
+        self.return_contexts
+            .push(ReturnContext::Explicit(want_ret.clone()));
+        let body_val = self.check_expr(body, &mut closure_scopes);
+        self.return_contexts.pop();
+        self.const_scopes.pop();
+        // An expression-bodied closure (not a `{ ... }` block) returns its body
+        // value directly, so that value must match the expected return; a block
+        // body returns through the `return` context handled above.
+        if !matches!(body, Expr::Block(..)) {
+            self.expect_expr_assignable(&body_val, want_ret, body);
+        }
+        let ty = Type::Fun(param_types, Box::new(want_ret.clone()));
+        self.record_expr_type(expr, &ty);
+        ty
     }
 
     fn check_expr(&mut self, e: &Expr, scopes: &mut ScopeStack) -> Type {
@@ -1993,11 +2086,23 @@ impl<'a> Checker<'a> {
                 });
             }
         }
+        // The concrete type `Self` denotes in a field type, so a closure-typed
+        // field declared `(self, T) -> U` is checked with `self` bound to the
+        // type being constructed rather than the abstract `Self`.
+        let self_ty = self
+            .program
+            .types
+            .get(who.split('.').next().unwrap_or(who))
+            .map(|info| info.type_ref());
         for field in declared {
             match fields.iter().find(|(name, _)| name == &field.name) {
                 Some((_, expr)) => {
                     let got = if let Some(want) = &field.resolved_ty {
-                        self.check_expr_against(expr, want, scopes)
+                        let want = match &self_ty {
+                            Some(s) => substitute_self(want, s),
+                            None => want.clone(),
+                        };
+                        self.check_expr_against(expr, &want, scopes)
                     } else {
                         self.check_expr(expr, scopes)
                     };
@@ -2366,10 +2471,11 @@ impl<'a> Checker<'a> {
                     .common_type_list(&returns)
                     .unwrap_or_else(|| self.fresh_unknown());
             }
-            // UFCS: `recv.f(args)` falls back to the free
-            // function `f(recv, args)` when the receiver has no such method.
-            if self.lookup(scopes, method).is_none()
-                && let Some(ret) = self.check_ufcs_call(&recv_ty, method, args, span, scopes)
+            // A stdlib method on a primitive/array receiver (`fun string.split`,
+            // `fun infer[].map`): dispatched by the receiver's class. There is no
+            // UFCS fallback -- a free function is not callable through `recv.f()`.
+            if let Some(ret) =
+                self.check_primitive_method_call(&recv_ty, method, args, span, scopes)
             {
                 return ret;
             }
@@ -2424,10 +2530,12 @@ impl<'a> Checker<'a> {
         self.apply_callable(callee_ty, args, span, scopes)
     }
 
-    /// Type-check a UFCS method call `recv.f(args)` as `f(recv, args)` when `f`
-    /// is a known free function. Returns `None` if no such function exists, so
-    /// the caller can defer to runtime dispatch.
-    fn check_ufcs_call(
+    /// Type-check a call `recv.m(args)` to a stdlib method implemented on a
+    /// primitive/array receiver with `fun T.m(self, ...)`. The receiver's class
+    /// (`Type::primitive_class`) keys the method in `primitive_methods`; the body
+    /// is an ordinary function whose first parameter is the receiver. Returns
+    /// `None` if the receiver type carries no such method.
+    fn check_primitive_method_call(
         &mut self,
         recv_ty: &Type,
         method: &str,
@@ -2435,15 +2543,34 @@ impl<'a> Checker<'a> {
         span: prepoly_lexer::Span,
         scopes: &mut ScopeStack,
     ) -> Option<Type> {
-        let info = self.lookup_function(method)?;
-        let decl = info.decl.clone();
-        let signature_params = info.signature.params.clone();
-        let declared_ret = info.signature.ret_ty.clone();
-        let symbol = info.symbol.clone();
-        let module = info.module.clone();
-        let fallback_ret = declared_ret
+        let class = self.resolve(recv_ty).primitive_class()?;
+        let symbol = self
+            .program
+            .primitive_methods
+            .get(&(class.to_string(), method.to_string()))?;
+        let info = self.program.functions.get(symbol)?;
+        let func = ReceiverCall::from_fun(info);
+        Some(self.check_receiver_call(recv_ty, &func, method, args, span, scopes))
+    }
+
+    /// Shared core of a call whose first parameter is filled by the receiver:
+    /// check argument count and types (the receiver against the first parameter,
+    /// the call's arguments against the rest) and instantiate the body for the
+    /// resolved argument tuple, returning the inferred result type.
+    fn check_receiver_call(
+        &mut self,
+        recv_ty: &Type,
+        func: &ReceiverCall,
+        method: &str,
+        args: &[Arg],
+        span: prepoly_lexer::Span,
+        scopes: &mut ScopeStack,
+    ) -> Type {
+        let signature_params = &func.signature_params;
+        let fallback_ret = func
+            .declared_ret
             .clone()
-            .or_else(|| self.function_returns.get(&symbol).cloned())
+            .or_else(|| self.function_returns.get(&func.symbol).cloned())
             .unwrap_or_else(|| self.fresh_unknown());
         self.check_arg_count(method, signature_params.len(), args.len() + 1, span);
         // The receiver fills the first parameter.
@@ -2464,15 +2591,15 @@ impl<'a> Checker<'a> {
                 arg_types.push(self.check_expr(&a.expr, scopes));
             }
         }
-        Some(self.instantiate_function_call(
-            &symbol,
-            &module,
-            &signature_params,
-            &decl.body,
-            declared_ret,
+        self.instantiate_function_call(
+            &func.symbol,
+            &func.module,
+            signature_params,
+            &func.decl.body,
+            func.declared_ret.clone(),
             fallback_ret,
             &arg_types,
-        ))
+        )
     }
 
     /// Type-check a call whose callee is a value (closure/function value).
@@ -3340,7 +3467,14 @@ impl<'a> Checker<'a> {
         let mut frame = self.global_scope.clone();
         let mut arg_idx = 0;
         for param in params {
-            let ty = if param.name == "self" {
+            // A method called with the receiver passed separately (`receiver_ty`)
+            // binds `self` to it and does not consume an argument slot. A
+            // primitive/array method (`fun infer[].slice`) is instead instantiated
+            // like a function: its receiver is `arg_types[0]`, aligned with the
+            // `self` parameter, so `self` is handled by the ordinary positional
+            // branch below (instantiating its `infer[]` annotation against the
+            // receiver and advancing `arg_idx`).
+            let ty = if param.name == "self" && receiver_ty.is_some() {
                 receiver_ty
                     .clone()
                     .or_else(|| param.resolved_ty.clone())
@@ -4996,6 +5130,26 @@ fn field_substitution_key(variant: Option<&str>, field: &str) -> String {
     variant
         .map(|variant| format!("{variant}.{field}"))
         .unwrap_or_else(|| field.to_string())
+}
+
+/// Replace every `Type::SelfType` in `ty` with `replacement` (the concrete type
+/// `Self` denotes), recursing through composite types. Lets a field or parameter
+/// type written with `Self` -- e.g. a closure-typed field `(self, T) -> U` -- be
+/// checked against the actual type when a value of that type is constructed.
+fn substitute_self(ty: &Type, replacement: &Type) -> Type {
+    let rec = |t: &Type| substitute_self(t, replacement);
+    match ty {
+        Type::SelfType => replacement.clone(),
+        Type::Array(e, n) => Type::Array(Box::new(rec(e)), *n),
+        Type::Slice(e) => Type::Slice(Box::new(rec(e))),
+        Type::Tuple(es) => Type::Tuple(es.iter().map(rec).collect()),
+        Type::Fun(ps, r) => Type::Fun(ps.iter().map(rec).collect(), Box::new(rec(r))),
+        Type::Nullable(e) => Type::Nullable(Box::new(rec(e))),
+        Type::ConstOf(e) => Type::ConstOf(Box::new(rec(e))),
+        Type::Mut(e) => Type::Mut(Box::new(rec(e))),
+        Type::Ref(e) => Type::Ref(Box::new(rec(e))),
+        other => other.clone(),
+    }
 }
 
 fn method_param_substitution_key(method: &str, param: &str) -> String {

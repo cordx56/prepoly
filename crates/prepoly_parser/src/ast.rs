@@ -78,6 +78,10 @@ pub struct Method {
 #[derive(Clone, Debug)]
 pub struct FunDecl {
     pub name: String,
+    /// `Some(T)` when this is a method implementation `fun T.m(...)`: `T` is the
+    /// receiver type (a named type, or an array `T[]` for primitive-array
+    /// methods). `None` for a plain free function `fun m(...)`.
+    pub recv: Option<TypeExpr>,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
     pub body: Block,

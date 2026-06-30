@@ -5,8 +5,9 @@
 // one. With every access lock-guarded the total is exactly 200000.
 type Counter = {
     value: int64
-    add(self, n: int64) { self.value = self.value + n }
 }
+
+fun Counter.add(self, n: int64) { self.value = self.value + n }
 
 fun main() {
     let counter = Counter { value: 0 }

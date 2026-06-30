@@ -270,9 +270,10 @@ fn hover_method_call_shows_method_signature() {
         "type Person = {\n",
         "    first_name: string,\n",
         "    last_name: string,\n",
-        "    display(self) {\n",
-        "        return \"{self.first_name} {self.last_name}\"\n",
-        "    },\n",
+        "}\n",
+        "\n",
+        "fun Person.display(self) {\n",
+        "    return \"{self.first_name} {self.last_name}\"\n",
         "}\n",
         "\n",
         "fun main() {\n",
@@ -426,9 +427,10 @@ fn completion_offers_record_methods() {
     let src = concat!(
         "type Point = {\n",
         "    x: int32\n",
-        "    dist(self) -> int32 {\n",
-        "        return self.x\n",
-        "    }\n",
+        "}\n",
+        "\n",
+        "fun Point.dist(self) -> int32 {\n",
+        "    return self.x\n",
         "}\n",
         "\n",
         "fun main() {\n",
@@ -562,20 +564,16 @@ fn hover_recursive_call_has_no_variable_bindings() {
     );
 }
 
-/// A UFCS/method call `recv.f(args)` passes the receiver as `f`'s first
-/// argument, so hovering it binds the receiver-typed first parameter (here
-/// `slice`'s `arr: infer[]`), not the first explicit argument.
+/// Hovering the method name in `recv.m(args)` where `m` is a stdlib method on a
+/// primitive/array receiver (`fun infer[].slice`) shows the method's signature,
+/// resolved by the receiver's class.
 #[test]
-fn hover_ufcs_call_binds_receiver_as_first_argument() {
+fn hover_primitive_method_shows_signature() {
     let src = "const elems = [1]\nfor elem in elems.slice(0, 1) {\n    println(elem)\n}\n";
     let full = full_analysis(src);
     let (doc, pos) = position(src, "slice(0", false);
     let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover slice"));
     assert!(text.contains("fun slice("), "signature: {text}");
-    assert!(
-        text.contains("unknown_0 = int32"),
-        "receiver binds the first parameter: {text}"
-    );
 }
 
 /// A function that returns a locally-built collection (`result = []` grown by

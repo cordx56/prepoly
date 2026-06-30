@@ -1,6 +1,6 @@
-// Standard-library collection and math helpers (the implicit prelude). These
-// are written in Prepoly and reached through UFCS: `arr.map(f)` resolves to
-// the free function `map(arr, f)`.
+// Standard-library collection and math helpers (the implicit prelude). The
+// collection helpers are methods on the array type (`fun infer[].map`), so
+// `arr.map(f)` dispatches to them; `abs`/`min`/`max`/`sqrt` are free functions.
 
 fun main() {
     let nums = [5, 3, 8, 1, 9, 2]

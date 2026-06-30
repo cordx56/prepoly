@@ -65,15 +65,24 @@ println(arr) // outputs [1, 2, 3]
 
 ## Defining types
 
-We can define new types with their fields and methods as follows:
+We can define new types with their fields as follows:
 
 ```prepoly
 type Person = {
     first_name: string,
     last_name: string,
-    display(self) {
-        return "{self.first_name} {self.last_name}"
-    },
+}
+```
+
+Methods are implemented outside the type with `fun T.m(...)`, in the same module
+that declares the type. A method whose first parameter is `self` is an instance
+method (called as `value.method(...)`); one without is a static method (called as
+`Type.method(...)`). `Self` inside a body refers to the type. A method is in
+scope wherever the type is, with no separate import.
+
+```prepoly
+fun Person.display(self) {
+    return "{self.first_name} {self.last_name}"
 }
 
 fun main() {
@@ -108,11 +117,12 @@ Using `DegreeProgram` type, we can define `Student` type:
 type Student: Person = {
     first_name,
     last_name,
-    display(self) {
-        return "{self.id}: {self.first_name} {self.last_name}"
-    },
     id,
     program: DegreeProgram,
+}
+
+fun Student.display(self) {
+    return "{self.id}: {self.first_name} {self.last_name}"
 }
 ```
 
@@ -126,9 +136,9 @@ Here we enhance `display` with a `match` expression that formats each `DegreePro
 type Person = {
     first_name: string,
     last_name: string,
-    display(self) {
-        return "{self.first_name} {self.last_name}"
-    },
+}
+fun Person.display(self) {
+    return "{self.first_name} {self.last_name}"
 }
 type DegreeProgram =
     | Bachelor {
@@ -143,16 +153,16 @@ type DegreeProgram =
 type Student: Person = {
     first_name,
     last_name,
-    display(self) {
-        const program = match self.program {
-            Bachelor { year } => "Bachelor {year}",
-            Master { year } => "Master {year}",
-            Doctor { year } => "Doctor {year}",
-        }
-        return "{self.id} ({program}): {self.first_name} {self.last_name}"
-    },
     id,
     program: DegreeProgram,
+}
+fun Student.display(self) {
+    const program = match self.program {
+        Bachelor { year } => "Bachelor {year}",
+        Master { year } => "Master {year}",
+        Doctor { year } => "Doctor {year}",
+    }
+    return "{self.id} ({program}): {self.first_name} {self.last_name}"
 }
 
 fun main() {

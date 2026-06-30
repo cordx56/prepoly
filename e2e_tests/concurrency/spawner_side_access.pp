@@ -5,8 +5,9 @@
 // 200000, deterministically across runs.
 type Counter = {
     value: int64
-    add(self, n: int64) { self.value = self.value + n }
 }
+
+fun Counter.add(self, n: int64) { self.value = self.value + n }
 
 fun work(c) {
     let i = 0

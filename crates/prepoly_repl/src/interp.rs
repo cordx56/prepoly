@@ -21,7 +21,7 @@ use std::rc::Rc;
 
 use prepoly_engine::{
     MonoFunction, MonoProgram, binary_operand_type, closure_symbol, instance_symbol, is_comparison,
-    method_symbol, numeric_conv_ret, operand_type_of, static_symbol,
+    method_symbol, numeric_conv_ret, operand_type_of, prim_method_instance, static_symbol,
 };
 use prepoly_hir::{FloatKind, IntKind, Program, RESULT_TYPE_ID, Type};
 use prepoly_mir::{Callee, Literal, MirStmt, Operand, Place, Projection, Rvalue, Terminator};
@@ -491,6 +491,8 @@ impl<'p, 'm> Interp<'p, 'm> {
                 let msym = method_symbol(name, &arg_types);
                 if self.program.lookup(&msym).is_some() {
                     msym
+                } else if let Some(psym) = prim_method_instance(self.program, name, &arg_types) {
+                    psym
                 } else {
                     instance_symbol(name, &arg_types)
                 }

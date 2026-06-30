@@ -27,6 +27,10 @@ pub fn lower(modules: &[LoadedModule]) -> (Program, Vec<LowerError>) {
     let mut import_origins: HashMap<Vec<String>, HashMap<String, Vec<String>>> = HashMap::new();
     let mut errors = Vec::new();
     let mut next_id: i32 = 1; // 0 is reserved for Result
+    // `fun T.m(...)` method implementations, resolved to their receiver type
+    // after every type is collected (so a method may precede its type's `type`
+    // declaration, and the same-module rule can be enforced).
+    let mut method_impls: Vec<(Rc<prepoly_parser::ast::FunDecl>, Vec<String>)> = Vec::new();
 
     types.insert("Result".to_string(), result_type());
 
@@ -34,8 +38,12 @@ pub fn lower(modules: &[LoadedModule]) -> (Program, Vec<LowerError>) {
     // in a single module keeps its bare symbol (so all existing bare-name lookups
     // and codegen symbols are unchanged); a name defined in several modules is
     // qualified per module so the definitions coexist.
+    // Only free functions compete for a bare storage symbol. A method
+    // implementation `fun T.m(...)` is keyed by its receiver type, not by `m`, so
+    // it neither inflates the free-function name count nor clashes with a free
+    // function of the same name.
     let fn_name_modules = name_module_counts(modules, |item| match item {
-        TopLevel::Fun(f) => Some(&f.name),
+        TopLevel::Fun(f) if f.recv.is_none() => Some(&f.name),
         _ => None,
     });
     let type_name_modules = name_module_counts(modules, |item| match item {
@@ -80,6 +88,10 @@ pub fn lower(modules: &[LoadedModule]) -> (Program, Vec<LowerError>) {
                     next_id += 1;
                     types.insert(symbol, info);
                 }
+                TopLevel::Fun(f) if f.recv.is_some() => {
+                    // A method implementation: deferred until all types are known.
+                    method_impls.push((Rc::new(f.clone()), m.path.clone()));
+                }
                 TopLevel::Fun(f) => {
                     let symbol = qualified_symbol(&f.name, &m.path, &fn_name_modules);
                     // Same symbol => same name defined twice in the same module:
@@ -111,16 +123,193 @@ pub fn lower(modules: &[LoadedModule]) -> (Program, Vec<LowerError>) {
         });
     }
 
+    let mut primitive_methods: HashMap<(String, String), String> = HashMap::new();
+    inject_method_impls(
+        &method_impls,
+        &mut types,
+        &mut functions,
+        &mut primitive_methods,
+        &mut errors,
+    );
+
     let mut program = Program {
         types,
         functions,
         inits,
         module_imports,
         import_origins,
+        primitive_methods,
     };
     resolve_program_annotations(&mut program);
 
     (program, errors)
+}
+
+/// Attach each `fun T.m(...)` method implementation to its receiver type.
+///
+/// A method on a nominal user type is injected into that type's method table, so
+/// it is indistinguishable downstream from a method that was written inside the
+/// type body -- it dispatches, type-checks, and lowers through the same paths and
+/// is available wherever the type is in scope, with no separate import. The
+/// implementation must live in the same module that declares the type.
+///
+/// A method on a primitive or array receiver (`fun string.split`, `fun infer[].map`)
+/// is the standard library's privilege only: its body is stored as an ordinary
+/// function under a receiver-qualified symbol (so it never clashes with a free
+/// function or another class's method of the same name) and recorded in
+/// `primitive_methods` for dispatch. The receiver's `self` parameter is annotated
+/// with the receiver type so the body type-checks against it.
+fn inject_method_impls(
+    method_impls: &[(Rc<prepoly_parser::ast::FunDecl>, Vec<String>)],
+    types: &mut HashMap<String, TypeInfo>,
+    functions: &mut HashMap<String, FunInfo>,
+    primitive_methods: &mut HashMap<(String, String), String>,
+    errors: &mut Vec<LowerError>,
+) {
+    use prepoly_parser::ast::{FunDecl, Method, TypeExpr};
+    for (f, module) in method_impls {
+        let recv = f.recv.as_ref().expect("method impl has a receiver");
+        // Classify the receiver: an array `T[]`, a primitive scalar word, or a
+        // nominal user type named in this module.
+        let (recv_name, is_array) = match recv {
+            TypeExpr::Named(n, _) => (n.as_str(), false),
+            TypeExpr::Array(inner, None, _) => match inner.as_ref() {
+                TypeExpr::Named(n, _) => (n.as_str(), true),
+                _ => {
+                    errors.push(LowerError {
+                        message: "method receiver array element must be a type name".to_string(),
+                        span: f.span,
+                    });
+                    continue;
+                }
+            },
+            _ => {
+                errors.push(LowerError {
+                    message: "unsupported method receiver type".to_string(),
+                    span: f.span,
+                });
+                continue;
+            }
+        };
+
+        if let Some(class) = Type::primitive_class_of_name(recv_name, is_array) {
+            // Methods on primitive types are reserved to the standard library.
+            if module.first().map(String::as_str) != Some("std") {
+                errors.push(LowerError {
+                    message: format!(
+                        "methods on the primitive type `{recv_name}` can only be defined in the standard library"
+                    ),
+                    span: f.span,
+                });
+                continue;
+            }
+            // Annotate the leading `self` with the receiver type so the body
+            // type-checks against the concrete primitive/array.
+            let mut params = f.params.clone();
+            if let Some(first) = params.first_mut()
+                && first.name == "self"
+                && first.ty.is_none()
+            {
+                first.ty = Some(recv.clone());
+            }
+            let symbol = crate::types::prim_method_symbol(class, &f.name);
+            let key = (class.to_string(), f.name.clone());
+            if primitive_methods.contains_key(&key) {
+                errors.push(LowerError {
+                    message: format!("duplicate method `{}` on `{recv_name}`", f.name),
+                    span: f.span,
+                });
+                continue;
+            }
+            let decl = FunDecl {
+                name: f.name.clone(),
+                recv: f.recv.clone(),
+                params,
+                ret: f.ret.clone(),
+                body: f.body.clone(),
+                span: f.span,
+            };
+            functions.insert(
+                symbol.clone(),
+                FunInfo {
+                    signature: CallableSignature::from_function(&decl),
+                    decl: Rc::new(decl),
+                    module: module.clone(),
+                    symbol: symbol.clone(),
+                },
+            );
+            primitive_methods.insert(key, symbol);
+            continue;
+        }
+
+        // Nominal receiver: find the type of this name declared in this module.
+        let target = types
+            .iter()
+            .find(|(_, info)| info.name == recv_name && &info.module == module)
+            .map(|(symbol, _)| symbol.clone());
+        let Some(symbol) = target else {
+            // The type exists elsewhere (wrong module) or not at all.
+            let exists_elsewhere = types.values().any(|info| info.name == recv_name);
+            errors.push(LowerError {
+                message: if exists_elsewhere {
+                    format!(
+                        "method `{}` on `{recv_name}` must be defined in the module that declares `{recv_name}`",
+                        f.name
+                    )
+                } else {
+                    format!("unknown type `{recv_name}` for method `{}`", f.name)
+                },
+                span: f.span,
+            });
+            continue;
+        };
+        let method = Method {
+            name: f.name.clone(),
+            params: f.params.clone(),
+            ret: f.ret.clone(),
+            body: Some(f.body.clone()),
+            span: f.span,
+        };
+        let info = types.get_mut(&symbol).expect("symbol just resolved");
+        inject_nominal_method(info, method, errors);
+    }
+}
+
+/// Insert `method` into `info`'s method table(s). A record type takes the method
+/// directly; a sum type takes it into every variant (a `recv.m()` call requires
+/// every variant to provide `m`, so the body is shared across them). An existing
+/// method of the same name with a body is a genuine duplicate; a body-less
+/// signature (an interface requirement the type restated) is filled in.
+fn inject_nominal_method(
+    info: &mut TypeInfo,
+    method: prepoly_parser::ast::Method,
+    errors: &mut Vec<LowerError>,
+) {
+    let span = method.span;
+    let name = method.name.clone();
+    let type_name = info.name.clone();
+    let method_info = MethodInfo {
+        signature: CallableSignature::from_method(&method),
+        decl: Rc::new(method),
+    };
+    let insert = |methods: &mut HashMap<String, MethodInfo>, errors: &mut Vec<LowerError>| {
+        if methods.get(&name).is_some_and(|m| m.decl.body.is_some()) {
+            errors.push(LowerError {
+                message: format!("duplicate method `{type_name}.{name}`"),
+                span,
+            });
+        } else {
+            methods.insert(name.clone(), method_info.clone());
+        }
+    };
+    match &mut info.kind {
+        TypeKind::Record { methods, .. } => insert(methods, errors),
+        TypeKind::Sum { variants } => {
+            for v in variants {
+                insert(&mut v.methods, errors);
+            }
+        }
+    }
 }
 
 /// Count, per top-level name (selected by `extract`), how many distinct modules
@@ -713,8 +902,9 @@ mod tests {
 
     #[test]
     fn duplicate_record_method_is_reported() {
-        let errors =
-            lower_messages("type Counter = {\n    get() { return 1 }\n    get() { return 2 }\n}\n");
+        let errors = lower_messages(
+            "type Counter = {\n    n: int32\n}\nfun Counter.get() { return 1 }\nfun Counter.get() { return 2 }\n",
+        );
         assert!(
             errors
                 .iter()
@@ -750,7 +940,7 @@ mod tests {
     #[test]
     fn lowers_signatures_and_annotations_into_hir() {
         let ast = parse(
-            "type Wrapper = {\n    inner: Box\n}\ntype Box = {\n    value: int32\n    get(self) -> int32 { return self.value }\n}\nfun id(x: Box) -> int32 { return x.value }\n",
+            "type Wrapper = {\n    inner: Box\n}\ntype Box = {\n    value: int32\n}\nfun Box.get(self) -> int32 { return self.value }\nfun id(x: Box) -> int32 { return x.value }\n",
         )
         .expect("parse");
         let (program, errors) = lower(&[LoadedModule {
@@ -895,7 +1085,7 @@ mod tests {
     #[test]
     fn assigns_stable_unknowns_to_unannotated_method_body_params() {
         let ast = parse(
-            "type Box = {\n    value\n    set(self, value) {\n        self.value = value\n    }\n    make(value) {\n        return Self { value: value }\n    }\n}\n",
+            "type Box = {\n    value\n}\nfun Box.set(self, value) {\n    self.value = value\n}\nfun Box.make(value) {\n    return Self { value: value }\n}\n",
         )
         .expect("parse");
         let (program, errors) = lower(&[LoadedModule {
@@ -935,7 +1125,7 @@ mod tests {
     #[test]
     fn propagates_concrete_interface_method_constraints() {
         let ast = parse(
-            "type Setter = {\n    set(self, value: string) -> string\n}\ntype User: Setter = {\n    set(self, value) { return value }\n}\n",
+            "type Setter = {\n    set(self, value: string) -> string\n}\ntype User: Setter = {\n    name: string\n}\nfun User.set(self, value) { return value }\n",
         )
         .expect("parse");
         let (program, errors) = lower(&[LoadedModule {

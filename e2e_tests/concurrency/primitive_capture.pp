@@ -7,8 +7,9 @@
 // output is deterministic.
 type Box = {
     value: int64
-    set(self, n: int64) { self.value = n }
 }
+
+fun Box.set(self, n: int64) { self.value = n }
 
 fun main() {
     let tag = 7

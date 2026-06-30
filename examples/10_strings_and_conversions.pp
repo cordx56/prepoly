@@ -7,11 +7,11 @@ fun main() {
     let names = csv.split(",")
     println("count = {len(names)}")
     println("joined = {names.join(" | ")}")
-    let upper = to_upper("hello")
+    let upper = "hello".to_upper()
     println("upper = {upper}")
-    println("trimmed = '{trim("   spaced   ")}'")
-    println("starts = {starts_with("prepoly", "pre")}")
-    println("replace = {replace("a-b-c", "-", "+")}")
+    println("trimmed = '{"   spaced   ".trim()}'")
+    println("starts = {"prepoly".starts_with("pre")}")
+    println("replace = {"a-b-c".replace("-", "+")}")
 
     // Conversions: parse returns a Result, `from` converts between numbers.
     let n = int32.parse("123")!

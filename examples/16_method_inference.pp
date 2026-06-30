@@ -5,19 +5,19 @@
 type Account = {
     owner: string
     balance: int32
+}
 
-    open(owner: string) {
-        return Self { owner: owner, balance: 0 }
-    }
+fun Account.open(owner: string) {
+    return Self { owner: owner, balance: 0 }
+}
 
-    deposit(self, amount: int32) {
-        self.balance += amount
-        return self.balance
-    }
+fun Account.deposit(self, amount: int32) {
+    self.balance += amount
+    return self.balance
+}
 
-    label(self) {
-        return "{self.owner}: {self.balance}"
-    }
+fun Account.label(self) {
+    return "{self.owner}: {self.balance}"
 }
 
 fun main() {

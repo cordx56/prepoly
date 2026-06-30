@@ -169,9 +169,16 @@ impl<'p> Hm<'p> {
         let ret_ty = f.signature.ret_ty.clone();
         let span = f.signature.span;
         let context = format!("function `{}`", f.signature.name);
+        // A function whose first parameter is `self` is a method implemented with
+        // `fun T.m(...)` (the stdlib primitive-method form). Its `self` carries the
+        // receiver type so `self` in the body type-checks as a method's would.
+        let self_ty = params
+            .first()
+            .filter(|(name, _)| name == "self")
+            .map(|(_, ty)| ty.clone());
         self.check_callable(
             module,
-            None,
+            self_ty,
             params,
             &decl_params,
             &body,
@@ -1586,7 +1593,8 @@ mod tests {
     #[test]
     fn method_argument_type_is_checked() {
         let errs = errors(
-            "type Counter = {\n  n: int32\n  add(self, k: int32) {\n    self.n += k\n  }\n}\n\
+            "type Counter = {\n  n: int32\n}\n\
+             fun Counter.add(self, k: int32) {\n    self.n += k\n  }\n\
              fun f(c: Counter) {\n  c.add(\"hi\")\n}\n",
         );
         assert!(!errs.is_empty(), "method argument must match: {errs:?}");
@@ -1604,7 +1612,8 @@ mod tests {
     #[test]
     fn well_typed_record_method_and_match_check_clean() {
         let errs = errors(
-            "type Point = {\n  x: int32\n  y: int32\n  sum(self) -> int32 {\n    return self.x + self.y\n  }\n}\n\
+            "type Point = {\n  x: int32\n  y: int32\n}\n\
+             fun Point.sum(self) -> int32 {\n    return self.x + self.y\n  }\n\
              type Color = Red | Blue\n\
              fun area(p: Point) -> int32 {\n  return p.sum()\n}\n\
              fun pick(c: Color) -> int32 {\n  return match c { Red => 1, Blue => 2 }\n}\n",

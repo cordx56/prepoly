@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn method_body_param_unknown_keeps_call_site_argument_type() {
         let e = errs(
-            "type Box = {\n    value\n    set(self, value) {\n        self.value = value\n    }\n}\nfun main() {\n    let box = Box { value: 1 }\n    box.set(\"bad\")\n}\n",
+            "type Box = {\n    value\n}\nfun Box.set(self, value) {\n    self.value = value\n}\nfun main() {\n    let box = Box { value: 1 }\n    box.set(\"bad\")\n}\n",
         );
         assert!(
             e.iter()
@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn static_method_body_param_unknown_substitutes_return_field() {
         let e = errs(
-            "type Box = {\n    value\n    new(value) {\n        return Self { value: value }\n    }\n}\nfun main() {\n    let box = Box.new(1)\n    let s: string = box.value\n}\n",
+            "type Box = {\n    value\n}\nfun Box.new(value) {\n    return Self { value: value }\n}\nfun main() {\n    let box = Box.new(1)\n    let s: string = box.value\n}\n",
         );
         assert!(
             e.iter()
@@ -539,7 +539,7 @@ mod tests {
     #[test]
     fn interface_satisfied_ok() {
         let e = errs(
-            "type Showable = {\n    to_string(self) -> string\n}\ntype User: Showable = {\n    name: string\n    to_string(self) -> string { return self.name }\n}\n",
+            "type Showable = {\n    to_string(self) -> string\n}\ntype User: Showable = {\n    name: string\n}\nfun User.to_string(self) -> string { return self.name }\n",
         );
         assert!(e.is_empty(), "{e:?}");
     }
@@ -558,11 +558,34 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_parent_field_types_are_rejected() {
+        // Two interfaces declare `name` with different types; a type implementing
+        // both inherits a conflict that neither parent's independent check would
+        // catch (the implementing field is even unannotated).
+        let e = errs(
+            "type Person = { name: int32 }\ntype Animal = { name: string }\ntype Family: Person, Animal = { name }\n",
+        );
+        assert!(
+            e.iter()
+                .any(|m| m.contains("conflicting types for field `name`")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn agreeing_parent_field_types_are_ok() {
+        // Same field name, same type across both parents is not a conflict.
+        let e =
+            errs("type A = { id: int32 }\ntype B = { id: int32 }\ntype C: A, B = { id: int32 }\n");
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
     fn interface_method_parameter_covariance_is_rejected() {
         // A narrower method parameter than the interface declares is unsound:
         // a caller could pass an Animal the DogConsumer cannot handle.
         let e = errs(
-            "type Animal = { sound: string }\ntype Dog: Animal = { sound: string  breed: string }\ntype Consumer = { consume(self, a: Animal) -> void }\ntype DogConsumer: Consumer = {\n    consume(self, a: Dog) -> void { }\n}\n",
+            "type Animal = { sound: string }\ntype Dog: Animal = { sound: string  breed: string }\ntype Consumer = { consume(self, a: Animal) -> void }\ntype DogConsumer: Consumer = { }\nfun DogConsumer.consume(self, a: Dog) -> void { }\n",
         );
         assert!(
             e.iter()
@@ -574,7 +597,7 @@ mod tests {
     #[test]
     fn interface_method_signature_mismatch_is_reported() {
         let e = errs(
-            "type Show = {\n    show(self, x: int32) -> string\n}\ntype Bad: Show = {\n    show(self, x: string) -> int32 { return 1 }\n}\n",
+            "type Show = {\n    show(self, x: int32) -> string\n}\ntype Bad: Show = { }\nfun Bad.show(self, x: string) -> int32 { return 1 }\n",
         );
         assert!(
             e.iter()
@@ -634,7 +657,7 @@ mod tests {
     #[test]
     fn concrete_interface_method_param_constrains_unannotated_implementation_param() {
         let e = errs(
-            "type Setter = {\n    set(self, value: string) -> void\n}\ntype User: Setter = {\n    set(self, value) {\n        let n: int32 = value\n    }\n}\n",
+            "type Setter = {\n    set(self, value: string) -> void\n}\ntype User: Setter = { }\nfun User.set(self, value) {\n    let n: int32 = value\n}\n",
         );
         assert!(
             e.iter()
@@ -646,7 +669,7 @@ mod tests {
     #[test]
     fn concrete_interface_method_return_constrains_inferred_implementation_return() {
         let e = errs(
-            "type Show = {\n    show(self) -> string\n}\ntype Bad: Show = {\n    show(self) {\n        return 1\n    }\n}\n",
+            "type Show = {\n    show(self) -> string\n}\ntype Bad: Show = { }\nfun Bad.show(self) {\n    return 1\n}\n",
         );
         assert!(
             e.iter()
@@ -658,7 +681,7 @@ mod tests {
     #[test]
     fn interface_unknown_method_param_is_constrained_at_call_site() {
         let e = errs(
-            "type Consumer = {\n    consume(self, value)\n}\ntype StringConsumer: Consumer = {\n    consume(self, value: string) {\n    }\n}\nfun use(c: Consumer) {\n    c.consume(1)\n}\nfun main() {\n    let c = StringConsumer { }\n    use(c)\n}\n",
+            "type Consumer = {\n    consume(self, value)\n}\ntype StringConsumer: Consumer = { }\nfun StringConsumer.consume(self, value: string) {\n}\nfun use(c: Consumer) {\n    c.consume(1)\n}\nfun main() {\n    let c = StringConsumer { }\n    use(c)\n}\n",
         );
         assert!(
             e.iter()
@@ -670,7 +693,7 @@ mod tests {
     #[test]
     fn interface_unknown_method_return_is_constrained_at_call_site() {
         let e = errs(
-            "type Getter = {\n    get(self)\n}\ntype IntGetter: Getter = {\n    get(self) -> int32 {\n        return 1\n    }\n}\nfun use(g: Getter) {\n    let s: string = g.get()\n}\nfun main() {\n    let g = IntGetter { }\n    use(g)\n}\n",
+            "type Getter = {\n    get(self)\n}\ntype IntGetter: Getter = { }\nfun IntGetter.get(self) -> int32 {\n    return 1\n}\nfun use(g: Getter) {\n    let s: string = g.get()\n}\nfun main() {\n    let g = IntGetter { }\n    use(g)\n}\n",
         );
         assert!(
             e.iter()
@@ -721,7 +744,7 @@ mod tests {
     #[test]
     fn const_mutating_method_call_is_reported() {
         let e = errs(
-            "type Counter = {\n    count: int32\n    set(self, value: int32) {\n        self.count = value\n    }\n}\nfun main() {\n    const c = Counter { count: 1 }\n    c.set(2)\n}\n",
+            "type Counter = {\n    count: int32\n}\nfun Counter.set(self, value: int32) {\n    self.count = value\n}\nfun main() {\n    const c = Counter { count: 1 }\n    c.set(2)\n}\n",
         );
         assert!(
             e.iter()
@@ -862,7 +885,7 @@ mod tests {
     #[test]
     fn const_readonly_method_call_is_allowed() {
         let e = errs(
-            "type Counter = {\n    count: int32\n    get(self) -> int32 {\n        return self.count\n    }\n}\nfun main() {\n    const c = Counter { count: 1 }\n    let value: int32 = c.get()\n}\n",
+            "type Counter = {\n    count: int32\n}\nfun Counter.get(self) -> int32 {\n    return self.count\n}\nfun main() {\n    const c = Counter { count: 1 }\n    let value: int32 = c.get()\n}\n",
         );
         assert!(e.is_empty(), "{e:?}");
     }
@@ -884,7 +907,7 @@ mod tests {
     #[test]
     fn const_alias_mutating_method_is_rejected() {
         let e = errs(
-            "type Counter = {\n    n: int32\n    bump(self) { self.n = self.n + 1 }\n}\nfun main() {\n    const c = Counter { n: 0 }\n    let alias = c\n    alias.bump()\n}\n",
+            "type Counter = {\n    n: int32\n}\nfun Counter.bump(self) { self.n = self.n + 1 }\nfun main() {\n    const c = Counter { n: 0 }\n    let alias = c\n    alias.bump()\n}\n",
         );
         assert!(
             e.iter()
@@ -898,7 +921,7 @@ mod tests {
         // A mutating method on a field of a const value mutates the const, so it
         // is rejected even though the field is reached through a projection.
         let e = errs(
-            "type Inner = {\n    n: int32\n    bump(self) { self.n = self.n + 1 }\n}\ntype Outer = { inner: Inner }\nfun main() {\n    const o = Outer { inner: Inner { n: 0 } }\n    o.inner.bump()\n}\n",
+            "type Inner = {\n    n: int32\n}\nfun Inner.bump(self) { self.n = self.n + 1 }\ntype Outer = { inner: Inner }\nfun main() {\n    const o = Outer { inner: Inner { n: 0 } }\n    o.inner.bump()\n}\n",
         );
         assert!(
             e.iter()
@@ -910,7 +933,7 @@ mod tests {
     #[test]
     fn nested_const_field_readonly_method_is_allowed() {
         let e = errs(
-            "type Inner = {\n    n: int32\n    get(self) -> int32 { return self.n }\n}\ntype Outer = { inner: Inner }\nfun main() {\n    const o = Outer { inner: Inner { n: 0 } }\n    let x: int32 = o.inner.get()\n}\n",
+            "type Inner = {\n    n: int32\n}\nfun Inner.get(self) -> int32 { return self.n }\ntype Outer = { inner: Inner }\nfun main() {\n    const o = Outer { inner: Inner { n: 0 } }\n    let x: int32 = o.inner.get()\n}\n",
         );
         assert!(e.is_empty(), "{e:?}");
     }
@@ -1099,7 +1122,7 @@ mod tests {
     #[test]
     fn static_method_called_through_instance_is_rejected() {
         let e = errs(
-            "type P = {\n    x: int32\n    make() -> P { return P { x: 0 } }\n}\nfun main() {\n    let p = P { x: 1 }\n    p.make()\n}\n",
+            "type P = {\n    x: int32\n}\nfun P.make() -> P { return P { x: 0 } }\nfun main() {\n    let p = P { x: 1 }\n    p.make()\n}\n",
         );
         assert!(e.iter().any(|m| m.contains("is a static method")), "{e:?}");
     }
@@ -1138,7 +1161,7 @@ mod tests {
     #[test]
     fn structural_method_use_accepts_matching_record() {
         let e = errs(
-            "type Dog = {\n    name: string\n    speak(self) { println(self.name) }\n}\nfun greet(a) {\n    a.speak()\n}\nfun main() {\n    greet(Dog { name: \"Rex\" })\n}\n",
+            "type Dog = {\n    name: string\n}\nfun Dog.speak(self) { println(self.name) }\nfun greet(a) {\n    a.speak()\n}\nfun main() {\n    greet(Dog { name: \"Rex\" })\n}\n",
         );
         assert!(e.is_empty(), "{e:?}");
     }
@@ -1349,7 +1372,7 @@ mod tests {
     #[test]
     fn duplicate_method_parameter_is_reported() {
         let e = errs(
-            "type Box = {\n    value: int32\n    set(self, value: int32, value: int32) {\n        return value\n    }\n}\n",
+            "type Box = {\n    value: int32\n}\nfun Box.set(self, value: int32, value: int32) {\n    return value\n}\n",
         );
         assert!(
             e.iter()
@@ -1823,7 +1846,7 @@ mod tests {
     #[test]
     fn inferred_instance_method_return_is_used() {
         let e = errs(
-            "type Counter = {\n    count: int32\n    get(self) {\n        return self.count\n    }\n}\nfun main() {\n    let c = Counter { count: 1 }\n    let x: string = c.get()\n}\n",
+            "type Counter = {\n    count: int32\n}\nfun Counter.get(self) {\n    return self.count\n}\nfun main() {\n    let c = Counter { count: 1 }\n    let x: string = c.get()\n}\n",
         );
         assert!(
             e.iter()
@@ -1835,7 +1858,7 @@ mod tests {
     #[test]
     fn inferred_static_method_return_is_used() {
         let e = errs(
-            "type Counter = {\n    count: int32\n    make() {\n        return Self { count: 0 }\n    }\n}\nfun main() {\n    let x: int32 = Counter.make()\n}\n",
+            "type Counter = {\n    count: int32\n}\nfun Counter.make() {\n    return Self { count: 0 }\n}\nfun main() {\n    let x: int32 = Counter.make()\n}\n",
         );
         assert!(
             e.iter()
@@ -1847,7 +1870,7 @@ mod tests {
     #[test]
     fn variant_instance_method_return_is_used() {
         let e = errs(
-            "type Shape =\n    | Circle {\n        radius: float64\n        area(self) {\n            return self.radius * self.radius\n        }\n    }\n    | Square {\n        side: float64\n        area(self) {\n            return self.side * self.side\n        }\n    }\nfun main() {\n    let shape = Shape.Circle { radius: 2.0 }\n    let x: string = shape.area()\n}\n",
+            "type Shape =\n    | Circle {\n        radius: float64\n    }\n    | Square {\n        side: float64\n    }\nfun Shape.area(self) -> float64 {\n    return self.radius * self.radius\n}\nfun main() {\n    let shape = Shape.Circle { radius: 2.0 }\n    let x: string = shape.area()\n}\n",
         );
         assert!(
             e.iter()
@@ -1859,7 +1882,7 @@ mod tests {
     #[test]
     fn variant_static_method_return_is_used() {
         let e = errs(
-            "type Token =\n    | Ident {\n        make() {\n            return 1\n        }\n    }\nfun main() {\n    let x: string = Token.Ident.make()\n}\n",
+            "type Token =\n    | Ident\nfun Token.make() {\n    return 1\n}\nfun main() {\n    let x: string = Token.Ident.make()\n}\n",
         );
         assert!(
             e.iter()
@@ -1871,7 +1894,7 @@ mod tests {
     #[test]
     fn missing_common_variant_method_is_reported() {
         let e = errs(
-            "type Shape =\n    | Circle {\n        area(self) -> float64 {\n            return 1.0\n        }\n    }\n    | Point\nfun f(shape: Shape) {\n    return shape.area()\n}\n",
+            "type Shape =\n    | Circle {\n        area(self) -> float64\n    }\n    | Point\nfun f(shape: Shape) {\n    return shape.area()\n}\n",
         );
         assert!(
             e.iter()
@@ -1903,7 +1926,7 @@ mod tests {
     #[test]
     fn sum_common_field_access_uses_static_method_return_substitution() {
         let e = errs(
-            "type Wrapper =\n    | Empty {\n        value\n    }\n    | Some {\n        value\n    }\ntype Maker = {\n    make(value) {\n        return Wrapper.Some { value: value }\n    }\n}\nfun main() {\n    let w = Maker.make(1)\n    let s: string = w.value\n}\n",
+            "type Wrapper =\n    | Empty {\n        value\n    }\n    | Some {\n        value\n    }\ntype Maker = { }\nfun Maker.make(value) {\n    return Wrapper.Some { value: value }\n}\nfun main() {\n    let w = Maker.make(1)\n    let s: string = w.value\n}\n",
         );
         assert!(
             e.iter()
@@ -1927,7 +1950,7 @@ mod tests {
     #[test]
     fn variant_method_can_access_variant_specific_self_field() {
         let e = errs(
-            "type Shape =\n    | Circle {\n        radius: float64\n        radius_value(self) -> float64 {\n            return self.radius\n        }\n    }\n    | Point\n",
+            "type Shape =\n    | Circle {\n        radius: float64\n    }\n    | Point\nfun Shape.radius_value(self) -> float64 {\n    return self.radius\n}\n",
         );
         assert!(e.is_empty(), "{e:?}");
     }
@@ -2041,7 +2064,7 @@ mod tests {
     #[test]
     fn ufcs_free_function_on_record_is_accepted() {
         let e = errs(
-            "type Vec2 = {\n    x: float64\n    y: float64\n}\nfun length_sq(v: Vec2) -> float64 {\n    return v.x * v.x + v.y * v.y\n}\nfun main() {\n    let v = Vec2 { x: 3.0, y: 4.0 }\n    let r: float64 = v.length_sq()\n}\n",
+            "type Vec2 = {\n    x: float64\n    y: float64\n}\nfun length_sq(v: Vec2) -> float64 {\n    return v.x * v.x + v.y * v.y\n}\nfun main() {\n    let v = Vec2 { x: 3.0, y: 4.0 }\n    let r: float64 = length_sq(v)\n}\n",
         );
         assert!(e.is_empty(), "{e:?}");
     }
@@ -2049,7 +2072,7 @@ mod tests {
     #[test]
     fn ufcs_receiver_type_is_checked() {
         let e = errs(
-            "type Vec2 = {\n    x: float64\n}\ntype Other = {\n    z: float64\n}\nfun length_sq(v: Vec2) -> float64 {\n    return v.x\n}\nfun main() {\n    let o = Other { z: 1.0 }\n    let r = o.length_sq()\n}\n",
+            "type Vec2 = {\n    x: float64\n}\ntype Other = {\n    z: float64\n}\nfun length_sq(v: Vec2) -> float64 {\n    return v.x\n}\nfun main() {\n    let o = Other { z: 1.0 }\n    let r = length_sq(o)\n}\n",
         );
         assert!(
             e.iter()

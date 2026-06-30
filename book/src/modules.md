@@ -9,9 +9,10 @@ First, write `students/types.pp`:
 type _Person = {
     first_name: string,
     last_name: string,
-    display(self) {
-        return "{self.first_name} {self.last_name}"
-    },
+}
+
+fun _Person.display(self) {
+    return "{self.first_name} {self.last_name}"
 }
 
 type DegreeProgram =
@@ -28,11 +29,12 @@ type DegreeProgram =
 type Student: _Person = {
     first_name,
     last_name,
-    display(self) {
-        return "{self.id}: {self.first_name} {self.last_name}"
-    },
     id,
     program: DegreeProgram,
+}
+
+fun Student.display(self) {
+    return "{self.id}: {self.first_name} {self.last_name}"
 }
 ```
 

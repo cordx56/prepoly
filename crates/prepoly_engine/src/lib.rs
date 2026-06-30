@@ -33,6 +33,7 @@ pub use mono::{
     boundary_record_type_by_id, boundary_record_type_by_name, boundary_record_type_from_fields,
     check_instances, closure_symbol, cond_static_truthiness, float_kind_name, instance_symbol,
     int_kind_name, is_comparison, method_symbol, monomorphize, monomorphize_instance,
-    numeric_conv_ret, operand_type_of, parse_structural_descriptor, static_symbol,
+    numeric_conv_ret, operand_type_of, parse_structural_descriptor, prim_method_instance,
+    static_symbol,
 };
 pub use runtime::{MonomorphCache, RuntimeJit, resolve_or_compile};

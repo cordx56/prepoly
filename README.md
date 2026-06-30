@@ -29,8 +29,9 @@ Hello, world!
 
 - **Type inference everywhere.** Hindley-Milner inference means most code needs
   no annotations; types are resolved per function, just before it runs.
-- **Records and sum types** under one `type` keyword, with instance/static
-  methods and `Self`.
+- **Records and sum types** under one `type` keyword. Methods are implemented
+  with `fun T.m(...)`: a first `self` parameter makes an instance method,
+  otherwise it is static; `Self` refers to the type.
 - **Structural subtyping with interface contracts.** `type B: A` requires `B` to
   provide every member of `A`, checked at compile time; plain functions accept
   any value that has the members they use, with no inheritance.
@@ -55,9 +56,10 @@ Hello, world!
 
 ### Types and pattern matching
 
-`type` defines both records and sum types. A member with `(params)` is a method
-(instance if its first parameter is `self`, otherwise static); one without is a
-field. `match` over a sum type is checked for exhaustiveness.
+`type` defines both records and sum types. A member is a field, or a method
+*signature* (an interface requirement). Methods are implemented outside the type
+with `fun T.m(...)` — an instance method when its first parameter is `self`,
+otherwise static. `match` over a sum type is checked for exhaustiveness.
 
 ```
 type Shape =
@@ -84,8 +86,9 @@ type Showable = { to_string(self) -> string }
 
 type User: Showable = {
     name: string
-    to_string(self) -> string { return self.name }
 }
+
+fun User.to_string(self) -> string { return self.name }
 
 fun print_info(obj) { println(obj.to_string()) }   // accepts anything Showable
 ```
