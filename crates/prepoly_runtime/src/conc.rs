@@ -8,11 +8,59 @@
 //! they reach another thread (moved when unique, frozen when read-only, or cowned
 //! when mutated), so transferring the closure pointer across threads is sound.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 
 use crate::rt::{Header, OWNER_COWN};
+
+thread_local! {
+    /// Per-thread reentrancy depth for each cown this thread currently holds,
+    /// keyed by object address. The cross-thread spinlock byte
+    /// (`lock_byte`) is the contention gate between threads; this map records how
+    /// many times the *owning* thread has re-entered the lock so a nested `with`
+    /// on the same cown (e.g. the auto-acquire pass guarding both a spawned
+    /// closure body and the spawner's own access) does not deadlock against the
+    /// non-recursive spinlock. Reentrancy is inherently per-thread, so a
+    /// thread-local needs no synchronization and adds no cross-thread contention.
+    static LOCK_DEPTH: RefCell<HashMap<usize, u32>> = RefCell::new(HashMap::new());
+}
+
+/// The current thread's reentrancy depth for `obj`.
+fn lock_depth(obj: *mut Header) -> u32 {
+    LOCK_DEPTH.with(|d| d.borrow().get(&(obj as usize)).copied().unwrap_or(0))
+}
+
+/// Record that this thread has entered `obj`'s lock once more, returning the new
+/// depth.
+fn push_lock_depth(obj: *mut Header) -> u32 {
+    LOCK_DEPTH.with(|d| {
+        let mut d = d.borrow_mut();
+        let n = d.entry(obj as usize).or_insert(0);
+        *n += 1;
+        *n
+    })
+}
+
+/// Record that this thread has left `obj`'s lock once, returning the remaining
+/// depth (0 when the outermost acquisition is being released).
+fn pop_lock_depth(obj: *mut Header) -> u32 {
+    LOCK_DEPTH.with(|d| {
+        let mut d = d.borrow_mut();
+        match d.get_mut(&(obj as usize)) {
+            Some(n) if *n > 1 => {
+                *n -= 1;
+                *n
+            }
+            _ => {
+                d.remove(&(obj as usize));
+                0
+            }
+        }
+    })
+}
 
 /// Count of spawned threads that have not yet finished their heap work. The cycle
 /// collector reads this to defer collection while any spawned thread runs: it
@@ -65,14 +113,22 @@ unsafe fn lock_byte<'a>(obj: *mut Header) -> &'a AtomicU8 {
     unsafe { &*((obj as *mut u8).add(11) as *const AtomicU8) }
 }
 
-/// Acquire a cown's lock, spinning until it is free.
-/// Short critical sections make a spinlock the efficient choice; an uncontended
-/// acquire is a single successful compare-exchange.
+/// Acquire a cown's lock, spinning until it is free. The lock is *reentrant per
+/// thread*: a thread that already holds `obj` re-enters without spinning (only the
+/// recursion depth grows), so nested `with` scopes on the same cown within one
+/// thread do not deadlock against the non-recursive spinlock byte. Short critical
+/// sections make a spinlock the efficient choice; an uncontended first acquire is
+/// a single successful compare-exchange.
 ///
 /// # Safety
 /// `obj` must be a valid object header (or null).
 pub unsafe extern "C-unwind" fn pp_lock(obj: *mut Header) {
     if obj.is_null() {
+        return;
+    }
+    // A re-entry by the owning thread only bumps the depth; the byte stays held.
+    if lock_depth(obj) > 0 {
+        push_lock_depth(obj);
         return;
     }
     let lock = unsafe { lock_byte(obj) };
@@ -82,9 +138,12 @@ pub unsafe extern "C-unwind" fn pp_lock(obj: *mut Header) {
     {
         std::hint::spin_loop();
     }
+    push_lock_depth(obj);
 }
 
-/// Release a cown's lock.
+/// Release a cown's lock. Only the outermost release (depth returning to zero)
+/// actually frees the spinlock byte; inner releases of a reentrant acquisition
+/// just decrement the depth.
 ///
 /// # Safety
 /// `obj` must be a valid object header (or null).
@@ -92,7 +151,9 @@ pub unsafe extern "C-unwind" fn pp_unlock(obj: *mut Header) {
     if obj.is_null() {
         return;
     }
-    unsafe { lock_byte(obj) }.store(0, Ordering::Release);
+    if pop_lock_depth(obj) == 0 {
+        unsafe { lock_byte(obj) }.store(0, Ordering::Release);
+    }
 }
 
 /// The cown pointers held in a growable array `{ header16 | len@16 | data@32 }`,
@@ -263,6 +324,80 @@ mod tests {
             unsafe { *field(counter) },
             THREADS * PER_THREAD,
             "every increment must survive: no lost updates under contention"
+        );
+    }
+
+    #[test]
+    fn lock_is_reentrant_within_one_thread() {
+        // A thread that already holds a cown can acquire it again (a nested `with`
+        // on the same cown) without deadlocking against the non-recursive spinlock
+        // byte; the byte is released only when the outermost acquisition is. After
+        // a balanced nested lock/unlock the byte is free for another acquirer.
+        let _serial = serial_spawn();
+        let obj = alloc_counter();
+        unsafe { *field(obj) = 0 };
+
+        unsafe { pp_lock(obj) };
+        unsafe { pp_lock(obj) }; // re-entry: must return, not spin
+        unsafe { pp_lock(obj) };
+        // Innermost releases keep the lock held by this thread.
+        unsafe { pp_unlock(obj) };
+        unsafe { pp_unlock(obj) };
+        assert_eq!(
+            unsafe { lock_byte(obj) }.load(Ordering::Relaxed),
+            1,
+            "the byte stays held while an outer acquisition remains"
+        );
+        // Outermost release frees the byte.
+        unsafe { pp_unlock(obj) };
+        assert_eq!(
+            unsafe { lock_byte(obj) }.load(Ordering::Relaxed),
+            0,
+            "the outermost release frees the lock"
+        );
+    }
+
+    #[test]
+    fn reentrant_acquire_still_excludes_other_threads() {
+        // Reentrancy must not weaken cross-thread mutual exclusion: each spawned
+        // closure acquires the cown, then re-acquires it (a nested `with`),
+        // read-modify-writes the counter, and releases both. No increment may be
+        // lost despite the inner re-entry.
+        let _serial = serial_spawn();
+        let counter = alloc_counter();
+        unsafe { *field(counter) = 0 };
+
+        const THREADS: i64 = 8;
+        const PER_THREAD: i64 = 5000;
+
+        extern "C" fn work(env: *mut Header) {
+            let counter = unsafe { *((env as *mut u8).add(32) as *mut *mut Header) };
+            for _ in 0..PER_THREAD {
+                unsafe { pp_lock(counter) };
+                unsafe { pp_lock(counter) }; // nested re-entry on the same cown
+                unsafe {
+                    let f = field(counter);
+                    *f += 1;
+                }
+                unsafe { pp_unlock(counter) };
+                unsafe { pp_unlock(counter) };
+            }
+        }
+
+        for _ in 0..THREADS {
+            let clo = unsafe { pp_obj_alloc(40) as *mut Header };
+            unsafe {
+                *((clo as *mut u8).add(16) as *mut usize) = work as *const () as usize;
+                *((clo as *mut u8).add(32) as *mut *mut Header) = counter;
+            }
+            pp_spawn(clo);
+        }
+        pp_join_all();
+
+        assert_eq!(
+            unsafe { *field(counter) },
+            THREADS * PER_THREAD,
+            "reentrancy must not lose updates across threads"
         );
     }
 

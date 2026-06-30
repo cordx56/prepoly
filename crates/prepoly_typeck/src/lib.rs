@@ -779,6 +779,40 @@ mod tests {
     }
 
     #[test]
+    fn const_through_a_transitive_mutating_function_is_rejected() {
+        // Mutability is interprocedural: `g` mutates its parameter directly and
+        // `f` only forwards its parameter to `g`, so `f`'s parameter is mutable
+        // too. Passing a const through the forwarding `f` must be rejected, and
+        // the chain holds at any depth.
+        let two = errs(
+            "type P = { x: int32 }\nfun g(p) { p.x = 5 }\nfun f(p) { g(p) }\nconst c = P { x: 1 }\nfun main() {\n    f(c)\n}\n",
+        );
+        assert!(
+            two.iter()
+                .any(|m| m.contains("`c`") && m.contains("mutable")),
+            "a const forwarded one level into a mutator should be rejected: {two:?}"
+        );
+        let three = errs(
+            "type P = { x: int32 }\nfun deep(p) { p.x = 9 }\nfun mid(p) { deep(p) }\nfun top(p) { mid(p) }\nconst c = P { x: 1 }\nfun main() {\n    top(c)\n}\n",
+        );
+        assert!(
+            three
+                .iter()
+                .any(|m| m.contains("`c`") && m.contains("mutable")),
+            "a const forwarded three levels into a mutator should be rejected: {three:?}"
+        );
+        // A function that only reads its forwarded parameter places no mutability
+        // requirement, so a const argument is accepted.
+        let ok = errs(
+            "type P = { x: int32 }\nfun read(p) -> int32 { return p.x }\nfun fwd(p) -> int32 { return read(p) }\nconst c = P { x: 7 }\nfun main() {\n    println(fwd(c))\n}\n",
+        );
+        assert!(
+            ok.is_empty(),
+            "a const forwarded only into a reader must be allowed: {ok:?}"
+        );
+    }
+
+    #[test]
     fn mut_ref_annotation_requires_a_mutable_argument() {
         // A `ref(mut(T))` parameter is a mutable reference: it requires a mutable
         // argument even with no mutation in the body (a const is rejected, a `let`

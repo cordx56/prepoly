@@ -110,18 +110,30 @@ fn operand_is_alias(op: &Operand) -> bool {
 }
 
 /// Whether an rvalue *bound to a local* yields an alias of an existing managed
-/// object and so must be retained: a plain alias rvalue, or `to_string` of a
-/// string (its identity result is a second reference to the argument). The latter
-/// is recognized here rather than in the back end's leaf so that an unbound,
-/// transient `to_string` (e.g. inside `print`) is not retained and leaked.
+/// object and so must be retained: a plain alias rvalue, or `to_string`/`string.from`
+/// of a string (its identity result is a second reference to the argument). The
+/// conversion is recognized here rather than in the back end's leaf so that an
+/// unbound, transient conversion (e.g. inside `print`) is not retained and leaked.
 fn binds_alias(rv: &Rvalue, local_types: &[Type]) -> bool {
     if is_alias_rvalue(rv) {
         return true;
     }
-    if let Rvalue::Call(Callee::Builtin(name), args) = rv
-        && name == "to_string"
-        && let Some(arg) = args.first()
-    {
+    // Rendering a string is the identity, so the result aliases the argument. Both
+    // the implicit interpolation builtin (`to_string`) and the explicit `string.from`
+    // static call lower to that same identity leaf, so a bound result of either must
+    // be retained -- otherwise its later drop over-releases the borrowed argument
+    // (e.g. `let a = string.from(key)` used twice double-frees `key`). For a
+    // non-string argument the conversion allocates a fresh owned string, not an alias.
+    let str_identity_arg = match rv {
+        Rvalue::Call(Callee::Builtin(name), args) if name == "to_string" => args.first(),
+        Rvalue::Call(Callee::Static { ty, method }, args)
+            if ty == "string" && method == "from" =>
+        {
+            args.first()
+        }
+        _ => None,
+    };
+    if let Some(arg) = str_identity_arg {
         return matches!(operand_type_of(arg, local_types), Type::Str);
     }
     if let Rvalue::Call(Callee::Builtin(name), args) = rv
@@ -1192,11 +1204,19 @@ pub trait Codegen {
             // The driver's auto-acquire pass inserts these; both yield no value.
             "_freeze" | "_cown" => {
                 let ty = operand_type_of(&args[0], &f.local_types);
-                let v = self.codegen_operand(program, f, &args[0], &ty);
-                if name == "_freeze" {
-                    self.freeze(v);
-                } else {
-                    self.make_cown(v);
+                // Only a heap-managed capture has an object header to retag and an
+                // atomic reference count to promote. A primitive capture (int,
+                // float, bool) is copied by value across the spawn boundary, so it
+                // needs neither -- and feeding its scalar value to the runtime's
+                // `void(ptr)` promotion would be a type mismatch (and a wild header
+                // write). Skip promotion for such captures.
+                if rc_managed(unwrap_nullable(&ty)) {
+                    let v = self.codegen_operand(program, f, &args[0], &ty);
+                    if name == "_freeze" {
+                        self.freeze(v);
+                    } else {
+                        self.make_cown(v);
+                    }
                 }
                 self.unit()
             }
@@ -1207,6 +1227,14 @@ pub trait Codegen {
                 let obj = self.codegen_operand(program, f, &args[0], &obj_ty);
                 let cty = operand_type_of(&args[1], &f.local_types);
                 let clo = self.codegen_operand(program, f, &args[1], &cty);
+                // A `with` on a value that has no heap object -- a primitive (which
+                // the auto-acquire guard may wrap when a captured primitive was
+                // classified a cown, and which a user could write directly) -- has
+                // nothing to lock or put in a region: the value is copied, not
+                // shared, so it cannot race. Just run the closure on it.
+                if !rc_managed(unwrap_nullable(&obj_ty)) {
+                    return self.call_indirect(clo, &cty, &[obj]);
+                }
                 // `with([c1, c2], f)` acquires every cown in the array (in a
                 // deadlock-free order); `with(obj, f)` acquires the single cown.
                 let multi = matches!(obj_ty, Type::Slice(_) | Type::Array(..));

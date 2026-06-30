@@ -679,6 +679,9 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             }
         }
         let mut ret = ret_ann;
+        // A supported return annotation is authoritative; without one the return
+        // type is inferred by joining the return operands below.
+        let annotated = ret.is_some();
 
         // Closure parameter sources: a direct in-body call, or being passed to a
         // higher-order function (probed from the callee). Array pushes give the
@@ -706,15 +709,25 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                         &mut changed,
                     )?;
                 }
-                // A non-fallible callable's return type is the return operand's;
-                // a fallible one's is `Result<ok, err>`, inferred below.
+                // A non-fallible callable's return type is the join of its return
+                // operands'; a fallible one's is `Result<ok, err>`, inferred below.
+                // Joining (rather than freezing the first return seen) lets a
+                // `return null` path -- typed `never?` -- combine with a
+                // value-returning path to that value's nullable type, instead of one
+                // path alone fixing the result. A supported annotation overrides this.
                 if !fallible
+                    && !annotated
                     && let Terminator::Return(op) = &block.term
-                    && ret.is_none()
                     && let Some(t) = self.operand_type(op, &local_types)?
                 {
-                    ret = Some(t);
-                    changed = true;
+                    let merged = match &ret {
+                        Some(prev) => merge_return_types(prev, &t),
+                        None => t,
+                    };
+                    if ret.as_ref() != Some(&merged) {
+                        ret = Some(merged);
+                        changed = true;
+                    }
                 }
             }
             if fallible
@@ -2476,6 +2489,39 @@ fn collect_closure_passes(body: &MirBody) -> HashMap<LocalId, (String, Vec<Opera
 
 /// Scan a body for `arr.push(elem)` calls, mapping each array local (resolved
 /// through `Use` aliases) to a pushed element operand. Used to infer the element
+/// Join two return-operand types of an unannotated non-fallible callable. The
+/// front end has already checked the returns are mutually consistent, so this only
+/// reconciles the nullable/never lattice: a `return null` path (`never?`) combined
+/// with a value-returning path yields that value's nullable type, and an
+/// unreachable `Never` arm is absorbed by the other. Without this join the inferred
+/// return type would be whichever return block the fixpoint typed first, so a `get`
+/// returning `value` or `null` could freeze to the bare `value` type and then have
+/// its `null` path rejected as "returns a null value where `T` is required".
+fn merge_return_types(a: &Type, b: &Type) -> Type {
+    fn nullable_of(t: Type) -> Type {
+        match t {
+            Type::Nullable(_) => t,
+            other => Type::Nullable(Box::new(other)),
+        }
+    }
+    match (a, b) {
+        _ if a == b => a.clone(),
+        // `Never` types only a statically-unreachable path; the other arm wins.
+        (Type::Never, _) => b.clone(),
+        (_, Type::Never) => a.clone(),
+        (Type::Nullable(x), Type::Nullable(y)) => {
+            Type::Nullable(Box::new(merge_return_types(x, y)))
+        }
+        // One nullable and one bare value (commonly `never?` from `null` vs a real
+        // value): the result is nullable over the joined element type.
+        (Type::Nullable(x), y) => nullable_of(merge_return_types(x, y)),
+        (x, Type::Nullable(y)) => nullable_of(merge_return_types(x, y)),
+        // Two distinct non-null types should not occur in a checked program; keep
+        // the first so inference stays deterministic rather than panicking.
+        _ => a.clone(),
+    }
+}
+
 /// type of an empty array literal `[]` from how it is later filled.
 fn collect_array_pushes(body: &MirBody) -> HashMap<LocalId, Operand> {
     let alias = use_aliases(body);

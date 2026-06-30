@@ -26,7 +26,9 @@ use prepoly_lexer::{Span, line_col};
 use prepoly_parser::ast::{ImportDecl, Module, Stmt, TopLevel};
 use prepoly_parser::{ParseError, parse, parse_with_base};
 
-/// Embedded standard-library modules (implicit prelude).
+/// Embedded standard-library modules (implicit prelude). A name with a `/` is a
+/// nested module: its segments become the path under `std` (so `collections/hashmap`
+/// is the module `std.collections.hashmap`).
 const STDLIB: &[(&str, &str)] = &[
     ("io", include_str!("../../../std/io.pp")),
     ("array", include_str!("../../../std/array.pp")),
@@ -34,6 +36,10 @@ const STDLIB: &[(&str, &str)] = &[
     ("math", include_str!("../../../std/math.pp")),
     ("conv", include_str!("../../../std/conv.pp")),
     ("assert", include_str!("../../../std/assert.pp")),
+    (
+        "collections/hashmap",
+        include_str!("../../../std/collections/hashmap.pp"),
+    ),
 ];
 
 /// The Prepoly toolchain driver.
@@ -170,13 +176,13 @@ fn report_spawn_ownership(modules: &[LoadedModule]) {
         for d in decisions {
             if d.ownership == Ownership::Cown {
                 eprintln!(
-                    "warning: variable '{}' is auto-wrapped in cown with \
-                     function-level acquire{ctx}",
+                    "warning: variable '{}' is shared with a spawned task; every \
+                     access to it is auto-guarded by its cown lock{ctx}",
                     d.var
                 );
                 eprintln!(
-                    "  = note: for finer-grained concurrency, use explicit \
-                     'with(cown, (c) -> {{ ... }})'"
+                    "  = note: for finer-grained concurrency, acquire it explicitly \
+                     with 'with(cown, (c) -> {{ ... }})'"
                 );
             }
         }
@@ -358,10 +364,11 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         let label = format!("<std/{name}>");
         let base = sources.add(PathBuf::from(&label), (*src).to_string());
         let ast = parse_module(src, &label, base).map_err(|m| vec![m])?;
-        modules.push(LoadedModule {
-            path: vec!["std".into(), (*name).into()],
-            ast,
-        });
+        // A `/` in the name nests the module: its segments extend the path under
+        // `std`, so `collections/hashmap` becomes `std.collections.hashmap`.
+        let mut path = vec!["std".to_string()];
+        path.extend(name.split('/').map(str::to_string));
+        modules.push(LoadedModule { path, ast });
     }
 
     let base = sources.add(PathBuf::from(main_label), main_src.to_string());

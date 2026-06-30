@@ -81,6 +81,13 @@ pub fn free_vars_of(params: &[Param], body: &Block) -> Vec<String> {
     v
 }
 
+/// Apply `f` to every closure (its params and block body) nested anywhere in
+/// `body`. Used by the ownership analysis to find the bindings an inner closure
+/// introduces, which are not captures of an enclosing one.
+pub fn each_nested_closure(body: &Block, mut f: impl FnMut(&[Param], &Block)) {
+    each_closure_block(body, &mut f);
+}
+
 fn each_closure_block(b: &Block, f: &mut impl FnMut(&[Param], &Block)) {
     for s in &b.stmts {
         each_closure_stmt(s, f);

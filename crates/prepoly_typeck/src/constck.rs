@@ -27,12 +27,20 @@ type ConstScopes = Vec<HashMap<String, Binding>>;
 struct ConstChecker<'a> {
     program: &'a Program,
     mutating_methods: HashSet<(String, String)>,
-    /// Function name -> indices of parameters the body directly reassigns a
-    /// field/element of. Used to reject passing a const value into a position
-    /// that the callee mutates. This
-    /// is a conservative approximation: it covers direct `param.field = ...`
-    /// mutation, not transitive mutation through further calls.
+    /// Function storage symbol -> indices of parameters the function requires to
+    /// be mutable. A position is mutable when the body mutates the parameter
+    /// through its reference (`param.field = ...`, a builtin array mutator), the
+    /// parameter is annotated `ref(mut(T))`, *or* the body forwards the parameter
+    /// into a mutating position of another function. The last case is
+    /// interprocedural: the table is a fixpoint over the call graph (see
+    /// [`mutating_function_params`]), so passing a const value into a callee that
+    /// only mutates it indirectly is still rejected. Keyed by the unique symbol,
+    /// not the bare name, so same-named functions in different modules do not
+    /// collide.
     mutating_params: HashMap<String, HashSet<usize>>,
+    /// The module whose body is currently being checked, so a bare callee name at
+    /// a call site resolves to the same symbol the fixpoint keyed on.
+    current_module: Vec<String>,
     errors: Vec<TypeError>,
 }
 
@@ -41,6 +49,7 @@ pub fn check(program: &Program) -> Vec<TypeError> {
         program,
         mutating_methods: mutating_methods(program),
         mutating_params: mutating_function_params(program),
+        current_module: Vec::new(),
         errors: Vec::new(),
     };
     checker.check_program();
@@ -58,6 +67,7 @@ impl ConstChecker<'_> {
             // shadow any like-named global const. A `ref(T)` parameter is an
             // immutable reference, so it binds as const instead.
             let params = param_scope(&f.signature.params, false);
+            self.current_module = f.module.clone();
             self.check_block(&f.decl.body, &mut vec![globals.clone(), params]);
         }
         for t in self.program.types.values() {
@@ -71,8 +81,10 @@ impl ConstChecker<'_> {
                 let Some(body) = m.decl.body.as_ref() else {
                     continue;
                 };
-                // A method also binds `self` (mutable within the body).
+                // A method also binds `self` (mutable within the body). A method
+                // body resolves callee names against the type's home module.
                 let params = param_scope(&m.signature.params, true);
+                self.current_module = t.module.clone();
                 self.check_block(body, &mut vec![globals.clone(), params]);
             }
         }
@@ -320,7 +332,13 @@ impl ConstChecker<'_> {
         let Expr::Ident(fname, _) = callee else {
             return;
         };
-        let Some(indices) = self.mutating_params.get(fname).cloned() else {
+        // Resolve the bare callee name to the same storage symbol the fixpoint
+        // keyed on, as seen from the body's own module, so cross-module same-named
+        // functions do not alias.
+        let Some(symbol) = self.program.resolve_fn_symbol(&self.current_module, fname) else {
+            return;
+        };
+        let Some(indices) = self.mutating_params.get(&symbol).cloned() else {
             return;
         };
         for (i, arg) in args.iter().enumerate() {
@@ -423,15 +441,26 @@ fn mutating_methods(program: &Program) -> HashSet<(String, String)> {
         .collect()
 }
 
-/// Parameter indices each function requires to be mutable: either the body
-/// mutates the parameter through its reference (so the caller's value changes),
-/// or the parameter is annotated `mut(T)`. The mutability is thus inferred from
-/// use, and an explicit `mut(T)` annotation states the requirement directly. A
-/// caller must pass a mutable value (a `let`, not a `const`) for these positions.
-/// Conservative: mutation that propagates through a further nested call is not
-/// tracked.
+/// Parameter indices each function requires to be mutable, keyed by storage
+/// symbol. A position is mutable when the body mutates the parameter through its
+/// reference (so the caller's value changes), the parameter is annotated
+/// `ref(mut(T))`, or the body forwards the parameter into a mutating position of
+/// another function. A caller must pass a mutable value (a `let`, not a `const`)
+/// for these positions.
+///
+/// The forwarding case makes this interprocedural: the table is computed as a
+/// least fixpoint over the call graph. Each round, a parameter `p` of `f` becomes
+/// mutable if `f`'s body passes a place rooted at `p` into a callee position
+/// already known to be mutable. Iteration repeats until no set grows; because the
+/// sets only ever gain elements (monotone) and are bounded by the parameter
+/// count, it terminates regardless of `HashMap` iteration order.
+///
+/// Scope boundary: only free functions carry per-parameter entries here. Method
+/// `self`-mutation is tracked separately by [`mutating_methods`]; a method that
+/// forwards a non-`self` parameter into a mutating call is not yet covered.
 fn mutating_function_params(program: &Program) -> HashMap<String, HashSet<usize>> {
-    let mut map = HashMap::new();
+    // Seed with the direct (intraprocedural) rule.
+    let mut map: HashMap<String, HashSet<usize>> = HashMap::new();
     for f in program.functions.values() {
         let indices: HashSet<usize> = f
             .signature
@@ -449,10 +478,169 @@ fn mutating_function_params(program: &Program) -> HashMap<String, HashSet<usize>
             .map(|(i, _)| i)
             .collect();
         if !indices.is_empty() {
-            map.insert(f.signature.name.clone(), indices);
+            map.insert(f.symbol.clone(), indices);
+        }
+    }
+    // Propagate through forwarding calls until the fixpoint is reached.
+    loop {
+        let mut changed = false;
+        for f in program.functions.values() {
+            for (param_idx, p) in f.signature.params.iter().enumerate() {
+                if param_is_copied(p) {
+                    // A deep-copied parameter's mutation never reaches the caller,
+                    // so forwarding it does not make this position mutable.
+                    continue;
+                }
+                if map.get(&f.symbol).is_some_and(|s| s.contains(&param_idx)) {
+                    continue;
+                }
+                if forwards_param_to_mutating(program, f, &p.name, &map) {
+                    map.entry(f.symbol.clone()).or_default().insert(param_idx);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
         }
     }
     map
+}
+
+/// Whether `f`'s body passes a place rooted at parameter `root` into a position
+/// some callee already requires to be mutable (per the in-progress `mutating`
+/// table). This is the interprocedural step of [`mutating_function_params`]:
+/// `fun f(p) { g(p) }` where `g` mutates its parameter makes `p` mutable too.
+fn forwards_param_to_mutating(
+    program: &Program,
+    f: &prepoly_hir::FunInfo,
+    root: &str,
+    mutating: &HashMap<String, HashSet<usize>>,
+) -> bool {
+    let mut found = false;
+    forwards_in_block(program, &f.module, &f.decl.body, root, mutating, &mut found);
+    found
+}
+
+fn forwards_in_block(
+    program: &Program,
+    module: &[String],
+    block: &Block,
+    root: &str,
+    mutating: &HashMap<String, HashSet<usize>>,
+    found: &mut bool,
+) {
+    for stmt in &block.stmts {
+        if *found {
+            return;
+        }
+        match stmt {
+            Stmt::Let { value, .. } => {
+                forwards_in_expr(program, module, value, root, mutating, found)
+            }
+            Stmt::Assign { target, value, .. } => {
+                forwards_in_expr(program, module, target, root, mutating, found);
+                forwards_in_expr(program, module, value, root, mutating, found);
+            }
+            Stmt::While { cond, body, .. } => {
+                forwards_in_expr(program, module, cond, root, mutating, found);
+                forwards_in_block(program, module, body, root, mutating, found);
+            }
+            Stmt::For { iter, body, .. } => {
+                forwards_in_expr(program, module, iter, root, mutating, found);
+                forwards_in_block(program, module, body, root, mutating, found);
+            }
+            Stmt::Expr(e) | Stmt::Return(Some(e), _) => {
+                forwards_in_expr(program, module, e, root, mutating, found)
+            }
+            Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_) => {}
+        }
+    }
+}
+
+fn forwards_in_expr(
+    program: &Program,
+    module: &[String],
+    expr: &Expr,
+    root: &str,
+    mutating: &HashMap<String, HashSet<usize>>,
+    found: &mut bool,
+) {
+    if *found {
+        return;
+    }
+    match expr {
+        // A free-function call `g(.., arg_i, ..)`: if `g`'s position `i` is
+        // mutable and `arg_i` is a place rooted at `root`, the parameter escapes
+        // into a mutating position.
+        Expr::Call(callee, args, _) => {
+            if let Expr::Ident(fname, _) = callee.as_ref()
+                && let Some(symbol) = program.resolve_fn_symbol(module, fname)
+                && let Some(indices) = mutating.get(&symbol)
+            {
+                for (i, arg) in args.iter().enumerate() {
+                    if indices.contains(&i) && root_ident(&arg.expr) == Some(root) {
+                        *found = true;
+                        return;
+                    }
+                }
+            }
+            forwards_in_expr(program, module, callee, root, mutating, found);
+            for arg in args {
+                forwards_in_expr(program, module, &arg.expr, root, mutating, found);
+            }
+        }
+        Expr::Unary(_, inner, _) | Expr::ErrorProp(inner, _) | Expr::Field(inner, _, _) => {
+            forwards_in_expr(program, module, inner, root, mutating, found)
+        }
+        Expr::Binary(_, left, right, _) | Expr::Range(left, right, _) => {
+            forwards_in_expr(program, module, left, root, mutating, found);
+            forwards_in_expr(program, module, right, root, mutating, found);
+        }
+        Expr::Index(base, idx, _) => {
+            forwards_in_expr(program, module, base, root, mutating, found);
+            forwards_in_expr(program, module, idx, root, mutating, found);
+        }
+        Expr::Closure(_, body, _) => forwards_in_expr(program, module, body, root, mutating, found),
+        Expr::Array(items, _) => {
+            for item in items {
+                forwards_in_expr(program, module, item, root, mutating, found);
+            }
+        }
+        Expr::TypeLit(_, fields, _) | Expr::VariantLit(_, _, fields, _) => {
+            for (_, value) in fields {
+                forwards_in_expr(program, module, value, root, mutating, found);
+            }
+        }
+        Expr::If(cond, then, els, _) => {
+            forwards_in_expr(program, module, cond, root, mutating, found);
+            forwards_in_block(program, module, then, root, mutating, found);
+            if let Some(els) = els {
+                forwards_in_expr(program, module, els, root, mutating, found);
+            }
+        }
+        Expr::IfLet(_, scrut, then, els, _) => {
+            forwards_in_expr(program, module, scrut, root, mutating, found);
+            forwards_in_block(program, module, then, root, mutating, found);
+            if let Some(els) = els {
+                forwards_in_expr(program, module, els, root, mutating, found);
+            }
+        }
+        Expr::Match(scrut, arms, _) => {
+            forwards_in_expr(program, module, scrut, root, mutating, found);
+            for arm in arms {
+                forwards_in_expr(program, module, &arm.body, root, mutating, found);
+            }
+        }
+        Expr::Block(block, _) => forwards_in_block(program, module, block, root, mutating, found),
+        Expr::Int(..)
+        | Expr::Float(..)
+        | Expr::Str(..)
+        | Expr::Bool(..)
+        | Expr::Null(_)
+        | Expr::Ident(..)
+        | Expr::SelfExpr(_) => {}
+    }
 }
 
 /// Whether a parameter is a mutable reference (`ref(mut(T))`).

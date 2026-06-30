@@ -377,6 +377,23 @@ fn dispatch_specializes_one_function_for_two_types() {
 }
 
 #[test]
+fn unannotated_value_or_null_return_infers_nullable() {
+    // A function that returns a value on one path and `null` on another must infer
+    // a nullable return type by JOINING both returns, not freeze to whichever return
+    // block the fixpoint types first. Freezing to the bare value type made the
+    // `null` path fail the "returns a null value where `int32` is required" backstop;
+    // freezing to the null path's `never?` made a found value read back as `never`.
+    let out = render(
+        "fun first(xs: int32[]) {\n  for x in xs {\n    return x\n  }\n  return null\n}\n\
+         fun use_it() {\n  return first([1, 2, 3])\n}\n",
+    );
+    assert!(
+        out.contains("-> int32?"),
+        "return must join to int32?: {out}"
+    );
+}
+
+#[test]
 fn monomorphize_skips_unsupported_roots() {
     // Monomorphization is best effort: a root outside the typed subset (here a
     // function using the unsupported `input` builtin) is skipped, not fatal, so
