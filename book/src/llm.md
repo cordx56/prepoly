@@ -319,10 +319,10 @@ import geometry.vec.{ Vec2, dot }
 - Strings: `split`, `join`, `trim`, `starts_with`, `ends_with`, `find`,
   `replace`, `chars`, `to_upper`, `to_lower`, `len`.
 - Math: `abs`, `min`, `max`, `sqrt`, `floor`, `ceil`, `pow`.
-- Collections: `HashMap` (open-addressing hash map). Because there are no generic
-  type parameters, construct it with witness samples that only fix the key/value
-  types: `let m = HashMap.new("", 0)` is an empty `string -> int32` map (the
-  samples are not stored). Methods: `set(k, v)`, `get(k)` (nullable), `get_or(k,
+- Collections: `HashMap` (open-addressing hash map). `let m = HashMap.new()` takes
+  no arguments; the key/value types are inferred from the first `set` (so
+  `let m = HashMap.new(); m.set("a", 1)` is a `string -> int32` map). Methods:
+  `set(k, v)`, `get(k)` (nullable), `get_or(k,
   default)`, `contains_key(k)`, `delete(k)`, `size()`, `is_empty()`, `keys()`,
   `values()`, `pairs()`, `clear()`, and `HashMap.from_pairs([[k, v], ...])`.
 - `assert(cond, msg?)` aborts when `cond` is false (`msg` is optional).

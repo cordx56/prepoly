@@ -29,7 +29,7 @@ pub use analysis::{fallible_block, free_vars_of};
 pub use cfg::{BasicBlock, LocalDecl, MirBody, MirStmt, Terminator};
 pub use display::{body_to_string, program_to_string};
 pub use ids::{BlockId, ClosureId, LocalId};
-pub use lower::{lower_body, lower_program};
+pub use lower::{lower_body, lower_program, lower_program_with_types};
 pub use program::{MirClosure, MirFunction, MirInit, MirMethod, MirProgram};
 pub use ty::TypeRef;
 pub use value::{Callee, Literal, Operand, Place, Projection, Rvalue};

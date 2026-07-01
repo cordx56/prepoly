@@ -25,8 +25,12 @@ pub use value::Value;
 /// `print`/`println` output to `out`. Mirrors `prepoly_jit_llvm::run`'s contract:
 /// a program whose `main` reaches a construct outside the typed subset is rejected
 /// rather than partially executed.
-pub fn run(program: &Program, out: &mut dyn Write) -> Result<(), String> {
-    let mir = prepoly_mir::lower_program(program);
+pub fn run(
+    program: &Program,
+    expr_types: &std::collections::HashMap<prepoly_hir::Span, prepoly_hir::Type>,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let mir = prepoly_mir::lower_program_with_types(program, expr_types);
     let mono = prepoly_engine::monomorphize(&mir, program)
         .map_err(|e| format!("typed lowering failed: {e}"))?;
     if program.functions.contains_key("main") && mono.lookup("main").is_none() {

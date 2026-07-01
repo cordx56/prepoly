@@ -4,7 +4,7 @@
 
 fun main() {
     // string -> int32: count words, reusing each loop key in get_or + set.
-    let counts = HashMap.new("", 0)
+    let counts = HashMap.new()
     let words = ["a", "b", "a", "c", "a", "b"]
     for w in words {
         counts.set(w, counts.get_or(w, 0) + 1)
@@ -14,7 +14,7 @@ fun main() {
     println("deleted_a={counts.delete("a")} has_a={counts.contains_key("a")} size={counts.size()}")
 
     // int32 -> int32 with enough entries to force several resizes.
-    let big = HashMap.new(0, 0)
+    let big = HashMap.new()
     let k = 0
     while k < 50 {
         big.set(k, k * k)

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use prepoly_hir::Type;
+use prepoly_hir::{NominalType, Substitution, Type};
 
 #[derive(Default)]
 pub struct Subst {
@@ -69,8 +69,23 @@ impl Subst {
                 Box::new(self.resolve_deep(&ret)),
             ),
             Type::Tuple(elems) => Type::Tuple(elems.iter().map(|t| self.resolve_deep(t)).collect()),
+            // A nominal type carries the concrete types of its unannotated fields
+            // (and a Result's payloads) in its substitution; resolve those too, so
+            // e.g. `HashMap<entries=?[]>` whose element was pinned by a `push`
+            // becomes `HashMap<entries=_Entry<...>[]>`.
+            Type::Record(n) => Type::Record(self.resolve_nominal_deep(&n)),
+            Type::Sum(n) => Type::Sum(self.resolve_nominal_deep(&n)),
             other => other,
         }
+    }
+
+    /// Deep-resolve every type in a nominal's substitution.
+    fn resolve_nominal_deep(&self, n: &NominalType) -> NominalType {
+        let mut substitution = Substitution::empty();
+        for (key, ty) in n.substitution.iter() {
+            substitution.insert(key, self.resolve_deep(ty));
+        }
+        NominalType::with_substitution(n.id, n.name.clone(), substitution)
     }
 
     /// Unify two types, extending the substitution. Returns an error message on
@@ -148,6 +163,38 @@ impl Subst {
                     tracing::debug!(left = %n1, right = %n2, "sum type mismatch");
                     Err(format!("cannot unify sum types `{n1}` and `{n2}`"))
                 }
+            }
+            // Two records of the same nominal unify by unifying the shared entries
+            // of their generic substitutions, so a record's *inferred* field types
+            // propagate: storing an `_Entry<string, string>` into an element typed
+            // `_Entry<?, ?>` refines the element's open key/value variables. A key
+            // present on only one side is a sparser instance (a bare nominal, or a
+            // record whose annotated field is absent from the dynamic
+            // substitution) and is left unconstrained.
+            // Two records of the same *declared* nominal (id >= 0) unify by
+            // unifying the shared entries of their generic substitutions, so a
+            // record's inferred field types propagate: storing an `_Entry<string,
+            // string>` into an element typed `_Entry<?, ?>` refines the element's
+            // open key/value variables. Note this is NOT `same_nominal`, which also
+            // requires identical substitutions and so would never relate two
+            // differently-instantiated records -- the whole point here. Structural
+            // records (the synthetic negative `STRUCTURAL_RECORD_ID`) are excluded:
+            // their field-presence/compatibility is checked structurally elsewhere,
+            // not by unification, so they keep the strict `a == b` behavior below.
+            (Type::Record(n1), Type::Record(n2)) if n1.id >= 0 && n2.id >= 0 => {
+                if n1.id != n2.id {
+                    tracing::debug!(left = %n1, right = %n2, "record type mismatch");
+                    return Err(format!("cannot unify record types `{n1}` and `{n2}`"));
+                }
+                let pairs: Vec<(Type, Type)> = n1
+                    .substitution
+                    .iter()
+                    .filter_map(|(k, v1)| n2.substitution.get(k).map(|v2| (v1.clone(), v2.clone())))
+                    .collect();
+                for (v1, v2) in pairs {
+                    self.unify(&v1, &v2)?;
+                }
+                Ok(())
             }
             _ if a == b => Ok(()),
             _ => {

@@ -7,6 +7,7 @@
 //! block. Call routing, field/element reads, literals, and constructors mirror
 //! the AST-walking codegen so the two stay behaviorally equivalent.
 
+use prepoly_hir::Type;
 use prepoly_parser::ast::{Arg, BinOp, Block, Expr, Param, Stmt, StrSeg};
 
 use crate::analysis::free_vars_of;
@@ -15,6 +16,16 @@ use crate::ids::{BlockId, LocalId};
 use crate::lower::{FnLower, ProgramCtx};
 use crate::program::MirClosure;
 use crate::value::{Callee, Literal, Operand, Place, Projection, Rvalue};
+
+/// Whether a checker-resolved call result is worth seeding onto its result
+/// local: a record/sum whose field types the back end could otherwise fail to
+/// infer for a witness-free constructor (the array fields inside are seeded from
+/// the record's substitution). Bare arrays/scalars/strings the back end always
+/// re-derives from how the value is built and used, so they keep an inferred
+/// `Var` -- seeding them is unnecessary and perturbs value ownership.
+fn is_seedable_result(ty: &Type) -> bool {
+    matches!(ty, Type::Record(_) | Type::Sum(_))
+}
 
 impl<'a, 'p> FnLower<'a, 'p> {
     /// Lower an expression to an operand naming its value.
@@ -32,9 +43,17 @@ impl<'a, 'p> FnLower<'a, 'p> {
                 self.b.emit(Rvalue::Un(*op, v))
             }
             Expr::Binary(op, a, b, _) => self.lower_binary(*op, a, b),
-            Expr::Call(callee, args, _) => {
+            Expr::Call(callee, args, span) => {
                 let rv = self.lower_call(callee, args);
-                self.b.emit(rv)
+                // A call whose checker-resolved result is a constructed aggregate
+                // (a record/sum/array) seeds its result local `Known`, so the back
+                // end follows the instance type the caller fixed -- the path a
+                // witness-free constructor (`HashMap.new()`) depends on. Other
+                // calls keep an inferred `Var` local.
+                match self.ctx.expr_type(*span) {
+                    Some(ty) if is_seedable_result(ty) => self.b.emit_known(rv, ty.clone()),
+                    _ => self.b.emit(rv),
+                }
             }
             Expr::Field(base, name, _) => self.lower_field(base, name),
             Expr::Index(base, idx, _) => self.lower_index(base, idx),

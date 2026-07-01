@@ -9,7 +9,9 @@
 
 use std::collections::HashMap;
 
-use prepoly_hir::{CallableSignature, FieldInfo, Type, TypeInfo, TypeKind, VariantInfo};
+use prepoly_hir::{
+    CallableSignature, FieldInfo, Substitution, Type, TypeInfo, TypeKind, VariantInfo,
+};
 
 /// Assigns stable `unknown_N` names to inference variables, numbered by order
 /// of first appearance. Share one namer across everything that should agree on
@@ -182,17 +184,34 @@ pub fn render_signature_into(
     format!("fun {}({params}) -> {ret}", sig.name)
 }
 
-/// Render a type definition for hover over a type name: a record's fields or a
-/// sum type's variants, each on its own line.
+/// Render a type definition for hover over a type *name*: a record's fields and
+/// methods, or a sum type's variants. Field types come from the declaration.
 pub fn render_type_def(info: &TypeInfo) -> String {
+    render_type_def_with(info, &Substitution::empty())
+}
+
+/// Render a type definition, taking each record field's type from `substitution`
+/// when it carries one. An instance hover passes the value's substitution so a
+/// field whose declared type is open (`HashMap`'s `entries`) shows the concrete
+/// type that instance pinned (e.g. `_Entry<...>[]`), while a bare type-name hover
+/// passes an empty substitution and shows the declaration.
+///
+/// Members whose name begins with `_` are implementation details, not part of the
+/// type's surface, and are omitted.
+pub fn render_type_def_with(info: &TypeInfo, substitution: &Substitution) -> String {
     let mut namer = UnknownNamer::default();
     match &info.kind {
         TypeKind::Record { fields, methods } => {
             let mut body = String::new();
-            for f in fields {
-                body.push_str(&format!("    {}\n", render_field(f, &mut namer)));
+            for f in fields.iter().filter(|f| is_public_member(&f.name)) {
+                let resolved = substitution.get(&f.name).or(f.resolved_ty.as_ref());
+                let line = match resolved {
+                    Some(t) => format!("{}: {}", f.name, render_type(t, &mut namer)),
+                    None => f.name.clone(),
+                };
+                body.push_str(&format!("    {line}\n"));
             }
-            let mut names: Vec<&String> = methods.keys().collect();
+            let mut names: Vec<&String> = methods.keys().filter(|n| is_public_member(n)).collect();
             names.sort();
             for name in names {
                 let sig = render_signature(&methods[name].signature);
@@ -203,12 +222,20 @@ pub fn render_type_def(info: &TypeInfo) -> String {
         TypeKind::Sum { variants } => {
             let body = variants
                 .iter()
+                .filter(|v| is_public_member(&v.name))
                 .map(|v| format!("    {}", render_variant(v, &mut namer)))
                 .collect::<Vec<_>>()
                 .join("\n");
             format!("type {} =\n{body}", info.name)
         }
     }
+}
+
+/// Whether a field/method/variant name is part of a type's public surface. A
+/// leading underscore marks an implementation detail (e.g. `HashMap._find`), which
+/// hover and the type view omit.
+fn is_public_member(name: &str) -> bool {
+    !name.starts_with('_')
 }
 
 fn render_field(f: &FieldInfo, namer: &mut UnknownNamer) -> String {

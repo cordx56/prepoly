@@ -272,7 +272,7 @@ impl<'p, 'm> Interp<'p, 'm> {
                 let va = self.eval_operand(f, frame, a, dest_ty)?;
                 Ok(eval_unary(*op, &va, dest_ty))
             }
-            Rvalue::Call(callee, args) => self.eval_call(f, frame, callee, args),
+            Rvalue::Call(callee, args) => self.eval_call(f, frame, callee, args, dest_ty),
             Rvalue::Record { fields, .. } => {
                 let mut map = HashMap::with_capacity(fields.len());
                 for (name, op) in fields {
@@ -406,6 +406,7 @@ impl<'p, 'm> Interp<'p, 'm> {
         frame: &mut Frame,
         callee: &Callee,
         args: &[Operand],
+        dest_ty: &Type,
     ) -> Result<Value, String> {
         let arg_types: Vec<Type> = args
             .iter()
@@ -503,7 +504,10 @@ impl<'p, 'm> Interp<'p, 'm> {
             Callee::Static { ty, .. } if ty == "File" => {
                 return Err("file standard streams are not supported by the REPL runtime".into());
             }
-            Callee::Static { ty, method } => static_symbol(ty, method, &arg_types),
+            // The destination type keys a return-polymorphic, no-argument
+            // constructor (a witness-free `new()`) to the instance the
+            // monomorphizer created for this result type.
+            Callee::Static { ty, method } => static_symbol(ty, method, &arg_types, Some(dest_ty)),
             Callee::Free(base) if base == "print" || base == "println" => {
                 return self.eval_io(f, frame, base, args);
             }

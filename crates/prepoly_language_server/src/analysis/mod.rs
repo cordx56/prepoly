@@ -32,6 +32,9 @@ use world::SourceMap;
 pub struct FullAnalysis {
     pub program: Program,
     pub typed: TypedProgram,
+    /// Per record-type generalized scheme, keyed by type name; rendered by hover
+    /// to show a method's signature over the type's inferred parameters.
+    pub schemes: std::collections::HashMap<String, prepoly_hir::TypeScheme>,
     pub sources: SourceMap,
     pub main_base: usize,
     pub main_ast: Module,
@@ -80,7 +83,8 @@ impl DocAnalyzer {
         } else {
             reduce_main(&world.main_ast, &new_items, &d.reduced)
         };
-        let (_program, _typed, run_diags) = run_pipeline(&world.context_modules, main_for_run);
+        let (_program, _typed, _schemes, run_diags) =
+            run_pipeline(&world.context_modules, main_for_run);
 
         // Attribute this run's diagnostics to the items they fall in; the rest
         // (dependency-module errors) become the refreshed global bucket.
@@ -122,10 +126,11 @@ impl DocAnalyzer {
     pub fn analyze_full(&self, text: &str) -> Option<FullAnalysis> {
         let world = world::build(&self.path, text).ok()?;
         let main = world.main_ast.clone();
-        let (program, typed, _diags) = run_pipeline(&world.context_modules, main);
+        let (program, typed, schemes, _diags) = run_pipeline(&world.context_modules, main);
         Some(FullAnalysis {
             program,
             typed,
+            schemes,
             sources: world.sources,
             main_base: world.main_base,
             main_ast: world.main_ast,
@@ -136,10 +141,16 @@ impl DocAnalyzer {
 /// Run lex/parse-fed lowering, import resolution, and type checking on
 /// `context` (prelude + dependencies) plus `main`. Returns the program, the
 /// typed-expression sidecar, and all diagnostics as `(message, global span)`.
+#[allow(clippy::type_complexity)]
 fn run_pipeline(
     context: &[LoadedModule],
     main: Module,
-) -> (Program, TypedProgram, Vec<(String, Span)>) {
+) -> (
+    Program,
+    TypedProgram,
+    std::collections::HashMap<String, prepoly_hir::TypeScheme>,
+    Vec<(String, Span)>,
+) {
     let mut modules = context.to_vec();
     modules.push(LoadedModule {
         path: vec!["main".into()],
@@ -158,7 +169,7 @@ fn run_pipeline(
     for e in &analysis.errors {
         diags.push((e.message.clone(), e.span));
     }
-    (program, analysis.typed, diags)
+    (program, analysis.typed, analysis.schemes, diags)
 }
 
 /// Rebuild the document module keeping only the items whose index is in `keep`.

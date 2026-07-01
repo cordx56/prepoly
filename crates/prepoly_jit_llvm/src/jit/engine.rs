@@ -20,8 +20,9 @@ use prepoly_runtime::symbols;
 pub fn run(
     program: &Program,
     _int_lit_types: &std::collections::HashMap<prepoly_hir::Span, prepoly_hir::IntKind>,
+    expr_types: &std::collections::HashMap<prepoly_hir::Span, prepoly_hir::Type>,
 ) -> Result<(), String> {
-    let mir = prepoly_mir::lower_program(program);
+    let mir = prepoly_mir::lower_program_with_types(program, expr_types);
     let mono = prepoly_engine::monomorphize(&mir, program)
         .map_err(|e| format!("typed lowering failed: {e}"))?;
     // No Value fallback: a program outside the typed subset is rejected.

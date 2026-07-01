@@ -111,6 +111,16 @@ impl BodyBuilder {
         Operand::Local(tmp)
     }
 
+    /// Like [`emit`](Self::emit), but the temporary's type is fixed to `ty`
+    /// (a `Known` local). Lowering uses this to carry a type the checker already
+    /// resolved -- the result type of a call -- so monomorphization seeds it
+    /// instead of inferring, which a witness-free constructor's caller needs.
+    pub fn emit_known(&mut self, rv: Rvalue, ty: prepoly_hir::Type) -> Operand {
+        let tmp = self.fresh_local_typed(None, ty);
+        self.push(MirStmt::Assign(tmp, rv));
+        Operand::Local(tmp)
+    }
+
     /// Materialize an operand as a local: locals pass through; constants are
     /// stored into a fresh temporary so the result can be used as a place base
     /// or a projection target.

@@ -9,8 +9,8 @@ pub mod types;
 
 pub use hir::{
     CallableSignature, FieldInfo, FunInfo, LoadedModule, MethodInfo, ModuleInit, ParamInfo,
-    Program, QualifiedName, RESULT_TYPE_ID, TypeInfo, TypeKind, VariantInfo, qualify,
-    resolve_qualified,
+    Program, QualifiedName, RESULT_TYPE_ID, SchemeMethod, TypeInfo, TypeKind, TypeScheme,
+    VariantInfo, qualify, resolve_qualified,
 };
 pub use lower::{LowerError, lower};
 pub use typed::{Constness, Ownership, RegionId, TypedExpr, TypedExprKind, TypedProgram};

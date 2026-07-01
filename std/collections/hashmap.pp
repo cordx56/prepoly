@@ -4,14 +4,14 @@
 // may be of any type. Part of the standard library. The table's operations are
 // implemented as methods with `fun HashMap.m(...)` in this same module.
 //
-// Construction takes two *witness* values rather than being empty by default:
-// Prepoly has no generic type parameters, and the typed back end fixes an array's
-// element type from a concretely-typed element in the constructing function. An
-// empty `new()` could not pin the key/value types, so `new(sample_key,
-// sample_value)` uses the samples only to fix those types -- they are never stored,
-// and the returned map is empty. The samples must have the same types as the keys
-// and values later inserted (e.g. `HashMap.new("", 0)` for a `string -> int32`
-// map; note `0` is `int32`, so use an `int64` witness for `int64` values).
+// `HashMap.new()` takes no arguments. Open addressing stores at a computed slot
+// index (`entries[idx] = ..`) rather than appending, so the slot array must be
+// allocated up front; it is pre-filled with `null`, which sizes it without
+// needing a sample value. The key/value types are inferred from the first
+// `set`/`from_pairs`: the slot element is a nullable `_Entry?`, and storing a
+// concrete `_Entry` fixes its key/value types (the back end follows the resolved
+// instance). So `let m = HashMap.new()` followed by `m.set("a", 1)` is a
+// `string -> int32` map with no type annotations or witness values.
 
 // One stored key/value pair. Private to this module: it is an implementation
 // detail of the table's slot array, not part of the public surface.
@@ -24,9 +24,10 @@ type HashMap = {
     // Slot arrays, parallel and `cap`-long. `entries[i]` is meaningful only when
     // `states[i]` is `_FULL`. A slot is `_EMPTY` (never used), `_FULL` (holds a
     // live pair), or `_TOMB` (deleted -- probing passes through it, insertion may
-    // reuse it). `entries` is seeded at construction with witness pairs so its
-    // element type is pinned even while every slot is logically empty.
-    entries
+    // reuse it). `entries` is a nullable-element array: empty slots hold `null`,
+    // which sizes the array at construction without a sample value and lets the
+    // element type be inferred from the `_Entry` values stored into full slots.
+    entries: infer?[]
     states: int32[]
     // `cap` is the slot count (a power of two is not required; the table grows by
     // doubling). `count` is the number of live pairs; `tombs` the number of
@@ -37,26 +38,25 @@ type HashMap = {
     tombs: int64
 }
 
-// An empty map whose key/value types are fixed by the witness samples (which
-// are not stored). See the module comment for why the witnesses are required.
-fun HashMap.new(sample_key, sample_value) {
+// An empty map. The slot array is sized with `null`; the key/value types are
+// inferred from the values stored later (see the module comment).
+fun HashMap.new() {
     let cap: int64 = 8
     let zero: int64 = 0
     let entries = []
     let states = []
     let i: int64 = 0
     while i < cap {
-        entries.push(_Entry { key: sample_key, value: sample_value })
+        entries.push(null)
         states.push(0)
         i += 1
     }
     return Self { entries: entries, states: states, cap: cap, count: zero, tombs: zero }
 }
 
-// A map built from an array of `[key, value]` pairs. The array must be
-// non-empty: its first pair supplies the witness types `new` needs.
+// A map built from an array of `[key, value]` pairs.
 fun HashMap.from_pairs(pairs) {
-    let m = Self.new(pairs[0][0], pairs[0][1])
+    let m = Self.new()
     for p in pairs {
         m.set(p[0], p[1])
     }
@@ -91,8 +91,10 @@ fun HashMap._find(self, key) -> int64 {
             return absent
         }
         if s == 1 {
-            if self.entries[idx].key == key {
-                return idx
+            if let e = self.entries[idx] {
+                if e.key == key {
+                    return idx
+                }
             }
         }
         step += 1
@@ -124,18 +126,17 @@ fun HashMap._insert(self, key, value) {
 }
 
 // Rehash every live pair into a fresh `new_cap`-slot table, dropping tombstones.
-// A live old entry supplies the witness types for the new slot array.
+// The new slot array is sized with `null`, like `new`.
 fun HashMap._grow(self, new_cap) {
     let zero: int64 = 0
     let old_entries = self.entries
     let old_states = self.states
     let old_cap = self.cap
-    let witness = old_entries[0]
     let entries = []
     let states = []
     let i: int64 = 0
     while i < new_cap {
-        entries.push(_Entry { key: witness.key, value: witness.value })
+        entries.push(null)
         states.push(0)
         i += 1
     }
@@ -147,7 +148,9 @@ fun HashMap._grow(self, new_cap) {
     let j: int64 = 0
     while j < old_cap {
         if old_states[j] == 1 {
-            self._insert(old_entries[j].key, old_entries[j].value)
+            if let e = old_entries[j] {
+                self._insert(e.key, e.value)
+            }
         }
         j += 1
     }
@@ -157,7 +160,11 @@ fun HashMap._grow(self, new_cap) {
 fun HashMap.set(self, key, value) {
     let existing = self._find(key)
     if existing >= 0 {
-        self.entries[existing].value = value
+        // Overwrite by replacing the whole slot: the element is a nullable
+        // `_Entry?`, so its `value` field cannot be assigned through in place.
+        if let e = self.entries[existing] {
+            self.entries[existing] = _Entry { key: e.key, value: value }
+        }
         return
     }
     // Grow before inserting a new key once the table is 3/4 full, so a free
@@ -172,7 +179,9 @@ fun HashMap.set(self, key, value) {
 fun HashMap.get(self, key) {
     let idx = self._find(key)
     if idx >= 0 {
-        return self.entries[idx].value
+        if let e = self.entries[idx] {
+            return e.value
+        }
     }
     return null
 }
@@ -182,7 +191,9 @@ fun HashMap.get(self, key) {
 fun HashMap.get_or(self, key, dflt) {
     let idx = self._find(key)
     if idx >= 0 {
-        return self.entries[idx].value
+        if let e = self.entries[idx] {
+            return e.value
+        }
     }
     return dflt
 }
@@ -219,7 +230,9 @@ fun HashMap.keys(self) {
     let i: int64 = 0
     while i < self.cap {
         if self.states[i] == 1 {
-            result.push(self.entries[i].key)
+            if let e = self.entries[i] {
+                result.push(e.key)
+            }
         }
         i += 1
     }
@@ -232,7 +245,9 @@ fun HashMap.values(self) {
     let i: int64 = 0
     while i < self.cap {
         if self.states[i] == 1 {
-            result.push(self.entries[i].value)
+            if let e = self.entries[i] {
+                result.push(e.value)
+            }
         }
         i += 1
     }
@@ -245,7 +260,9 @@ fun HashMap.pairs(self) {
     let i: int64 = 0
     while i < self.cap {
         if self.states[i] == 1 {
-            result.push([self.entries[i].key, self.entries[i].value])
+            if let e = self.entries[i] {
+                result.push([e.key, e.value])
+            }
         }
         i += 1
     }

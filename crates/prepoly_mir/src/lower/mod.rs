@@ -22,7 +22,8 @@ mod stmt;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use prepoly_hir::{Program, TypeKind};
+use prepoly_hir::{Program, Type, TypeKind};
+use prepoly_lexer::Span;
 use prepoly_parser::ast::{AssignOp, BinOp, Block, Param};
 
 use crate::analysis::fallible_block;
@@ -40,12 +41,18 @@ pub(crate) struct ProgramCtx<'p> {
     /// Every sum-variant name in the program, used to tell a binding pattern
     /// (`x`) from a unit-variant pattern (`Red`) during match lowering.
     variant_names: std::collections::HashSet<String>,
+    /// Checker-resolved types of selected expressions, keyed by source span. A
+    /// call whose result is a constructed aggregate is looked up here so its
+    /// result local is seeded `Known`, carrying the instance type the back end
+    /// would otherwise be unable to infer (a witness-free constructor). Empty
+    /// when lowering without a checked program (tests, deferred re-lowering).
+    expr_types: &'p HashMap<Span, Type>,
     closures: RefCell<Vec<MirClosure>>,
     next_closure: Cell<u32>,
 }
 
 impl<'p> ProgramCtx<'p> {
-    fn new(program: &'p Program) -> Self {
+    fn new(program: &'p Program, expr_types: &'p HashMap<Span, Type>) -> Self {
         let mut variant_names = std::collections::HashSet::new();
         for info in program.types.values() {
             if let TypeKind::Sum { variants } = &info.kind {
@@ -57,9 +64,15 @@ impl<'p> ProgramCtx<'p> {
         ProgramCtx {
             program,
             variant_names,
+            expr_types,
             closures: RefCell::new(Vec::new()),
             next_closure: Cell::new(0),
         }
+    }
+
+    /// The checker-resolved type recorded for the expression at `span`, if any.
+    fn expr_type(&self, span: Span) -> Option<&Type> {
+        self.expr_types.get(&span)
     }
 
     /// Allocate the next globally-unique closure id.
@@ -320,7 +333,8 @@ pub fn lower_body(
     params: &[Param],
     body: &Block,
 ) -> (MirBody, Vec<MirClosure>) {
-    let ctx = ProgramCtx::new(program);
+    let no_types = HashMap::new();
+    let ctx = ProgramCtx::new(program, &no_types);
     let body = lower_one(
         &ctx,
         module.to_vec(),
@@ -350,7 +364,16 @@ fn lower_one(
 /// closures they spawn. Item enumeration mirrors `codegen::gen_functions` /
 /// `gen_inits`, including the `Name@module` storage-symbol keys.
 pub fn lower_program(program: &Program) -> MirProgram {
-    let ctx = ProgramCtx::new(program);
+    lower_program_with_types(program, &HashMap::new())
+}
+
+/// Lower a whole program with the checker's resolved expression types available,
+/// so call results that construct an aggregate are seeded with their instance
+/// type (see [`ProgramCtx::expr_types`]). The real execution paths pass the
+/// checker's map; [`lower_program`] is the inputs-free form used by tests and by
+/// runtime re-lowering, where the back end re-derives types on its own.
+pub fn lower_program_with_types(program: &Program, expr_types: &HashMap<Span, Type>) -> MirProgram {
+    let ctx = ProgramCtx::new(program, expr_types);
     let mut out = MirProgram::default();
 
     let mut fn_names: Vec<&String> = program.functions.keys().collect();

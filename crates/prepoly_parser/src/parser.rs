@@ -1111,31 +1111,33 @@ impl Parser {
 
     fn parse_type(&mut self) -> PResult<TypeExpr> {
         let mut base = self.parse_base_type()?;
-        // Array suffixes: T[n] or T[].
-        while self.at_p(TokenKind::LBracket) {
-            self.open(TokenKind::LBracket, "'['")?;
-            let len = if self.at_p(TokenKind::RBracket) {
-                None
-            } else {
-                match self.peek().clone() {
-                    TokenKind::Int(n) if n >= 0 => {
-                        self.bump();
-                        Some(n as usize)
-                    }
-                    other => {
-                        return Err(self
-                            .error(format!("expected array length, found {}", describe(&other))));
-                    }
-                }
-            };
-            let hi = self.close(TokenKind::RBracket, "']'")?;
-            base = TypeExpr::Array(Box::new(base.clone()), len, base.span().merge(hi));
-        }
-        // Trailing `?` (nullable) and `!` (fallible Result) suffixes, in any order
-        // (`T?`, `T!`, `T[]?`, ...). Each wraps the type built so far.
+        // Postfix suffixes in any order, each wrapping the type built so far: array
+        // `T[n]`/`T[]`, nullable `T?`, fallible `T!`. Interleaving them lets both
+        // `T[]?` (a nullable array) and `T?[]` (an array of nullable elements) be
+        // written, the latter needed for a slot array of optional records.
         loop {
             let lo = base.span();
-            if self.at_p(TokenKind::Question) {
+            if self.at_p(TokenKind::LBracket) {
+                self.open(TokenKind::LBracket, "'['")?;
+                let len = if self.at_p(TokenKind::RBracket) {
+                    None
+                } else {
+                    match self.peek().clone() {
+                        TokenKind::Int(n) if n >= 0 => {
+                            self.bump();
+                            Some(n as usize)
+                        }
+                        other => {
+                            return Err(self.error(format!(
+                                "expected array length, found {}",
+                                describe(&other)
+                            )));
+                        }
+                    }
+                };
+                let hi = self.close(TokenKind::RBracket, "']'")?;
+                base = TypeExpr::Array(Box::new(base), len, lo.merge(hi));
+            } else if self.at_p(TokenKind::Question) {
                 let hi = self.bump().span;
                 base = TypeExpr::Nullable(Box::new(base), lo.merge(hi));
             } else if self.at_p(TokenKind::Bang) {

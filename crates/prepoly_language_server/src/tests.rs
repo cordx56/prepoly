@@ -293,6 +293,105 @@ fn hover_method_call_shows_method_signature() {
     );
 }
 
+/// A method with unannotated parameters (`HashMap.set(self, key, value)`) shows
+/// the concrete parameter types at the call site -- resolved from the receiver's
+/// key/value via the call arguments -- rather than bare `unknown_N`.
+#[test]
+fn hover_method_call_specializes_unannotated_params() {
+    let src = "fun main() {\n    let m = HashMap.new(\"\", \"\")\n    m.set(\"a\", \"b\")\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "set(", false);
+    let h = hover::hover(&doc, &full, pos).expect("hover over the set call");
+    let text = hover_text(&h);
+    assert!(
+        text.contains("fun set(self, key: string, value: string)"),
+        "method parameters must be specialized to the call: {text}"
+    );
+}
+
+/// `map.get(...)`'s return type resolves to the map's value type (`string?`),
+/// recovered from `entries`' element type through the method body, rather than
+/// being left as `unknown`.
+#[test]
+fn hover_method_call_resolves_return_from_receiver() {
+    let src = "fun main() {\n    let map = HashMap.new(\"\", \"\")\n    map.set(\"a\", \"b\")\n    let v = map.get(\"a\")\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "get(", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover the get call"));
+    assert!(
+        text.contains("fun get(self, key: string) -> string?"),
+        "the return must be resolved to the map's value type: {text}"
+    );
+}
+
+/// The checker exposes a generalized scheme per record type to the language
+/// server: `HashMap` has inferred type parameters and its methods are recorded
+/// over them, so the LSP can resolve a method against a receiver instance.
+#[test]
+fn full_analysis_exposes_record_schemes() {
+    let src = "fun main() {\n    let map = HashMap.new(\"\", \"\")\n}\n";
+    let full = full_analysis(src);
+    let scheme = full.schemes.get("HashMap").expect("HashMap scheme");
+    assert!(
+        !scheme.params.is_empty(),
+        "HashMap infers type parameters: {scheme:?}"
+    );
+    assert!(
+        scheme.methods.contains_key("get") && scheme.methods.contains_key("set"),
+        "the scheme records the methods: {scheme:?}"
+    );
+}
+
+/// The scheme resolves a method's return against the receiver instance: hovering
+/// `get` shows `-> string?` because the receiver is a `string`-valued map, with
+/// the value type taken from the instance's `entries` element, not the call.
+#[test]
+fn hover_method_return_resolved_from_instance_via_scheme() {
+    let src = "fun main() {\n    let map = HashMap.new(\"\", \"\")\n    map.set(\"a\", \"b\")\n    let v = map.get(\"a\")\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "get(", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover get"));
+    assert!(
+        text.contains("-> string?"),
+        "the return resolves to the map's value type via the scheme: {text}"
+    );
+}
+
+/// Hovering a record value shows the type's full member list with this instance's
+/// field types resolved: `entries` shows the concrete element type the map was
+/// built with (not `unknown`), every public member is listed, and the `_`-prefixed
+/// implementation methods are hidden.
+#[test]
+fn hover_record_instance_shows_resolved_public_members() {
+    let src = "fun main() {\n    let map = HashMap.new(\"\", \"\")\n    map.set(\"a\", \"b\")\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "map.set", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover the map value"));
+    assert!(
+        text.contains("entries: _Entry<key=string, value=string>[]"),
+        "entries must show its resolved element type: {text}"
+    );
+    assert!(text.contains("fun set("), "public methods listed: {text}");
+    assert!(
+        !text.contains("_find") && !text.contains("_insert") && !text.contains("_hash"),
+        "`_`-prefixed implementation methods must be hidden: {text}"
+    );
+}
+
+/// Hovering a type name hides its `_`-prefixed implementation members.
+#[test]
+fn hover_type_name_hides_internal_members() {
+    let src = "fun main() {\n    let map = HashMap.new(\"\", \"\")\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "HashMap.new", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover the HashMap type"));
+    assert!(text.contains("fun set("), "public methods shown: {text}");
+    assert!(
+        !text.contains("_hash") && !text.contains("_find"),
+        "internal methods must be hidden: {text}"
+    );
+}
+
 /// Go-to-definition on a call jumps to the called function's declaration.
 #[test]
 fn definition_jumps_to_function() {
@@ -565,6 +664,23 @@ fn hover_infers_for_loop_iterand_and_element() {
     assert!(
         sig.contains("fun for_type(a: unknown_0[]) -> void"),
         "signature: {sig}"
+    );
+}
+
+/// A `HashMap` key/value clash introduced in the user's code (`map.get(1)` on a
+/// `string`-keyed map) is reported in the user's file, at the call site -- not at
+/// an unreachable span inside the stdlib, which the LSP would filter out and so
+/// show no error at all.
+#[test]
+fn hashmap_instance_type_mismatch_is_reported_at_the_call() {
+    let mut a = DocAnalyzer::new(path());
+    let src = "fun main() {\n    let map = HashMap.new(\"\", \"\")\n    map.set(\"a\", \"b\")\n    map.get(1)\n}\n";
+    let diags = a.diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|(m, _)| m.contains("does not match the receiver's type")),
+        "expected a use-site receiver-mismatch error: {diags:?}"
     );
 }
 

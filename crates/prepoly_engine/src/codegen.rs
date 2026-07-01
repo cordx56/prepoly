@@ -746,9 +746,9 @@ pub trait Codegen {
             }
             Rvalue::Call(callee, args) => {
                 let from = self
-                    .call_result_type(program, f, callee, args)
+                    .call_result_type(program, f, callee, args, dest_ty)
                     .unwrap_or_else(|| dest_ty.clone());
-                let v = self.codegen_call(program, f, callee, args);
+                let v = self.codegen_call(program, f, callee, args, dest_ty);
                 if matches!(dest_ty, Type::Void) {
                     v
                 } else {
@@ -927,6 +927,7 @@ pub trait Codegen {
         f: &MonoFunction,
         callee: &Callee,
         args: &[Operand],
+        dest_ty: &Type,
     ) -> Self::Value {
         let arg_types: Vec<Type> = args
             .iter()
@@ -1060,7 +1061,10 @@ pub trait Codegen {
                     _ => 2,
                 });
             }
-            Callee::Static { ty, method } => static_symbol(ty, method, &arg_types),
+            // The destination type keys a return-polymorphic, no-argument
+            // constructor (a witness-free `new()`) to the same instance the
+            // monomorphizer created for this result type.
+            Callee::Static { ty, method } => static_symbol(ty, method, &arg_types, Some(dest_ty)),
             // Typed I/O: `print`/`println` write to stdout directly.
             Callee::Free(base) if base == "print" || base == "println" => {
                 return self.codegen_io(program, f, base, args);
@@ -1385,6 +1389,7 @@ pub trait Codegen {
         f: &MonoFunction,
         callee: &Callee,
         args: &[Operand],
+        dest_ty: &Type,
     ) -> Option<Type> {
         let arg_types: Vec<Type> = args
             .iter()
@@ -1456,7 +1461,7 @@ pub trait Codegen {
                 _ => Type::Void,
             }),
             Callee::Static { ty, method } => program
-                .lookup(&static_symbol(ty, method, &arg_types))
+                .lookup(&static_symbol(ty, method, &arg_types, Some(dest_ty)))
                 .map(|inst| inst.ret.clone()),
             Callee::Indirect(callee) => match operand_type_of(callee, &f.local_types) {
                 Type::Fun(_, ret) => Some(*ret),

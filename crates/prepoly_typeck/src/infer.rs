@@ -13,7 +13,8 @@ use std::rc::Rc;
 
 use prepoly_hir::{
     CallableSignature, Constness, FloatKind, FunInfo, IntKind, NominalType, ParamInfo, Program,
-    Substitution, Type, TypeKind, TypedProgram, common_numeric_type,
+    SchemeMethod, Substitution, Type, TypeInfo, TypeKind, TypeScheme, TypedProgram,
+    common_numeric_type,
 };
 use prepoly_lexer::Span;
 use prepoly_parser::ast::*;
@@ -84,6 +85,10 @@ pub struct Inference {
     pub typed: TypedProgram,
     /// Fully-concrete call instances per free-function symbol.
     pub fn_instances: HashMap<String, Vec<Vec<Type>>>,
+    /// Per record-type generalized scheme (its inferred type parameters and the
+    /// field/method signatures over them), keyed by the type's source name. Read
+    /// by the language server to render a method generically; see `build_schemes`.
+    pub schemes: HashMap<String, TypeScheme>,
 }
 
 pub fn analyze(program: &Program) -> Inference {
@@ -92,13 +97,13 @@ pub fn analyze(program: &Program) -> Inference {
     checker.precompute_global_bindings();
     checker.precompute_function_returns();
     checker.precompute_method_returns();
-    for f in program.functions.values() {
-        tracing::debug!(function = %f.signature.name, "inferring function body");
-        let mut scopes = checker.signature_scopes(&f.signature.params);
-        let ret = f.signature.ret_ty.clone();
-        checker.current_module = f.module.clone();
-        checker.check_block_root(&f.decl.body, &mut scopes, ret.as_ref());
-    }
+    // Check each type's method bodies first, then generalize each record type into
+    // a scheme. The method loop binds `self` to the bare type, so a type's methods
+    // share one field variable and their parameter/return variables are linked
+    // through the bodies. Generalizing before the function bodies are checked makes
+    // the schemes available at call sites (a function instantiates a method's
+    // scheme to type the call's result) and keeps the generic field variable read
+    // here free of any concrete use.
     for t in program.types.values() {
         checker.current_module = t.module.clone();
         match &t.kind {
@@ -130,6 +135,16 @@ pub fn analyze(program: &Program) -> Inference {
             }
         }
     }
+    checker.schemes = checker.build_schemes();
+
+    for f in program.functions.values() {
+        tracing::debug!(function = %f.signature.name, "inferring function body");
+        let mut scopes = checker.signature_scopes(&f.signature.params);
+        let ret = f.signature.ret_ty.clone();
+        checker.current_module = f.module.clone();
+        checker.check_block_root(&f.decl.body, &mut scopes, ret.as_ref());
+    }
+
     let mut scopes = vec![HashMap::new()];
     checker.const_scopes = vec![HashSet::new()];
     for init in &program.inits {
@@ -150,6 +165,7 @@ pub fn analyze(program: &Program) -> Inference {
         errors: checker.errors,
         typed: checker.typed,
         fn_instances: checker.fn_instances,
+        schemes: checker.schemes,
     }
 }
 
@@ -162,6 +178,12 @@ struct Checker<'a> {
     self_type: Option<String>,
     self_variant: Option<(String, String)>,
     return_contexts: Vec<ReturnContext>,
+    /// The resolved type of each `return` value, collected per enclosing callable
+    /// (one frame per `return_contexts` frame). The full check observes the stores
+    /// and pushes a body performs, so its inferred return is more precise than the
+    /// light pass -- a witness-free constructor's nullable slot element resolves
+    /// here. Consumed by `check_block_root` for an inferred-return body.
+    return_values: Vec<Vec<(Type, prepoly_lexer::Span)>>,
     global_scope: HashMap<String, Type>,
     function_returns: HashMap<String, Type>,
     /// (method qualifier, method name) -> return type.
@@ -191,6 +213,10 @@ struct Checker<'a> {
     /// typed backend can compile one specialized instance per tuple. Stored as a
     /// deduplicated `Vec` because `Type` is not `Hash`/`Eq`.
     fn_instances: HashMap<String, Vec<Vec<Type>>>,
+    /// Per record-type generalized scheme, keyed by type name. Built after the
+    /// method bodies are co-checked and consulted at call sites to type a method
+    /// call's result by instantiating the method's scheme against the receiver.
+    schemes: HashMap<String, TypeScheme>,
 }
 
 impl<'a> Checker<'a> {
@@ -204,6 +230,7 @@ impl<'a> Checker<'a> {
             self_type: None,
             self_variant: None,
             return_contexts: Vec::new(),
+            return_values: Vec::new(),
             global_scope: HashMap::new(),
             function_returns: HashMap::new(),
             method_returns: HashMap::new(),
@@ -212,6 +239,7 @@ impl<'a> Checker<'a> {
             solver: Solver::new(),
             current_module: Vec::new(),
             fn_instances: HashMap::new(),
+            schemes: HashMap::new(),
         }
     }
 
@@ -366,6 +394,67 @@ impl<'a> Checker<'a> {
         let normal_ty = self.reconcile_return_types(&normal, true);
         let err_ty = self.reconcile_error_payloads(&errors, true);
         self.result_from_payloads(normal_ty, err_ty)
+    }
+
+    /// Generalize every record type into a [`TypeScheme`]. Run after the per-type
+    /// method bodies have been checked in one shared environment: that pass binds
+    /// `self` to the bare type, so a type's methods share one field variable, and
+    /// the bodies' stores/reads link a field's element to the methods' parameter
+    /// and return variables (`HashMap`'s entry key/value is the `key`/`value` of
+    /// `set`/`_insert` through `self.entries[i] = _Entry { .. }`). This reads the
+    /// solver's solution for each field and method signature and quantifies the
+    /// inference variables still free across them -- the inferred type parameters.
+    fn build_schemes(&self) -> HashMap<String, TypeScheme> {
+        let mut out = HashMap::new();
+        for info in self.program.types.values() {
+            if let TypeKind::Record { .. } = &info.kind {
+                out.insert(info.name.clone(), self.build_record_scheme(info));
+            }
+        }
+        out
+    }
+
+    fn build_record_scheme(&self, info: &TypeInfo) -> TypeScheme {
+        let TypeKind::Record { fields, methods } = &info.kind else {
+            return TypeScheme::default();
+        };
+        let mut params: HashSet<u32> = HashSet::new();
+        let resolved = |this: &Self, t: Option<&Type>| t.map(|t| this.resolve(t));
+        let mut field_types = Vec::with_capacity(fields.len());
+        for field in fields {
+            let ty = resolved(self, field.resolved_ty.as_ref()).unwrap_or(Type::Void);
+            params.extend(self.solver.free_vars(&ty));
+            field_types.push((field.name.clone(), ty));
+        }
+        let self_ty = info.type_ref();
+        let mut scheme_methods = std::collections::BTreeMap::new();
+        for (name, method) in methods {
+            let mut ps = Vec::with_capacity(method.signature.params.len());
+            for p in &method.signature.params {
+                let ty = if p.name == "self" {
+                    self_ty.clone()
+                } else {
+                    resolved(self, p.resolved_ty.as_ref()).unwrap_or(Type::Void)
+                };
+                params.extend(self.solver.free_vars(&ty));
+                ps.push((p.name.clone(), ty));
+            }
+            let ret = self
+                .method_returns
+                .get(&(info.name.clone(), name.clone()))
+                .map(|t| self.resolve(t))
+                .or_else(|| resolved(self, method.signature.ret_ty.as_ref()))
+                .unwrap_or(Type::Void);
+            params.extend(self.solver.free_vars(&ret));
+            scheme_methods.insert(name.clone(), SchemeMethod { params: ps, ret });
+        }
+        let mut params: Vec<u32> = params.into_iter().collect();
+        params.sort_unstable();
+        TypeScheme {
+            params,
+            fields: field_types,
+            methods: scheme_methods,
+        }
     }
 
     fn infer_function_return(&mut self, params: &[ParamInfo], body: &Block) -> Type {
@@ -750,7 +839,13 @@ impl<'a> Checker<'a> {
         if let Some(ty) = self.unit_variant_type(base, name, shadowed) {
             return ty;
         }
-        match self.infer_expr_light(base, env, errors) {
+        // Resolve the base before matching: an indexed element or other
+        // intermediate may still be an open inference variable that the solver has
+        // since pinned to a record (e.g. `self.entries[idx]` is the map's entry
+        // type once a `push` fixed it). Without resolving, the match falls through
+        // and the field type is lost as a fresh unknown.
+        let base_ty = self.infer_expr_light(base, env, errors);
+        match self.resolve(&base_ty) {
             Type::Record(record) => record.substitution.get(name).cloned().unwrap_or_else(|| {
                 self.program
                     .types
@@ -1166,15 +1261,31 @@ impl<'a> Checker<'a> {
         self.self_variant = saved_variant;
     }
 
-    fn check_block_root(&mut self, b: &Block, scopes: &mut ScopeStack, ret: Option<&Type>) {
+    /// Check a function/method body. For an inferred-return body (`ret` is `None`)
+    /// returns the reconciled type of its `return` values as observed by the full
+    /// check (so a constructor whose slot array is filled with `null` returns the
+    /// nullable element type), or `None` for an explicit-return body.
+    fn check_block_root(
+        &mut self,
+        b: &Block,
+        scopes: &mut ScopeStack,
+        ret: Option<&Type>,
+    ) -> Option<Type> {
         let saved = std::mem::replace(&mut self.const_scopes, vec![HashSet::new()]);
         self.return_contexts.push(match ret {
             Some(ty) => ReturnContext::Explicit(ty.clone()),
             None => ReturnContext::Inferred,
         });
+        self.return_values.push(Vec::new());
         self.check_block(b, scopes);
+        let collected = self.return_values.pop().unwrap_or_default();
         self.return_contexts.pop();
         self.const_scopes = saved;
+        if ret.is_none() {
+            self.reconcile_return_types(&collected, false)
+        } else {
+            None
+        }
     }
 
     fn check_block(&mut self, b: &Block, scopes: &mut ScopeStack) {
@@ -1201,7 +1312,7 @@ impl<'a> Checker<'a> {
         span: prepoly_lexer::Span,
         scopes: &mut ScopeStack,
     ) {
-        match self.return_contexts.last().cloned() {
+        let returned = match self.return_contexts.last().cloned() {
             Some(ReturnContext::Explicit(want)) => match value {
                 Some(e) => {
                     // A fallible return type (`-> T!`, or any `Result`) auto-wraps a
@@ -1217,20 +1328,30 @@ impl<'a> Checker<'a> {
                         } else {
                             self.expect_assignable(&got, &ok, span);
                         }
+                        got
                     } else {
-                        self.check_expr_against(e, &want, scopes);
+                        self.check_expr_against(e, &want, scopes)
                     }
                 }
-                None => self.expect_assignable(&Type::Void, &want, span),
+                None => {
+                    self.expect_assignable(&Type::Void, &want, span);
+                    Type::Void
+                }
             },
             // Inferred context (closure or unannotated function) or no context
             // (module top level): type the value but do not constrain it; the
             // return type is reconciled separately.
-            _ => {
-                if let Some(e) = value {
-                    self.check_expr(e, scopes);
-                }
-            }
+            _ => match value {
+                Some(e) => self.check_expr(e, scopes),
+                None => Type::Void,
+            },
+        };
+        // Collect the resolved return type for the enclosing callable's inferred
+        // return (see `return_values`); harmless for an explicit-return body, whose
+        // collected values `check_block_root` discards.
+        let resolved = self.resolve(&returned);
+        if let Some(frame) = self.return_values.last_mut() {
+            frame.push((resolved, span));
         }
     }
 
@@ -1275,7 +1396,22 @@ impl<'a> Checker<'a> {
             } => {
                 let target_ty = self.check_place(target, scopes);
                 if matches!(op, AssignOp::Eq) {
-                    self.check_expr_against(value, &target_ty, scopes);
+                    // A store into an array element whose type still carries an
+                    // open inference variable commits the value into it (the way
+                    // `push` does), so `arr[i] = v` pins an as-yet-unknown element
+                    // -- including a record element with open fields (`_Entry<?,
+                    // ?>`), whose key/value the stored value refines through the
+                    // solver. A fully-concrete element keeps the ordinary
+                    // bidirectional check (typed integer literals, structural
+                    // compatibility).
+                    let target_open = matches!(target, Expr::Index(..))
+                        && !self.solver.free_vars(&self.resolve(&target_ty)).is_empty();
+                    if target_open {
+                        let value_ty = self.check_expr(value, scopes);
+                        self.expect_element_assignable(&value_ty, &target_ty, value);
+                    } else {
+                        self.check_expr_against(value, &target_ty, scopes);
+                    }
                 } else {
                     let value_ty = self.check_expr(value, scopes);
                     let _ = self.check_binary(assign_binop(*op), &target_ty, &value_ty, *span);
@@ -1440,7 +1576,9 @@ impl<'a> Checker<'a> {
         self.const_scopes.push(HashSet::new());
         self.return_contexts
             .push(ReturnContext::Explicit(want_ret.clone()));
+        self.return_values.push(Vec::new());
         let body_val = self.check_expr(body, &mut closure_scopes);
+        self.return_values.pop();
         self.return_contexts.pop();
         self.const_scopes.pop();
         // An expression-bodied closure (not a `{ ... }` block) returns its body
@@ -1477,8 +1615,11 @@ impl<'a> Checker<'a> {
 
     /// Re-resolve every recorded expression type against the final substitution.
     /// Run once after all checking, so a type recorded before one of its
-    /// variables was pinned still reflects the solved type. `resolve` is deep and
-    /// preserves the `ConstOf` wrapper, so constness is unchanged.
+    /// variables was pinned still reflects the solved type. `resolve` is deep --
+    /// it follows variables nested inside arrays, function types, and a nominal's
+    /// substitution (so a `HashMap`'s `entries` element pinned by a later `push`
+    /// shows its concrete type) -- and preserves the `ConstOf` wrapper, so
+    /// constness is unchanged.
     fn finalize_typed(&mut self) {
         let resolved: Vec<Type> = self
             .typed
@@ -1726,7 +1867,9 @@ impl<'a> Checker<'a> {
                 closure_scopes.push(closure_scope);
                 self.const_scopes.push(HashSet::new());
                 self.return_contexts.push(ReturnContext::Inferred);
+                self.return_values.push(Vec::new());
                 let ret = self.check_expr(body, &mut closure_scopes);
+                self.return_values.pop();
                 self.return_contexts.pop();
                 self.const_scopes.pop();
                 let ret = self.wrap_inferred_fallible_return(ret, &propagated_errors);
@@ -1961,6 +2104,19 @@ impl<'a> Checker<'a> {
                     return elem;
                 }
                 match resolved {
+                    // A store into an open array variable pins its element type,
+                    // the way `push` pins it on the read side: `self.entries[i] =
+                    // v` ties the field's still-open element to `v`'s type while
+                    // checking. Only fires when the base is genuinely open -- a
+                    // concrete `Slice`/`Array` is handled by `index_element` above,
+                    // so a real element-type clash at a store still surfaces.
+                    open @ Type::Unknown(_) => {
+                        let elem = self.fresh_unknown();
+                        let _ = self
+                            .solver
+                            .unify(&open, &Type::Slice(Box::new(elem.clone())));
+                        elem
+                    }
                     Type::Nullable(_) => {
                         self.report_nullable_use(*span);
                         self.fresh_unknown()
@@ -2106,7 +2262,18 @@ impl<'a> Checker<'a> {
                     } else {
                         self.check_expr(expr, scopes)
                     };
-                    if field.resolved_ty.as_ref().is_some_and(Type::is_unknown) {
+                    // Record the field's value type in the instance substitution
+                    // when the field's declared type still carries an inference
+                    // variable: a bare unannotated field (`Unknown`), or a
+                    // partially-inferred annotation like `infer?[]` (a slot array
+                    // whose element is inferred from use). This carries the
+                    // instance's resolved field type into the typed program and the
+                    // back-end seed; a fully concrete annotation is static.
+                    let inferred_field = field
+                        .resolved_ty
+                        .as_ref()
+                        .is_some_and(|t| !self.solver.free_vars(t).is_empty());
+                    if inferred_field {
                         substitution.insert(field_substitution_key(variant, &field.name), got);
                     }
                 }
@@ -2440,6 +2607,19 @@ impl<'a> Checker<'a> {
                 };
                 self.check_arg_count(method, signature_params.len(), args.len(), span);
                 let arg_types = self.check_signature_args_collect(&signature_params, args, scopes);
+                // A method defined in another module (e.g. the stdlib) is checked by
+                // re-elaborating its body with this call's concrete types. When the
+                // call's argument types are inconsistent with the receiver's
+                // instance -- `map.get(1)` on a `string`-keyed map -- the clash
+                // surfaces inside that body, at a span the caller cannot see (and the
+                // LSP cannot show). Re-attribute such body errors to this call site,
+                // so the inconsistency is reported where it originates.
+                let foreign_method = self
+                    .program
+                    .types
+                    .get(&methods[0].self_type)
+                    .is_some_and(|t| t.module != self.current_module);
+                let before = self.errors.len();
                 let mut returns = Vec::with_capacity(methods.len());
                 for resolved in methods {
                     let declared_ret = resolved.signature.ret_ty.clone();
@@ -2466,6 +2646,19 @@ impl<'a> Checker<'a> {
                         fallback_ret,
                         arg_types: &arg_types,
                     }));
+                }
+                if foreign_method && self.errors.len() > before {
+                    self.reattribute_errors_to_call(before, method, span);
+                }
+                // Type the call's result by instantiating the method's scheme
+                // against the receiver instance (schemes are built before the
+                // function bodies that call them). The re-elaboration above still
+                // ran for its conflict checks -- a key compared with `==` does not
+                // unify onto a scheme parameter, so a `map.get(1)` clash is caught
+                // there, not by the scheme. The re-elaborated return is the
+                // fallback when the scheme cannot resolve the result.
+                if let Some(ret) = self.scheme_method_return(&recv_ty, method) {
+                    return ret;
                 }
                 return self
                     .common_type_list(&returns)
@@ -3403,11 +3596,60 @@ impl<'a> Checker<'a> {
         let saved_module = std::mem::replace(&mut self.current_module, module.to_vec());
         let frame = self.signature_call_frame(params, arg_types, None);
         let mut scopes = vec![frame.clone()];
-        self.check_block_root(body, &mut scopes, declared_ret.as_ref());
-        let ret = declared_ret.unwrap_or_else(|| self.infer_return_from_frame(body, frame));
+        let full_ret = self.check_block_root(body, &mut scopes, declared_ret.as_ref());
+        let ret = match declared_ret {
+            Some(ret) => ret,
+            None => self.prefer_full_return(full_ret, body, frame),
+        };
         self.current_module = saved_module;
         self.instantiating.remove(&key);
         ret
+    }
+
+    /// Choose an inferred-return body's return type: the full check's
+    /// reconciliation when it produced one and is not a `Result` (the full check
+    /// observes the stores/pushes the light pass misses), otherwise the light
+    /// `infer_return_from_frame`, which assembles a fallible body's `Result` from
+    /// its error sites -- something the normal-return reconciliation does not do.
+    fn prefer_full_return(
+        &mut self,
+        full_ret: Option<Type>,
+        body: &Block,
+        frame: HashMap<String, Type>,
+    ) -> Type {
+        let light = self.infer_return_from_frame(body, frame);
+        match full_ret {
+            Some(t) if !self.resolve(&light).is_result_type() => t,
+            _ => light,
+        }
+    }
+
+    /// Type a method call's result by instantiating the method's scheme against
+    /// the receiver instance: the scheme expresses the return over the type's
+    /// inferred parameters, and matching the scheme's field types to the
+    /// receiver's resolved field substitution fixes them (`get`'s `-> V?` becomes
+    /// `-> string?` for a `string`-valued map). Returns `None` when the receiver
+    /// is not a scheme'd record, the method is not in the scheme, or the return
+    /// still has an open parameter the instance did not pin (a parameter that only
+    /// flows through `==`, never a store or field read) -- the caller then keeps
+    /// the re-elaborated return.
+    fn scheme_method_return(&self, recv_ty: &Type, method: &str) -> Option<Type> {
+        let mut t = self.resolve(recv_ty);
+        while let Type::Ref(i) | Type::Mut(i) | Type::ConstOf(i) | Type::Nullable(i) = t {
+            t = *i;
+        }
+        let Type::Record(nominal) = t else {
+            return None;
+        };
+        let info = self.program.type_by_id(nominal.id)?;
+        let scheme = self.schemes.get(&info.name)?;
+        let scheme_method = scheme.methods.get(method)?;
+        let map = scheme_instance_map(scheme, &nominal);
+        let ret = apply_scheme_param_map(&scheme_method.ret, &map);
+        // Only adopt the instantiated return when it is fully resolved; an open
+        // variable means the instance did not constrain it, so the re-elaborated
+        // return (which can still defer) is the safer choice.
+        self.solver.free_vars(&ret).is_empty().then_some(ret)
     }
 
     fn instantiate_method_call(&mut self, call: MethodCall<'_>) -> Type {
@@ -3440,13 +3682,15 @@ impl<'a> Checker<'a> {
         let saved_module =
             self.swap_module_for(|p| p.types.get(&owner_type).map(|t| t.module.clone()));
         let frame = self.signature_call_frame(signature_params, arg_types, receiver_ty);
-        if let Some(body) = &method.body {
+        let full_ret = if let Some(body) = &method.body {
             let mut scopes = vec![frame.clone()];
-            self.check_block_root(body, &mut scopes, declared_ret.as_ref());
-        }
+            self.check_block_root(body, &mut scopes, declared_ret.as_ref())
+        } else {
+            None
+        };
         let ret = match (&method.body, declared_ret) {
             (_, Some(ret)) => ret,
-            (Some(body), None) => self.infer_return_from_frame(body, frame),
+            (Some(body), None) => self.prefer_full_return(full_ret, body, frame),
             (None, None) => Type::Void,
         };
         self.self_type = saved;
@@ -3647,6 +3891,34 @@ impl<'a> Checker<'a> {
         arg_types
     }
 
+    /// Move the body errors a foreign method produced (when re-elaborated for a
+    /// call) onto the call site `span`, framed as a receiver/argument mismatch, so
+    /// they are reported where the user wrote the call rather than at an
+    /// unreachable span inside the stdlib. Identical re-pointed errors are
+    /// deduplicated, since one inconsistency can surface at several body sites.
+    fn reattribute_errors_to_call(
+        &mut self,
+        before: usize,
+        method: &str,
+        span: prepoly_lexer::Span,
+    ) {
+        let mut seen: HashSet<String> = HashSet::new();
+        let kept: Vec<TypeError> = self
+            .errors
+            .split_off(before)
+            .into_iter()
+            .filter_map(|e| {
+                let message = format!(
+                    "call to `{method}` here does not match the receiver's type: {}",
+                    e.message
+                );
+                seen.insert(message.clone())
+                    .then_some(TypeError { message, span })
+            })
+            .collect();
+        self.errors.extend(kept);
+    }
+
     fn check_arg_count(&mut self, name: &str, want: usize, got: usize, span: prepoly_lexer::Span) {
         if want != got {
             self.errors.push(TypeError {
@@ -3764,7 +4036,18 @@ impl<'a> Checker<'a> {
             BinOp::Add if matches!((&left, &right), (Type::Str, Type::Str)) => Type::Str,
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
                 if is_unknown {
-                    self.fresh_unknown()
+                    // One operand is still an open inference variable. The result
+                    // takes the *other* operand's numeric type when it is a known
+                    // number, so a value flowing only through `x + 1` is concretely
+                    // typed (a count read back as `int32`) and a store of it pins
+                    // the destination. The open variable itself is not committed
+                    // here -- a concrete re-elaboration may make it `float64` -- so
+                    // numeric polymorphism is preserved.
+                    match (&left, &right) {
+                        (Type::Unknown(_), Type::Int(_) | Type::Float(_)) => right.clone(),
+                        (Type::Int(_) | Type::Float(_), Type::Unknown(_)) => left.clone(),
+                        _ => self.fresh_unknown(),
+                    }
                 } else if let Some(t) = numeric_common {
                     t
                 } else {
@@ -3963,12 +4246,36 @@ impl<'a> Checker<'a> {
         if integer_literal_fits(expr, &want) {
             return;
         }
-        if want.is_unknown() {
-            // The element type is still open: pin it to the value. The only way
-            // `unify(var, got)` fails is the occurs check, i.e. `got` contains the
-            // element variable -- pushing the array into itself. Report that
-            // directly rather than as a generic mismatch on the `?` placeholder.
-            if self.solver.unify(elem, &got).is_err() {
+        // The element type carries an open inference variable -- either it is one
+        // (a fresh `?[]`) or it is a record/array with open components (an
+        // `_Entry<?, ?>` element whose key/value are not yet fixed). Pin it to the
+        // value by committing the unification, so the stored value's concrete type
+        // refines the element through the solver's record/array unification.
+        if !self.solver.free_vars(&want).is_empty() {
+            // Pushing/storing `null` into a still-open element makes the element a
+            // *nullable with an open inner* (`Nullable(?)`), rather than collapsing
+            // it to `Nullable(Never)`. This is what lets a slot array seeded with
+            // `null` (`entries.push(null)`) still take its element type from the
+            // non-null values stored later: the open inner is refined below.
+            if got.is_null() && matches!(want, Type::Unknown(_)) {
+                let inner = self.fresh_unknown();
+                let _ = self.solver.unify(elem, &Type::Nullable(Box::new(inner)));
+                return;
+            }
+            // A non-null value stored into a nullable element refines the element's
+            // *inner* type (a concrete `_Entry<K, V>` into a `_Entry?[]` slot pins
+            // `K` and `V`), so a nullable container fixes its element from the
+            // values inserted while still accepting `null`. Otherwise the value
+            // refines the element directly.
+            let outcome = match &want {
+                Type::Nullable(inner) if !got.is_null() && !matches!(got, Type::Nullable(_)) => {
+                    self.solver.unify(inner, &got)
+                }
+                _ => self.solver.unify(elem, &got),
+            };
+            if outcome.is_err() && want.is_unknown() {
+                // The only hard failure on a *bare* element variable is the occurs
+                // check: pushing the array into itself, an infinite element type.
                 self.errors.push(TypeError {
                     message: "cannot push a value whose type contains this array; \
                               the element type would be infinite"
@@ -3976,6 +4283,12 @@ impl<'a> Checker<'a> {
                     span: expr.span(),
                 });
             }
+            // A failure against a *partially* fixed element (a record/array with
+            // open components) is left to defer rather than reported: the store may
+            // go through a witness alias the body itself re-reads (the table's
+            // `_grow` re-inserts `old_entries[0]`), which is loose by construction.
+            // A genuine clash on a fully concrete element is caught by the concrete
+            // path below, which still runs because such an element has no free var.
             return;
         }
         if got.is_null() && !matches!(want, Type::Nullable(_)) {
@@ -5105,6 +5418,80 @@ fn nullable_common_side(ty: &Type) -> Type {
         Type::Unknown(_) | Type::Nullable(_) => ty.clone(),
         other => Type::Nullable(Box::new(other.clone())),
     }
+}
+
+/// Map each scheme parameter to the receiver instance's concrete type by matching
+/// the scheme's field types against the receiver's resolved field substitution
+/// (`entries : _Entry<K, V>[]` vs `entries : _Entry<string, string>[]` gives `K
+/// -> string`, `V -> string`). Used to instantiate a method's scheme at a call.
+fn scheme_instance_map(scheme: &TypeScheme, recv: &NominalType) -> HashMap<u32, Type> {
+    let mut map = HashMap::new();
+    for (fname, fty) in &scheme.fields {
+        if let Some(actual) = recv.substitution.get(fname) {
+            match_scheme_param(fty, actual, &scheme.params, &mut map);
+        }
+    }
+    map
+}
+
+/// Record `param -> actual` where a scheme parameter variable aligns with a
+/// concrete position in the receiver's field type, recursing structurally.
+fn match_scheme_param(
+    scheme_ty: &Type,
+    actual: &Type,
+    params: &[u32],
+    map: &mut HashMap<u32, Type>,
+) {
+    match (scheme_ty, actual) {
+        (Type::Unknown(id), a) if params.contains(id) => {
+            map.entry(*id).or_insert_with(|| a.clone());
+        }
+        (Type::Slice(s), Type::Slice(a))
+        | (Type::Slice(s), Type::Array(a, _))
+        | (Type::Array(s, _), Type::Slice(a))
+        | (Type::Array(s, _), Type::Array(a, _))
+        | (Type::Nullable(s), Type::Nullable(a))
+        | (Type::Ref(s), Type::Ref(a))
+        | (Type::Mut(s), Type::Mut(a))
+        | (Type::ConstOf(s), Type::ConstOf(a)) => match_scheme_param(s, a, params, map),
+        (Type::Record(sn), Type::Record(an)) | (Type::Sum(sn), Type::Sum(an)) => {
+            for (k, sv) in sn.substitution.iter() {
+                if let Some(av) = an.substitution.get(k) {
+                    match_scheme_param(sv, av, params, map);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Substitute scheme parameters with their concrete types throughout a type.
+fn apply_scheme_param_map(ty: &Type, map: &HashMap<u32, Type>) -> Type {
+    match ty {
+        Type::Unknown(id) => map.get(id).cloned().unwrap_or_else(|| ty.clone()),
+        Type::Slice(e) => Type::Slice(Box::new(apply_scheme_param_map(e, map))),
+        Type::Array(e, n) => Type::Array(Box::new(apply_scheme_param_map(e, map)), *n),
+        Type::Nullable(e) => Type::Nullable(Box::new(apply_scheme_param_map(e, map))),
+        Type::Ref(e) => Type::Ref(Box::new(apply_scheme_param_map(e, map))),
+        Type::Mut(e) => Type::Mut(Box::new(apply_scheme_param_map(e, map))),
+        Type::ConstOf(e) => Type::ConstOf(Box::new(apply_scheme_param_map(e, map))),
+        Type::Fun(ps, r) => Type::Fun(
+            ps.iter().map(|p| apply_scheme_param_map(p, map)).collect(),
+            Box::new(apply_scheme_param_map(r, map)),
+        ),
+        Type::Tuple(es) => Type::Tuple(es.iter().map(|e| apply_scheme_param_map(e, map)).collect()),
+        Type::Record(n) => Type::Record(map_scheme_nominal(n, map)),
+        Type::Sum(n) => Type::Sum(map_scheme_nominal(n, map)),
+        other => other.clone(),
+    }
+}
+
+fn map_scheme_nominal(n: &NominalType, map: &HashMap<u32, Type>) -> NominalType {
+    let mut subst = Substitution::empty();
+    for (k, v) in n.substitution.iter() {
+        subst.insert(k, apply_scheme_param_map(v, map));
+    }
+    NominalType::with_substitution(n.id, n.name().to_string(), subst)
 }
 
 fn apply_nominal_substitution(ty: Type, substitution: Substitution) -> Type {

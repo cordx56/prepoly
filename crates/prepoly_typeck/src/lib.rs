@@ -40,6 +40,10 @@ pub struct Analysis {
     /// Fully-concrete call instances per free-function symbol, the input to
     /// static monomorphization.
     pub fn_instances: std::collections::HashMap<String, Vec<Vec<prepoly_hir::Type>>>,
+    /// Per record-type generalized scheme (inferred type parameters and the
+    /// field/method signatures over them), keyed by the type's source name. The
+    /// language server renders a method generically from this.
+    pub schemes: std::collections::HashMap<String, prepoly_hir::TypeScheme>,
 }
 
 /// Run all static checks. Returns the errors found (sorted by position).
@@ -76,6 +80,7 @@ pub fn analyze(program: &Program) -> Analysis {
         errors,
         typed: infer.typed,
         fn_instances: infer.fn_instances,
+        schemes: infer.schemes,
     }
 }
 
@@ -408,6 +413,171 @@ mod tests {
     }
 
     #[test]
+    fn witness_free_container_element_is_resolved_from_use() {
+        // A constructor that builds an empty array field (`items = []`, no
+        // element pushed) leaves the field's element open. A later mutating
+        // call on the binding pins it: `b.add("a", 1)` stores a `Pair` into
+        // `self.items[i]`, and the indexed-place store (Stage 1) commits that
+        // through the binding's element variable. So `b.first_k()` is known to
+        // return `string` -- accepted into a `string`, rejected into an
+        // `int32`. This is the checker-side resolution the witness-free
+        // constructor relies on.
+        let pair_box = "type Pair = {\n    k\n    v\n}\n\
+             type Box = {\n    items\n}\n\
+             fun Box.new() {\n    let items = []\n    return Self { items: items }\n}\n\
+             fun Box.add(self, k, v) {\n    self.items[0] = Pair { k: k, v: v }\n}\n\
+             fun Box.first_k(self) {\n    return self.items[0].k\n}\n";
+        let ok = errs(&format!(
+            "{pair_box}fun main() {{\n    let b = Box.new()\n    b.add(\"a\", 1)\n    let x: string = b.first_k()\n}}\n"
+        ));
+        assert!(ok.is_empty(), "{ok:?}");
+        let bad = errs(&format!(
+            "{pair_box}fun main() {{\n    let b = Box.new()\n    b.add(\"a\", 1)\n    let x: int32 = b.first_k()\n}}\n"
+        ));
+        assert!(
+            bad.iter()
+                .any(|m| m.contains("`string`") && m.contains("`int32`")),
+            "{bad:?}"
+        );
+    }
+
+    #[test]
+    fn scheme_generalizes_a_generic_container_over_shared_params() {
+        // `Box`'s element type is inferred. Co-checking its methods links the
+        // `items` element to the `add` parameters through the indexed store of a
+        // `Pair { k, v }` (the unification edge the type and its methods share),
+        // so the scheme has two inferred parameters and `add`'s `k`/`v` are
+        // expressed over them -- the user's "type and methods share one type
+        // environment" generalization.
+        let a = analysis(
+            "type Pair = {\n    k\n    v\n}\n\
+             type Box = {\n    items\n}\n\
+             fun Box.add(self, k, v) {\n    self.items[0] = Pair { k: k, v: v }\n}\n",
+        );
+        assert!(a.errors.is_empty(), "{:?}", a.errors);
+        let scheme = a.schemes.get("Box").expect("Box scheme");
+        assert_eq!(scheme.params.len(), 2, "two inferred params: {scheme:?}");
+        let add = scheme.methods.get("add").expect("add in scheme");
+        // `self` is the bare type; `k` and `v` are inferred parameters that are
+        // exactly the scheme's quantified variables.
+        let param_var = |name: &str| -> Option<u32> {
+            add.params
+                .iter()
+                .find(|(n, _)| n == name)
+                .and_then(|(_, t)| match t {
+                    Type::Unknown(id) => Some(*id),
+                    _ => None,
+                })
+        };
+        let k = param_var("k").expect("k is an inference var");
+        let v = param_var("v").expect("v is an inference var");
+        assert!(
+            scheme.params.contains(&k),
+            "k is a scheme param: {scheme:?}"
+        );
+        assert!(
+            scheme.params.contains(&v),
+            "v is a scheme param: {scheme:?}"
+        );
+        assert_ne!(k, v, "k and v are distinct params");
+    }
+
+    #[test]
+    fn indexed_store_refines_an_open_record_element_from_use() {
+        // A store of a concrete record into an array element typed `Pair<?, ?>`
+        // refines the element's open key/value through the solver's record-
+        // substitution unification, so a later read of `.v` is concretely typed.
+        // `add("a", 5)` makes `items` element `Pair<string, int32>`, so `first_v`
+        // returns `int32` -- assigning it into a `string` is rejected. Without the
+        // record unification + committing store the element would stay `Pair<?,
+        // ?>` and the mismatch would go unreported.
+        let prog = "type Pair = {\n    k\n    v\n}\n\
+             type Box = {\n    items\n}\n\
+             fun Box.empty() {\n    let items = []\n    return Self { items: items }\n}\n\
+             fun Box.add(self, k, v) {\n    self.items[0] = Pair { k: k, v: v }\n}\n\
+             fun Box.first_v(self) {\n    return self.items[0].v\n}\n";
+        let bad = errs(&format!(
+            "{prog}fun main() {{\n    let b = Box.empty()\n    b.add(\"a\", 5)\n    let x: string = b.first_v()\n}}\n"
+        ));
+        assert!(
+            bad.iter()
+                .any(|m| m.contains("`int32`") && m.contains("`string`")),
+            "the value type must resolve to int32 from the store: {bad:?}"
+        );
+        let ok = errs(&format!(
+            "{prog}fun main() {{\n    let b = Box.empty()\n    b.add(\"a\", 5)\n    let x: int32 = b.first_v()\n}}\n"
+        ));
+        assert!(ok.is_empty(), "{ok:?}");
+    }
+
+    #[test]
+    fn store_refines_a_record_element_already_typed_with_open_fields() {
+        // The first store pins `items`' element to `Pair<?, ?>` (its fields come
+        // from reading the still-open element, the table's `_grow` witness shape);
+        // the second store of a concrete `Pair<string, int32>` then refines those
+        // open fields through the solver's record-substitution unification, so
+        // `first_v` is `int32`. This is the case `_grow` + `_insert` hits in
+        // `HashMap`: without unifying two same-nominal records field-wise the
+        // element would stay `Pair<?, ?>` and the value type never resolve.
+        let prog = "type Pair = {\n    k\n    v\n}\n\
+             type Box = {\n    items\n}\n\
+             fun Box.empty() {\n    let items = []\n    return Self { items: items }\n}\n\
+             fun Box.add(self, k, v) {\n\
+             \x20   let w = self.items[0]\n\
+             \x20   self.items[1] = Pair { k: w.k, v: w.v }\n\
+             \x20   self.items[2] = Pair { k: k, v: v }\n}\n\
+             fun Box.first_v(self) {\n    return self.items[0].v\n}\n";
+        let bad = errs(&format!(
+            "{prog}fun main() {{\n    let b = Box.empty()\n    b.add(\"a\", 5)\n    let x: string = b.first_v()\n}}\n"
+        ));
+        assert!(
+            bad.iter()
+                .any(|m| m.contains("`int32`") && m.contains("`string`")),
+            "the value type must resolve to int32 through record unification: {bad:?}"
+        );
+    }
+
+    #[test]
+    fn constructor_inferred_return_reflects_a_nullable_slot_element() {
+        // A witness-free slot container: `new()` fills an `infer?[]` field with
+        // `null`, and `put` stores a non-null `Pair`. The full check (not the
+        // weaker light return inference) observes the `push(null)` and the store,
+        // so the constructor's inferred return carries the nullable element type:
+        // `value_at` returns the value type (`int32`), nullable. Assigning it into
+        // a `string` is rejected; into an `int32?` is accepted.
+        let prog = "type Pair = {\n    k\n    v\n}\n\
+             type Slots = {\n    items: infer?[]\n}\n\
+             fun Slots.new() {\n    let items = []\n    items.push(null)\n    return Self { items: items }\n}\n\
+             fun Slots.put(self, k, v) {\n    self.items[0] = Pair { k: k, v: v }\n}\n\
+             fun Slots.value_at(self) {\n    if let e = self.items[0] {\n        return e.v\n    }\n    return null\n}\n";
+        let bad = errs(&format!(
+            "{prog}fun main() {{\n    let s = Slots.new()\n    s.put(\"a\", 7)\n    let x: string = s.value_at()\n}}\n"
+        ));
+        assert!(
+            bad.iter()
+                .any(|m| m.contains("int32") || m.contains("nullable")),
+            "value type must resolve to int32 (nullable): {bad:?}"
+        );
+        let ok = errs(&format!(
+            "{prog}fun main() {{\n    let s = Slots.new()\n    s.put(\"a\", 7)\n    let x: int32? = s.value_at()\n}}\n"
+        ));
+        assert!(ok.is_empty(), "{ok:?}");
+    }
+
+    #[test]
+    fn scheme_of_a_monomorphic_record_has_no_params() {
+        // A fully-annotated record infers no type parameters, so its scheme is
+        // monomorphic (empty `params`).
+        let a = analysis(
+            "type Point = {\n    x: int32\n    y: int32\n}\n\
+             fun Point.sum(self) -> int32 {\n    return self.x + self.y\n}\n",
+        );
+        assert!(a.errors.is_empty(), "{:?}", a.errors);
+        let scheme = a.schemes.get("Point").expect("Point scheme");
+        assert!(scheme.params.is_empty(), "monomorphic: {scheme:?}");
+    }
+
+    #[test]
     fn collects_concrete_call_instances_for_monomorphization() {
         // A polymorphic function called with two concrete
         // types records two instances; the input to static monomorphization.
@@ -453,6 +623,36 @@ mod tests {
             "{:?}",
             a.typed.expressions
         );
+    }
+
+    #[test]
+    fn indexed_store_pins_open_array_element() {
+        // A store `self.items[i] = v` into an unannotated array field pins the
+        // field's element type during checking, the way `push` pins it on the
+        // read side. So the first store fixes `items` to `int32[]` and the
+        // second store of a `string` clashes. Without the store-side pin the
+        // element would stay open and the clash would go unreported.
+        let e = errs(
+            "type Box = {\n    items\n}\n\
+             fun Box.fill(self) {\n    self.items[0] = 1\n    self.items[1] = \"x\"\n}\n",
+        );
+        assert!(
+            e.iter()
+                .any(|m| m.contains("`string`") && m.contains("`int32`")),
+            "expected an element-type clash, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn indexed_store_of_consistent_type_is_accepted() {
+        // Two stores of the same concrete element type leave the field
+        // consistently typed and report nothing -- the pin only fires while the
+        // element is open, so it does not manufacture a spurious clash.
+        let e = errs(
+            "type Box = {\n    items\n}\n\
+             fun Box.fill(self) {\n    self.items[0] = 1\n    self.items[1] = 2\n}\n",
+        );
+        assert!(e.is_empty(), "{e:?}");
     }
 
     #[test]
@@ -2529,6 +2729,33 @@ mod tests {
             "type P = { other: string }\nfun main() {\n    let f = (x) -> x.name\n    let p = P { other: \"a\" }\n    f(p)\n}\n",
         );
         assert!(e.iter().any(|m| m.contains("has no field `name`")), "{e:?}");
+    }
+
+    #[test]
+    fn closure_typed_field_with_self_typechecks() {
+        // A field may hold a closure whose type names the enclosing type via
+        // `self` (`apply: (self, int32) -> int32`). The closure literal is checked
+        // against that type, with `self` bound to the record -- including inside a
+        // function, where the HM pass must resolve `self` from the closure's
+        // parameter scope rather than only a method receiver.
+        let e = errs(
+            "type Calc = {\n    base: int32\n    apply: (self, int32) -> int32\n}\nfun main() {\n    let c = Calc { base: 10, apply: (self, n) -> { return self.base + n } }\n}\n",
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn closure_typed_field_body_return_mismatch_is_rejected() {
+        // The closure body is checked against the field's declared return type, so
+        // returning an int where `-> string` is required is an error.
+        let e = errs(
+            "type Obj = {\n    transform: (self, string) -> string\n}\nfun main() {\n    let o = Obj { transform: (self, s) -> { return 1 } }\n}\n",
+        );
+        assert!(
+            e.iter()
+                .any(|m| m.contains("cannot use `int32` where `string` is required")),
+            "{e:?}"
+        );
     }
 
     #[test]

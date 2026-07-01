@@ -5,7 +5,9 @@
 //! `unknown_N` (see [`crate::render`]), which is the contract for displaying a
 //! function type that inference has left partly open.
 
-use prepoly_hir::{CallableSignature, Type, TypeKind, TypedExprKind};
+use std::collections::HashMap;
+
+use prepoly_hir::{CallableSignature, NominalType, Type, TypeKind, TypeScheme, TypedExprKind};
 use prepoly_lexer::Span;
 use tower_lsp_server::ls_types::{
     Hover, HoverContents, MarkupContent, MarkupKind, Position, Range,
@@ -14,7 +16,9 @@ use tower_lsp_server::ls_types::{
 use crate::analysis::FullAnalysis;
 use crate::document::Document;
 use crate::features::nav;
-use crate::render::{UnknownNamer, render_signature_full, render_type, render_type_def};
+use crate::render::{
+    UnknownNamer, render_signature_full, render_type, render_type_def, render_type_def_with,
+};
 
 /// Build the hover response for `pos` in `doc`, using the full analysis.
 pub fn hover(doc: &Document, full: &FullAnalysis, pos: Position) -> Option<Hover> {
@@ -45,9 +49,12 @@ pub fn hover(doc: &Document, full: &FullAnalysis, pos: Position) -> Option<Hover
                         local_range(doc, full, expr.span),
                     ));
                 }
-                let mut namer = UnknownNamer::default();
-                let value = format!("{name}: {}", render_type(&expr.ty, &mut namer));
-                return Some(markup(value, local_range(doc, full, expr.span)));
+                return Some(value_hover(
+                    full,
+                    name,
+                    &expr.ty,
+                    local_range(doc, full, expr.span),
+                ));
             }
             TypedExprKind::Field(name) => {
                 let mut namer = UnknownNamer::default();
@@ -63,11 +70,7 @@ pub fn hover(doc: &Document, full: &FullAnalysis, pos: Position) -> Option<Hover
     // same-named symbol.
     if let Some((name, span)) = nav::ident_at(&doc.text, local) {
         if let Some(ty) = nav::local_var_type(full, global, &name) {
-            let mut namer = UnknownNamer::default();
-            return Some(markup(
-                format!("{name}: {}", render_type(&ty, &mut namer)),
-                Some(doc.range_of(span)),
-            ));
+            return Some(value_hover(full, &name, &ty, Some(doc.range_of(span))));
         }
         if let Some(f) = full.program.resolve_function(&module, &name) {
             // When the cursor sits in a call expression, bind the function's
@@ -93,6 +96,25 @@ pub fn hover(doc: &Document, full: &FullAnalysis, pos: Position) -> Option<Hover
     None
 }
 
+/// Hover for a value named `name` with resolved type `ty`. A record value shows
+/// the type's full member list (fields and methods, `_`-prefixed ones omitted)
+/// with this instance's field types resolved -- so `map`'s `entries` shows the
+/// concrete element type it was constructed with, and every member is visible.
+/// Any other value shows the compact `name: type` form.
+fn value_hover(full: &FullAnalysis, name: &str, ty: &Type, range: Option<Range>) -> Hover {
+    let mut core = ty;
+    while let Type::ConstOf(i) | Type::Mut(i) | Type::Ref(i) | Type::Nullable(i) = core {
+        core = i;
+    }
+    if let Type::Record(n) = core
+        && let Some(info) = full.program.type_by_id(n.id)
+    {
+        return markup(render_type_def_with(info, &n.substitution), range);
+    }
+    let mut namer = UnknownNamer::default();
+    markup(format!("{name}: {}", render_type(ty, &mut namer)), range)
+}
+
 /// Hover for the method name in `recv.method(...)`: the method's signature (its
 /// type). Returns `None` unless the cursor sits on an identifier immediately
 /// preceded by `.` whose receiver resolves to a record type declaring that method,
@@ -112,9 +134,180 @@ fn method_hover(doc: &Document, full: &FullAnalysis, local: usize, global: usize
     let recv_ty = receiver_type_at(full, recv_hi)?;
     let sig =
         record_method(full, &recv_ty, &name).or_else(|| primitive_method(full, &recv_ty, &name))?;
-    let ret = enclosing_call_ty(full, global);
-    let rendered = render_signature_full(sig, &[], ret.as_ref());
+    // Resolve the signature against the receiver's instance via the type's scheme:
+    // the scheme expresses each method over the type's inferred parameters (the
+    // same variables the stored signature names), so matching the scheme's field
+    // types to the receiver's resolved fields fixes them. A `HashMap<string,
+    // string>` receiver shows `set : (self, string, string) -> void` and `get :
+    // (self, key) -> string?` even with no call -- the return is resolved from the
+    // instance, not left a bare `unknown_N`.
+    let scheme_sig = scheme_resolved_signature(full, &recv_ty, &name, sig);
+    // Specialize further to this call's argument types when the cursor is in a
+    // call: the receiver is the call's first argument, aligned with `self`, so
+    // `map.get(1)` can pin a parameter the scheme leaves open (a key compared with
+    // `==` does not unify onto the scheme's parameter).
+    let (call_span, ret) = enclosing_call(full, global)
+        .map(|e| (Some(e.span), Some(e.ty.clone())))
+        .unwrap_or((None, None));
+    let call_args = call_span.and_then(|s| nav::call_args_at_span(full, s));
+    let specialized = specialize_method_signature(&scheme_sig, call_args.as_deref(), ret.as_ref());
+    let rendered = render_signature_full(&specialized, &[], specialized.ret_ty.as_ref());
     Some(markup(rendered, Some(doc.range_of(span))))
+}
+
+/// Resolve `sig` against the receiver's instance using the type's scheme. The
+/// scheme's parameters are the same inference variables the stored signature
+/// names, so a map from those variables to the receiver's concrete field types
+/// (built by matching the scheme's field types to the receiver's resolved field
+/// substitution) substitutes directly into the parameters and return. The return
+/// is taken from the scheme (the stored signature has none for an unannotated
+/// method). Returns a clone of `sig` unchanged when the receiver is not a record
+/// with a scheme that declares this method.
+fn scheme_resolved_signature(
+    full: &FullAnalysis,
+    recv_ty: &Type,
+    name: &str,
+    sig: &CallableSignature,
+) -> CallableSignature {
+    let Some((nominal, scheme)) = receiver_scheme(full, recv_ty) else {
+        return sig.clone();
+    };
+    let Some(method) = scheme.methods.get(name) else {
+        return sig.clone();
+    };
+    let map = instance_param_map(scheme, nominal);
+    let mut out = sig.clone();
+    for p in &mut out.params {
+        if let Some(t) = p.resolved_ty.as_ref() {
+            p.resolved_ty = Some(apply_param_map(t, &map));
+        }
+    }
+    out.ret_ty = Some(apply_param_map(&method.ret, &map));
+    out
+}
+
+/// The receiver's record nominal and its type's scheme, seeing through
+/// reference/mutability/const/nullable wrappers.
+fn receiver_scheme<'a>(
+    full: &'a FullAnalysis,
+    recv_ty: &'a Type,
+) -> Option<(&'a NominalType, &'a TypeScheme)> {
+    let mut t = recv_ty;
+    while let Type::Ref(i) | Type::Mut(i) | Type::ConstOf(i) | Type::Nullable(i) = t {
+        t = i;
+    }
+    let nominal = match t {
+        Type::Record(n) => n,
+        _ => return None,
+    };
+    let info = full.program.type_by_id(nominal.id)?;
+    full.schemes.get(&info.name).map(|s| (nominal, s))
+}
+
+/// Map each scheme parameter to the receiver instance's concrete type, by
+/// matching the scheme's field types against the receiver's resolved field
+/// substitution (`entries : _Entry<K, V>[]` vs `entries : _Entry<string,
+/// string>[]` gives `K -> string`, `V -> string`).
+fn instance_param_map(scheme: &TypeScheme, recv: &NominalType) -> HashMap<u32, Type> {
+    let mut map = HashMap::new();
+    for (fname, fty) in &scheme.fields {
+        if let Some(actual) = recv.substitution.get(fname) {
+            match_scheme_param(fty, actual, &scheme.params, &mut map);
+        }
+    }
+    map
+}
+
+/// Record `param -> actual` where a scheme parameter variable aligns with a
+/// concrete position in the receiver's field type, recursing structurally.
+fn match_scheme_param(
+    scheme_ty: &Type,
+    actual: &Type,
+    params: &[u32],
+    map: &mut HashMap<u32, Type>,
+) {
+    match (scheme_ty, actual) {
+        (Type::Unknown(id), a) if params.contains(id) => {
+            map.entry(*id).or_insert_with(|| a.clone());
+        }
+        (Type::Slice(s), Type::Slice(a))
+        | (Type::Slice(s), Type::Array(a, _))
+        | (Type::Array(s, _), Type::Slice(a))
+        | (Type::Array(s, _), Type::Array(a, _))
+        | (Type::Nullable(s), Type::Nullable(a))
+        | (Type::Ref(s), Type::Ref(a))
+        | (Type::Mut(s), Type::Mut(a))
+        | (Type::ConstOf(s), Type::ConstOf(a)) => match_scheme_param(s, a, params, map),
+        (Type::Record(sn), Type::Record(an)) | (Type::Sum(sn), Type::Sum(an)) => {
+            for (k, sv) in sn.substitution.iter() {
+                if let Some(av) = an.substitution.get(k) {
+                    match_scheme_param(sv, av, params, map);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Substitute scheme parameters with their concrete types throughout a type.
+fn apply_param_map(ty: &Type, map: &HashMap<u32, Type>) -> Type {
+    match ty {
+        Type::Unknown(id) => map.get(id).cloned().unwrap_or_else(|| ty.clone()),
+        Type::Slice(e) => Type::Slice(Box::new(apply_param_map(e, map))),
+        Type::Array(e, n) => Type::Array(Box::new(apply_param_map(e, map)), *n),
+        Type::Nullable(e) => Type::Nullable(Box::new(apply_param_map(e, map))),
+        Type::Ref(e) => Type::Ref(Box::new(apply_param_map(e, map))),
+        Type::Mut(e) => Type::Mut(Box::new(apply_param_map(e, map))),
+        Type::ConstOf(e) => Type::ConstOf(Box::new(apply_param_map(e, map))),
+        Type::Fun(ps, r) => Type::Fun(
+            ps.iter().map(|p| apply_param_map(p, map)).collect(),
+            Box::new(apply_param_map(r, map)),
+        ),
+        Type::Tuple(es) => Type::Tuple(es.iter().map(|e| apply_param_map(e, map)).collect()),
+        Type::Record(n) => Type::Record(map_nominal(n, map)),
+        Type::Sum(n) => Type::Sum(map_nominal(n, map)),
+        other => other.clone(),
+    }
+}
+
+fn map_nominal(n: &NominalType, map: &HashMap<u32, Type>) -> NominalType {
+    let mut subst = prepoly_hir::Substitution::empty();
+    for (k, v) in n.substitution.iter() {
+        subst.insert(k, apply_param_map(v, map));
+    }
+    NominalType::with_substitution(n.id, n.name().to_string(), subst)
+}
+
+/// A copy of `sig` with each unannotated (still-`unknown`) parameter resolved to
+/// the corresponding call argument's type and the return to the call's inferred
+/// result. `call_args` is positional with `sig.params` (the receiver is the
+/// call's first argument, matching the `self` parameter); the `self` slot is left
+/// unresolved so it still renders as a bare `self`. Only applied to instance
+/// methods (a leading `self`), where the alignment holds.
+fn specialize_method_signature(
+    sig: &CallableSignature,
+    call_args: Option<&[Type]>,
+    ret: Option<&Type>,
+) -> CallableSignature {
+    let mut out = sig.clone();
+    let is_instance = out.params.first().is_some_and(|p| p.name == "self");
+    if let (true, Some(args)) = (is_instance, call_args) {
+        for (i, p) in out.params.iter_mut().enumerate() {
+            if p.name == "self" {
+                continue;
+            }
+            let unresolved = p.resolved_ty.as_ref().is_none_or(Type::is_unknown);
+            if unresolved && let Some(arg) = args.get(i) {
+                p.resolved_ty = Some(arg.clone());
+            }
+        }
+    }
+    if let Some(r) = ret
+        && out.ret_ty.as_ref().is_none_or(Type::is_unknown)
+    {
+        out.ret_ty = Some(r.clone());
+    }
+    out
 }
 
 /// The inferred type of the receiver expression ending at global offset `hi` (the
@@ -171,15 +364,15 @@ fn primitive_method<'a>(
     full.program.functions.get(symbol).map(|f| &f.signature)
 }
 
-/// The result type of the innermost call expression covering `global` (the method
-/// call the cursor sits in), used as the method's inferred return type.
-fn enclosing_call_ty(full: &FullAnalysis, global: usize) -> Option<Type> {
+/// The innermost call expression covering `global` (the method call the cursor
+/// sits in): its span locates the call's arguments and its type is the method's
+/// inferred return.
+fn enclosing_call(full: &FullAnalysis, global: usize) -> Option<&prepoly_hir::TypedExpr> {
     full.typed
         .expressions
         .iter()
         .filter(|e| matches!(e.kind, TypedExprKind::Call) && nav::contains(e.span, global))
         .min_by_key(|e| e.span.hi - e.span.lo)
-        .map(|e| e.ty.clone())
 }
 
 /// Hover for a free function: its generic signature plus, when the cursor is on

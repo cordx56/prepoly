@@ -254,9 +254,10 @@ fn install_jit_panic_guard() {
 fn execute(
     program: &Program,
     int_lit_types: &HashMap<Span, prepoly_hir::IntKind>,
+    expr_types: &HashMap<Span, prepoly_hir::Type>,
 ) -> Result<(), String> {
     install_jit_panic_guard();
-    prepoly_jit_llvm::run(program, int_lit_types)
+    prepoly_jit_llvm::run(program, int_lit_types, expr_types)
 }
 
 /// Run a checked program through the default runtime: the REPL interpreter, used
@@ -265,14 +266,18 @@ fn execute(
 fn execute(
     program: &Program,
     _int_lit_types: &HashMap<Span, prepoly_hir::IntKind>,
+    expr_types: &HashMap<Span, prepoly_hir::Type>,
 ) -> Result<(), String> {
-    prepoly_repl::run(program, &mut io::stdout())
+    prepoly_repl::run(program, expr_types, &mut io::stdout())
 }
 
 /// Run a checked program through the REPL interpreter (the `repl` subcommand),
 /// regardless of the `jit` feature.
-fn execute_repl(program: &Program) -> Result<(), String> {
-    prepoly_repl::run(program, &mut io::stdout())
+fn execute_repl(
+    program: &Program,
+    expr_types: &HashMap<Span, prepoly_hir::Type>,
+) -> Result<(), String> {
+    prepoly_repl::run(program, expr_types, &mut io::stdout())
 }
 
 /// Resolve each integer literal's source span to its inferred integer kind when
@@ -309,10 +314,141 @@ fn int_literal_types(typed: &prepoly_hir::TypedProgram) -> HashMap<Span, prepoly
         .collect()
 }
 
+/// Resolve each aggregate-producing expression's source span to its
+/// checker-resolved instance type, for the back end to follow. This carries the
+/// element/field types the checker inferred from use into MIR lowering, so a
+/// witness-free constructor (`HashMap.new()`) whose result type the back end
+/// could not infer on its own is seeded from the caller's resolved type. Only
+/// fully-known aggregates (record/sum/array, no remaining inference variable) are
+/// kept; a span recorded with conflicting types (a polymorphic position) is
+/// dropped so a wrong type is never seeded.
+fn aggregate_result_types(
+    typed: &prepoly_hir::TypedProgram,
+    program: &Program,
+) -> HashMap<Span, prepoly_hir::Type> {
+    use prepoly_hir::TypedExprKind;
+    let mut per_span: HashMap<Span, Option<prepoly_hir::Type>> = HashMap::new();
+    for e in &typed.expressions {
+        let relevant = matches!(
+            e.kind,
+            TypedExprKind::Call
+                | TypedExprKind::TypeLiteral(_)
+                | TypedExprKind::VariantLiteral { .. }
+        );
+        if !relevant || !is_seedable_instance(&e.ty) {
+            continue;
+        }
+        // The checker records only the inferred (unannotated) fields in a record's
+        // substitution; the back end's constructor builds the full one. Complete
+        // it so the seeded type is the same nominal the back end constructs --
+        // otherwise the binding's type and its methods key off a sparser type and
+        // misresolve the annotated fields.
+        let ty = complete_aggregate(&e.ty, program);
+        match per_span.get(&e.span) {
+            None => {
+                per_span.insert(e.span, Some(ty));
+            }
+            Some(Some(prev)) if *prev != ty => {
+                per_span.insert(e.span, None);
+            }
+            _ => {}
+        }
+    }
+    per_span
+        .into_iter()
+        .filter_map(|(span, t)| t.map(|t| (span, t)))
+        .collect()
+}
+
+/// Complete a record's field substitution with its declared fields, recursing
+/// through array elements and nested records. The checker records only the
+/// inferred fields; the back end lays a constructed record out from every
+/// declared field, so the seeded type must carry them all to be the same nominal.
+fn complete_aggregate(ty: &prepoly_hir::Type, program: &Program) -> prepoly_hir::Type {
+    use prepoly_hir::{NominalType, Type, TypeKind};
+    match ty {
+        Type::Slice(e) => Type::Slice(Box::new(complete_aggregate(e, program))),
+        Type::Array(e, n) => Type::Array(Box::new(complete_aggregate(e, program)), *n),
+        Type::Nullable(e) => Type::Nullable(Box::new(complete_aggregate(e, program))),
+        Type::Record(n) => {
+            let mut subst = prepoly_hir::Substitution::empty();
+            if let Some(TypeKind::Record { fields, .. }) = program.type_by_id(n.id).map(|i| &i.kind)
+            {
+                for f in fields {
+                    let value = n
+                        .substitution
+                        .get(&f.name)
+                        .cloned()
+                        .or_else(|| f.resolved_ty.clone());
+                    if let Some(v) = value {
+                        subst.insert(f.name.clone(), complete_aggregate(&v, program));
+                    }
+                }
+            } else {
+                // A structural record (no declaration): keep its own fields.
+                for (k, v) in n.substitution.iter() {
+                    subst.insert(k, complete_aggregate(v, program));
+                }
+            }
+            Type::Record(NominalType::with_substitution(
+                n.id,
+                n.name().to_string(),
+                subst,
+            ))
+        }
+        // Sums carry per-variant fields; the constructor records the active
+        // variant's fields. Recurse into the existing substitution values without
+        // adding declared fields (which are variant-keyed), enough for the payloads.
+        Type::Sum(n) => {
+            let mut subst = prepoly_hir::Substitution::empty();
+            for (k, v) in n.substitution.iter() {
+                subst.insert(k, complete_aggregate(v, program));
+            }
+            Type::Sum(NominalType::with_substitution(
+                n.id,
+                n.name().to_string(),
+                subst,
+            ))
+        }
+        other => other.clone(),
+    }
+}
+
+/// Whether a resolved type is a fully-known record/sum worth seeding onto a call
+/// result: no remaining inference variable anywhere in it. Matches the back end's
+/// [`prepoly_mir`] seeding filter (records/sums only -- a constructor's result,
+/// whose array fields the back end cannot otherwise type).
+fn is_seedable_instance(ty: &prepoly_hir::Type) -> bool {
+    use prepoly_hir::Type;
+    matches!(ty, Type::Record(_) | Type::Sum(_)) && is_fully_known(ty)
+}
+
+/// Whether `ty` contains no inference variable, recursing through every
+/// component (array element, nominal substitution, function/tuple parts).
+fn is_fully_known(ty: &prepoly_hir::Type) -> bool {
+    use prepoly_hir::Type;
+    match ty {
+        Type::Unknown(_) => false,
+        Type::Array(inner, _)
+        | Type::Slice(inner)
+        | Type::Nullable(inner)
+        | Type::ConstOf(inner)
+        | Type::Mut(inner)
+        | Type::Ref(inner) => is_fully_known(inner),
+        Type::Fun(params, ret) => params.iter().all(is_fully_known) && is_fully_known(ret),
+        Type::Tuple(elems) => elems.iter().all(is_fully_known),
+        Type::Record(n) | Type::Sum(n) => n.substitution.iter().all(|(_, t)| is_fully_known(t)),
+        _ => true,
+    }
+}
+
 /// A program that passed every front-end check, ready to run.
 struct Checked {
     program: Program,
     int_lit_types: HashMap<Span, prepoly_hir::IntKind>,
+    /// Checker-resolved instance types of aggregate-producing expressions, keyed
+    /// by span; the back-end seeding channel (see [`aggregate_result_types`]).
+    expr_types: HashMap<Span, prepoly_hir::Type>,
 }
 
 /// Drive the front end on a source file, then act per `mode`. Front-end
@@ -340,11 +476,16 @@ fn drive(mode: Mode, file: &str) -> Result<(), u8> {
             println!("ok");
             Ok(())
         }
-        Mode::Run => execute(&checked.program, &checked.int_lit_types).map_err(|e| {
+        Mode::Run => execute(
+            &checked.program,
+            &checked.int_lit_types,
+            &checked.expr_types,
+        )
+        .map_err(|e| {
             eprintln!("error: {e}");
             1
         }),
-        Mode::Repl => execute_repl(&checked.program).map_err(|e| {
+        Mode::Repl => execute_repl(&checked.program, &checked.expr_types).map_err(|e| {
             eprintln!("error: {e}");
             1
         }),
@@ -429,9 +570,11 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
     }
 
     let int_lit_types = int_literal_types(&analysis.typed);
+    let expr_types = aggregate_result_types(&analysis.typed, &program);
     Ok(Checked {
         program,
         int_lit_types,
+        expr_types,
     })
 }
 
@@ -684,7 +827,7 @@ fn run_capture(defs: &[String], body: &[String], root: &Path) -> Result<String, 
     let src = assemble(defs, body);
     let checked = analyze("<repl>", &src, root).map_err(|d| d.join("\n"))?;
     let mut buf: Vec<u8> = Vec::new();
-    prepoly_repl::run(&checked.program, &mut buf)?;
+    prepoly_repl::run(&checked.program, &checked.expr_types, &mut buf)?;
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 

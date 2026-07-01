@@ -346,8 +346,34 @@ pub fn method_symbol(method: &str, type_args: &[Type]) -> String {
 }
 
 /// Instance symbol of a static call `Type.method(args)`.
-pub fn static_symbol(ty: &str, method: &str, type_args: &[Type]) -> String {
-    instance_symbol(&format!("{SYNTH_SIGIL}s_{ty}_{method}"), type_args)
+///
+/// A *no-argument* static that returns an aggregate (record/sum/array) is
+/// return-polymorphic: a witness-free `HashMap.new()` whose element types are
+/// fixed only by the caller. Its arguments alone do not distinguish
+/// `HashMap<string,int32>` from `HashMap<int32,int32>`, so the result type is
+/// folded into the key for those, giving each a distinct instance. Statics with
+/// arguments are keyed by their arguments alone (the result is a function of
+/// them), so non-generic statics are unaffected. The monomorphizer passes the
+/// resolved result here; both back ends pass the call's destination type, which
+/// is the same value, so all three derive the identical symbol.
+pub fn static_symbol(ty: &str, method: &str, type_args: &[Type], result: Option<&Type>) -> String {
+    let mut key = type_args.to_vec();
+    if type_args.is_empty()
+        && let Some(r) = result
+        && is_return_polymorphic_result(r)
+    {
+        key.push(r.clone());
+    }
+    instance_symbol(&format!("{SYNTH_SIGIL}s_{ty}_{method}"), &key)
+}
+
+/// Whether a no-argument static's result type can vary by caller and so must be
+/// folded into its instance key: a record/sum built around inferred field types
+/// (a witness-free constructor). Scalars/strings/void/arrays are left out,
+/// keeping their symbols unchanged. Matches the seeding filter so the
+/// monomorphizer and both back ends key these constructors identically.
+fn is_return_polymorphic_result(ty: &Type) -> bool {
+    matches!(ty, Type::Record(_) | Type::Sum(_))
 }
 
 /// The monomorphized instance symbol for a `recv.name(args)` call that resolves
@@ -403,6 +429,7 @@ pub fn monomorphize<'m>(mir: &'m MirProgram, program: &Program) -> Result<MonoPr
             &init.module,
             Vec::new(),
             Some(Type::Void),
+            None,
             None,
             &[],
             Vec::new(),
@@ -642,6 +669,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             type_args,
             ret_ann,
             declared_ok,
+            None,
             &[],
             Vec::new(),
             false,
@@ -662,6 +690,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         type_args: Vec<Type>,
         ret_ann: Option<Type>,
         declared_ok: Option<Type>,
+        seed_ret: Option<Type>,
         capture_seed: &[(LocalId, Type)],
         captures: Vec<LocalId>,
         is_closure: bool,
@@ -698,6 +727,20 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         // A supported return annotation is authoritative; without one the return
         // type is inferred by joining the return operands below.
         let annotated = ret.is_some();
+
+        // Seed the locals that flow into the returned record/variant from a known
+        // aggregate's field types: a declared aggregate return, or the caller's
+        // expected result (a witness-free constructor). An empty array field built
+        // without a later `push` (`items = []` returned by `new()`) then takes its
+        // element type from the result the caller fixed. Seeding leaves the return
+        // type to be inferred from the now-concrete body, so the constructed record
+        // keeps its full field substitution -- the return type is not forced to the
+        // (possibly sparser) expected type.
+        if let Some(seed) = ret.clone().or(seed_ret)
+            && is_return_polymorphic_result(&seed)
+        {
+            seed_returned_aggregate(body, &seed, &mut local_types);
+        }
 
         // Closure parameter sources: a direct in-body call, or being passed to a
         // higher-order function (probed from the callee). Array pushes give the
@@ -977,7 +1020,13 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                 Ok(())
             }
             MirStmt::Assign(local, rv) => {
-                let t = self.rvalue_type(rv, cur_sym, module, local_types, cur_ret)?;
+                // The destination's already-known type (a `let x: T` annotation, or
+                // a call result seeded from the checker via a `Known` local) is the
+                // expected type for the rvalue -- in particular a static call's
+                // return-polymorphic result.
+                let expected = local_types[local.index()].clone();
+                let t =
+                    self.rvalue_type(rv, cur_sym, module, local_types, cur_ret, expected.as_ref())?;
                 if local_types[local.index()].is_none()
                     && let Some(t) = t
                 {
@@ -988,7 +1037,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             }
             // A call run for its side effect (the result is discarded).
             MirStmt::Eval(rv @ Rvalue::Call(..)) => {
-                self.rvalue_type(rv, cur_sym, module, local_types, cur_ret)?;
+                self.rvalue_type(rv, cur_sym, module, local_types, cur_ret, None)?;
                 Ok(())
             }
             MirStmt::Eval(_) => {
@@ -1028,6 +1077,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         module: &[String],
         local_types: &[Option<Type>],
         cur_ret: &Option<Type>,
+        expected: Option<&Type>,
     ) -> Result<Option<Type>, String> {
         match rv {
             Rvalue::Use(op) => self.operand_type(op, local_types),
@@ -1105,9 +1155,16 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             Rvalue::Call(Callee::Method(name), args) => {
                 self.method_call_type(name, args, cur_sym, cur_ret, local_types)
             }
-            Rvalue::Call(Callee::Static { ty, method }, args) => {
-                self.static_call_type(ty, method, args, cur_sym, cur_ret, module, local_types)
-            }
+            Rvalue::Call(Callee::Static { ty, method }, args) => self.static_call_type(
+                ty,
+                method,
+                args,
+                cur_sym,
+                cur_ret,
+                module,
+                local_types,
+                expected,
+            ),
             // `value_matches` (variant test) yields bool; `panic` yields void;
             // other builtins are out of scope.
             Rvalue::Call(Callee::Builtin(name), args) => match name.as_str() {
@@ -1315,7 +1372,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                 let module = method.module.clone();
                 let fallible = method.fallible;
                 return self.resolve_callable(
-                    cur_sym, cur_ret, target, body, &module, arg_types, ret_ann, fallible,
+                    cur_sym, cur_ret, target, body, &module, arg_types, ret_ann, None, fallible,
                 );
             }
         }
@@ -1349,6 +1406,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         cur_ret: &Option<Type>,
         module: &[String],
         local_types: &[Option<Type>],
+        expected: Option<&Type>,
     ) -> Result<Option<Type>, String> {
         let Some(arg_types) = self.arg_types(args, local_types)? else {
             return Ok(None);
@@ -1372,18 +1430,28 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             .get(&(type_symbol.as_str(), method_name))
             .ok_or_else(|| format!("type `{ty}` has no static method `{method_name}`"))?;
         let ret_ann = method_ret_annotation(self.program, &type_symbol, method_name);
-        let target = static_symbol(ty, method_name, &arg_types);
+        // The caller's expected result type (the destination local's resolved type,
+        // seeded from the checker) seeds a witness-free constructor's empty array
+        // fields and keys a return-polymorphic, no-argument constructor by its
+        // result. It does *not* override the body-inferred return: seeding makes the
+        // body's own return concrete, and the constructed record carries the full
+        // field substitution the back end lays out from.
+        let seed = expected
+            .filter(|t| is_return_polymorphic_result(t))
+            .cloned();
+        let target = static_symbol(ty, method_name, &arg_types, seed.as_ref());
         let body = &method.body;
         let mmodule = method.module.clone();
         let fallible = method.fallible;
         self.resolve_callable(
-            cur_sym, cur_ret, target, body, &mmodule, arg_types, ret_ann, fallible,
+            cur_sym, cur_ret, target, body, &mmodule, arg_types, ret_ann, seed, fallible,
         )
     }
 
     /// Resolve a call to an already-located method/static body: handle
     /// self-recursion and mutual recursion, instantiate, and return the instance
     /// return type.
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn resolve_callable(
         &mut self,
@@ -1394,6 +1462,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         module: &[String],
         type_args: Vec<Type>,
         ret_ann: Option<Type>,
+        seed_ret: Option<Type>,
         fallible: bool,
     ) -> Result<Option<Type>, String> {
         if target == cur_sym {
@@ -1412,6 +1481,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             type_args,
             ret_ann,
             declared_ok,
+            seed_ret,
             &[],
             Vec::new(),
             false,
@@ -1879,6 +1949,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             param_types.to_vec(),
             None,
             None,
+            None,
             &capture_seed,
             clo.captures.clone(),
             true,
@@ -1973,6 +2044,84 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
 }
 
 /// The declared return type of a record method, if concrete.
+/// Seed the locals that flow into a body's returned record/variant from the
+/// expected return's field types. Used so a constructor's empty array fields take
+/// their element type from the result the caller fixed (the witness-free
+/// `new()`). Only fills locals still untyped, with supported field types, so it
+/// never overrides an inference the body itself can make.
+///
+/// A field value usually arrives through a `let` binding (`let items = []; Self
+/// { items: items }`), which lowers to a temporary holding the empty array and a
+/// binding local copied from it. Seeding only the binding would leave the actual
+/// empty-array temporary untyped, so the seed is propagated backward along
+/// `Use`-copy chains to reach it.
+fn seed_returned_aggregate(body: &MirBody, ret_ty: &Type, local_types: &mut [Option<Type>]) {
+    let returned: Vec<LocalId> = body
+        .blocks
+        .iter()
+        .filter_map(|b| match &b.term {
+            Terminator::Return(Operand::Local(r)) => Some(*r),
+            _ => None,
+        })
+        .collect();
+    if returned.is_empty() {
+        return;
+    }
+    // `dest -> src` for every `dest = Use(src)` copy, so a seed on a binding can
+    // be carried back to the temporary it copied.
+    let mut copy_of: HashMap<LocalId, LocalId> = HashMap::new();
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let MirStmt::Assign(dest, Rvalue::Use(Operand::Local(src))) = stmt {
+                copy_of.insert(*dest, *src);
+            }
+        }
+    }
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            let MirStmt::Assign(dest, rv) = stmt else {
+                continue;
+            };
+            if !returned.contains(dest) {
+                continue;
+            }
+            let fields = match rv {
+                Rvalue::Record { fields, .. } | Rvalue::Variant { fields, .. } => fields,
+                _ => continue,
+            };
+            for (fname, op) in fields {
+                let Operand::Local(fl) = op else { continue };
+                let Some(fty) = aggregate_field_type(ret_ty, fname) else {
+                    continue;
+                };
+                if !is_supported(&fty) {
+                    continue;
+                }
+                // Seed the field operand and every temporary it was copied from.
+                let mut cur = *fl;
+                loop {
+                    if local_types[cur.index()].is_none() {
+                        local_types[cur.index()] = Some(fty.clone());
+                    }
+                    match copy_of.get(&cur) {
+                        Some(&src) => cur = src,
+                        None => break,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A field's resolved type from an aggregate's instance substitution (the
+/// checker-resolved record/variant carries each field's concrete type there).
+fn aggregate_field_type(ty: &Type, field: &str) -> Option<Type> {
+    match ty {
+        Type::Record(n) | Type::Sum(n) => n.substitution.get(field).cloned(),
+        _ => None,
+    }
+}
+
 fn method_ret_annotation(program: &Program, type_symbol: &str, method: &str) -> Option<Type> {
     let info = program.types.get(type_symbol)?;
     let TypeKind::Record { methods, .. } = &info.kind else {

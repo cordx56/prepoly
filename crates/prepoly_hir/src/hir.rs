@@ -107,6 +107,29 @@ impl From<&Param> for ParamInfo {
     }
 }
 
+/// A record type generalized together with its methods: the inferred type
+/// parameters shared between the type's fields and its methods' signatures,
+/// produced once per record type by co-checking its methods in one type
+/// environment (see `prepoly_typeck`). `params` are the inference-variable ids
+/// the generalization quantifies (the `K`/`V` of a `HashMap`); `fields` and
+/// `methods` carry types expressed over those ids. A binding or call instantiates
+/// the scheme by renaming `params` to fresh variables. A monomorphic record (no
+/// inferred field, e.g. a fully-annotated `Point`) has an empty `params`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TypeScheme {
+    pub params: Vec<u32>,
+    pub fields: Vec<(String, Type)>,
+    pub methods: std::collections::BTreeMap<String, SchemeMethod>,
+}
+
+/// A method's signature within a [`TypeScheme`]: parameter types (including the
+/// leading `self`) and the return type, all expressed over the scheme's `params`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SchemeMethod {
+    pub params: Vec<(String, Type)>,
+    pub ret: Type,
+}
+
 /// Function or method signature data owned by HIR.
 #[derive(Clone, Debug)]
 pub struct CallableSignature {

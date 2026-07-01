@@ -539,13 +539,22 @@ impl<'p> Hm<'p> {
             }
             Expr::Null(_) => Type::Nullable(Box::new(self.solver.fresh(InferenceVarKind::Source))),
             Expr::Ident(name, _) => self.infer_ident(name),
-            Expr::SelfExpr(span) => match self.self_type.clone() {
-                Some(t) => t,
-                None => {
-                    self.error("`self` is only valid inside a method".into(), *span);
-                    self.solver.fresh(InferenceVarKind::Source)
+            Expr::SelfExpr(span) => {
+                // A closure may bind `self` as a parameter -- a closure-typed
+                // field whose type names the enclosing type (`(self, T) -> U`) --
+                // so resolve a `self` in scope before the method receiver.
+                if let Some(scheme) = self.lookup("self").cloned() {
+                    self.solver.instantiate(&scheme)
+                } else {
+                    match self.self_type.clone() {
+                        Some(t) => t,
+                        None => {
+                            self.error("`self` is only valid inside a method".into(), *span);
+                            self.solver.fresh(InferenceVarKind::Source)
+                        }
+                    }
                 }
-            },
+            }
             Expr::Unary(op, e, span) => self.infer_unary(*op, e, *span),
             Expr::Binary(op, a, b, span) => self.infer_binary(*op, a, b, *span),
             Expr::Call(callee, args, span) => self.infer_call(callee, args, *span),
