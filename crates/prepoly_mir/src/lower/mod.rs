@@ -134,24 +134,10 @@ impl<'p> ProgramCtx<'p> {
         })
     }
 
-    /// Per-parameter "deep-copy the argument" flags for free function `name`: true
-    /// where the parameter is a non-reference heap aggregate (array, tuple, record,
-    /// or sum), so passing it by value copies rather than shares. A `ref(...)`
-    /// parameter borrows (false); a primitive/string or unannotated parameter needs
-    /// no copy (false). `None` if `name` is not a known free function.
-    fn fn_param_copies(&self, module: &[String], name: &str) -> Option<Vec<bool>> {
-        self.program.resolve_function(module, name).map(|info| {
-            info.signature
-                .params
-                .iter()
-                .map(|p| match &p.ty {
-                    Some(t) => self.type_needs_copy(module, t),
-                    None => false,
-                })
-                .collect()
-        })
-    }
-
+    /// Whether an annotated parameter type is passed by deep copy: a non-reference
+    /// heap aggregate (array/slice, tuple, anonymous structure, named record/sum,
+    /// or `infer`). A `ref(...)`/`ref(mut(..))` parameter borrows. The copy is
+    /// applied on entry to the callee (see [`FnLower::entry_param_copies`]).
     fn type_needs_copy(&self, module: &[String], t: &prepoly_parser::ast::TypeExpr) -> bool {
         use prepoly_parser::ast::TypeExpr;
         match t {
@@ -276,28 +262,75 @@ impl<'a, 'p> FnLower<'a, 'p> {
         for p in params {
             self.cells.remove(&p.name);
         }
-        let param_locals = self.bind_params(params);
+        let copies = self.entry_param_copies(params, body);
+        let param_locals = self.bind_params(params, &copies);
         self.lower_body_stmts(&body.stmts);
         self.close_void();
         param_locals
     }
 
-    /// Bind each parameter to a fresh named local, returning them in order.
-    fn bind_params(&mut self, params: &[Param]) -> Vec<LocalId> {
+    /// Which parameters are received by deep copy (a private value the callee
+    /// owns) rather than by shared reference. The copy is applied on entry, so it
+    /// is uniform across free functions, methods, and every dispatch: a callee
+    /// mutating a value it received by copy never writes through to the caller.
+    ///
+    /// - `self` is a reference by default (a shared borrow, or `ref(mut(Self))`
+    ///   when it mutates itself), never copied -- including when a primitive-type
+    ///   method (`fun infer[].m(self, ..)`) carries a synthesized receiver-type
+    ///   annotation on `self`. The one exception is an explicit `self: Self` (or
+    ///   the concrete type name) on a user record/sum method, requesting an owned
+    ///   deep copy.
+    /// - An annotated non-`self` parameter follows its annotation: a non-reference
+    ///   heap aggregate or `infer` copies; a `ref`/`ref(mut)` borrows.
+    /// - An unannotated non-`self` parameter is inferred: the body mutating it
+    ///   through its reference makes it a private `mut` copy, otherwise a shared
+    ///   `ref` borrow.
+    fn entry_param_copies(&self, params: &[Param], body: &Block) -> Vec<bool> {
         params
             .iter()
             .map(|p| {
+                if p.name == "self" {
+                    return matches!(&p.ty, Some(prepoly_parser::ast::TypeExpr::Named(n, _))
+                        if self.self_type.is_some()
+                            && (n == "Self" || Some(n.as_str()) == self.self_type.as_deref()));
+                }
+                match &p.ty {
+                    Some(t) => self.ctx.type_needs_copy(&self.module, t),
+                    None => prepoly_hir::mutates_root(body, &p.name),
+                }
+            })
+            .collect()
+    }
+
+    /// Bind each parameter to a fresh named local, returning the formals in order.
+    /// A parameter received by copy is bound to a private `__deep_copy` of the
+    /// formal, so the body works on its own value; the formal still receives the
+    /// caller's argument for monomorphization.
+    fn bind_params(&mut self, params: &[Param], copies: &[bool]) -> Vec<LocalId> {
+        params
+            .iter()
+            .zip(copies)
+            .map(|(p, &copy)| {
                 // A parameter with a resolvable annotation is bound to a typed local
                 // so monomorphization uses its declared type, not each call's argument
                 // type. A nullable parameter thus stays nullable when a value or an
                 // omitted-null argument is passed; the instance's parameter types
                 // (set in monomorphization) drive the caller's argument coercion.
-                let local = match p.ty.as_ref().and_then(stmt::resolve_simple_type) {
+                let formal = match p.ty.as_ref().and_then(stmt::resolve_simple_type) {
                     Some(t) => self.b.fresh_local_typed(Some(p.name.clone()), t),
                     None => self.b.fresh_local(Some(p.name.clone())),
                 };
-                self.bind(&p.name, local);
-                local
+                if copy {
+                    let copied = self.b.emit(crate::value::Rvalue::Call(
+                        crate::value::Callee::Builtin("__deep_copy".into()),
+                        vec![crate::value::Operand::Local(formal)],
+                    ));
+                    let local = self.b.make_local(copied);
+                    self.bind(&p.name, local);
+                } else {
+                    self.bind(&p.name, formal);
+                }
+                formal
             })
             .collect()
     }

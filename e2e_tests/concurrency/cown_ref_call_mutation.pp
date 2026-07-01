@@ -1,13 +1,14 @@
 // A spawn closure mutates `counter` only through a plain function call
-// `bump(counter)` -- a mutable-reference parameter, never `counter.method()` and
-// never `counter = ...`. The ownership analysis must still see this as a mutation
-// and cown (lock-guard) `counter`; otherwise the two threads race and lose
-// updates. With locking + `sync()` the total is exactly 2000, deterministically.
+// `bump(counter)` -- a mutable-reference parameter (`ref(mut(Counter))`, required
+// for the write to reach the caller), never `counter.method()` and never
+// `counter = ...`. The ownership analysis must still see this as a mutation and
+// cown (lock-guard) `counter`; otherwise the two threads race and lose updates.
+// With locking + `sync()` the total is exactly 2000, deterministically.
 type Counter = {
     value: int64
 }
 
-fun bump(c) {
+fun bump(c: ref(mut(Counter))) {
     c.value = c.value + 1
 }
 

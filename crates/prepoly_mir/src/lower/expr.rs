@@ -550,7 +550,6 @@ impl<'a, 'p> FnLower<'a, 'p> {
             if let Some(symbol) = self.ctx.resolve_fn_symbol(&self.module, name) {
                 let mut ops = self.lower_args(args);
                 self.pad_trailing_nullable(name, &mut ops);
-                self.copy_nonref_args(name, &mut ops);
                 return Rvalue::Call(Callee::Free(symbol), ops);
             }
             // Otherwise it is a runtime builtin.
@@ -570,25 +569,6 @@ impl<'a, 'p> FnLower<'a, 'p> {
             ops.push(v);
         }
         ops
-    }
-
-    /// Deep-copy each argument whose parameter is a non-reference heap aggregate
-    /// (the default for a non-`ref` heap type), so the callee mutates its own copy.
-    /// A `ref(...)` parameter is left as a shared borrow. The `__deep_copy` builtin
-    /// is type-directed at codegen (an aggregate is copied, anything else is passed
-    /// through with its reference count balanced).
-    fn copy_nonref_args(&mut self, name: &str, ops: &mut [Operand]) {
-        let Some(copies) = self.ctx.fn_param_copies(&self.module, name) else {
-            return;
-        };
-        for (op, needs) in ops.iter_mut().zip(copies.iter()) {
-            if *needs {
-                *op = self.b.emit(Rvalue::Call(
-                    Callee::Builtin("__deep_copy".into()),
-                    vec![op.clone()],
-                ));
-            }
-        }
     }
 
     /// Pad a call's argument list with `null` for each omitted trailing nullable
@@ -695,7 +675,11 @@ fn lower_closure_body(
             l
         })
         .collect();
-    let param_locals = fl.bind_params(params);
+    // Closure parameters are borrowed (never deep-copied on entry): the copy
+    // inference targets named functions and methods, and closure callbacks
+    // (`map`/`filter`/`fold`) read their arguments rather than mutating them.
+    let no_copies = vec![false; params.len()];
+    let param_locals = fl.bind_params(params, &no_copies);
     match body {
         // Block body: explicit returns drive control flow; a falling-off tail
         // returns void.

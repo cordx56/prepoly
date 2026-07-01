@@ -65,8 +65,24 @@ pub fn function_markdown(full: &FullAnalysis, f: &FunInfo, call_args: Option<&[T
         }
     };
 
+    // The inferred passing mode of each unannotated parameter, shown explicitly:
+    // a parameter the body mutates is a private `mut` copy, otherwise a `ref`
+    // borrow.
+    let mutated: Vec<bool> = f
+        .signature
+        .params
+        .iter()
+        .map(|p| prepoly_hir::mutates_root(&f.decl.body, &p.name))
+        .collect();
+
     let mut namer = UnknownNamer::default();
-    let sig = render_signature_into(&f.signature, &overrides, ret_override.as_ref(), &mut namer);
+    let sig = render_signature_into(
+        &f.signature,
+        &overrides,
+        ret_override.as_ref(),
+        Some(&mutated),
+        &mut namer,
+    );
 
     // Bind the signature's variables to the concrete arguments of the call
     // under the cursor.

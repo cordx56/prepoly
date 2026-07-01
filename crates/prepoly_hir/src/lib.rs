@@ -4,6 +4,7 @@
 
 pub mod hir;
 pub mod lower;
+pub mod mutation;
 pub mod typed;
 pub mod types;
 
@@ -13,6 +14,10 @@ pub use hir::{
     VariantInfo, qualify, resolve_qualified,
 };
 pub use lower::{LowerError, lower};
+pub use mutation::{
+    MutationInfo, mutates_root, param_infers_pass_mode, param_is_copied, param_is_immutable_ref,
+    param_is_infer, param_is_mut_ref, root_ident,
+};
 pub use typed::{Constness, Ownership, RegionId, TypedExpr, TypedExprKind, TypedProgram};
 pub use types::{
     FloatKind, INFER_VAR, IntKind, NominalInfo, NominalKind, NominalType, STRUCTURAL_RECORD_ID,

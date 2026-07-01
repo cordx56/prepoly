@@ -15,16 +15,31 @@ An arithmetic or comparison operator between two numeric values of different typ
 So `int32 + int64` is `int64` and `int32 + float64` is `float64`.
 This conversion applies to numeric *values*; a type annotation still requires its exact type, so a bare integer literal does not satisfy a `float64` annotation (write `1.0`, or convert with `float64.from(x)`).
 
-Also, prepoly uses the following special type annotations:
+Also, prepoly uses the following annotations for how an argument is passed:
 
-- A reference to type `T` is written as `ref(T)`
-- A mutable reference to type `T` is written as `ref(mut(T))`
+- `ref(T)` -- an immutable reference: the callee borrows the value and may read it but not mutate it.
+- `ref(mut(T))` -- a mutable reference: the callee may mutate the value in place, and the change is visible to the caller.
+- `mut(T)` -- a mutable deep copy: the callee gets its own copy to mutate; the caller's value is unchanged.
 
-The type of an argument is treated as a reference type if we don't write any type annotation.
-The mutability of a function argument is inferred:
+When a non-numeric argument has no annotation, its passing mode is inferred from how the body uses it.
+A parameter the body only reads is a shared reference (`ref`); one the body mutates is a private deep copy (`mut`), so the mutation stays local and does not reach the caller:
 
 ```prepoly
-fun double(a) { // a: ref(mut(int32[]))
+fun double(a) { // a: mut(int32[]) -- mutated, so a private copy
+    for e in a {
+        e *= 2
+    }
+}
+
+let arr = [1, 2, 3]
+double(arr)
+println(arr) // outputs [1, 2, 3]: `double` doubled its own copy
+```
+
+To mutate the caller's value through a function, annotate the parameter `ref(mut(T))` -- a mutable reference writes through:
+
+```prepoly
+fun double(a: ref(mut(int32[]))) {
     for e in a {
         e *= 2
     }
@@ -34,6 +49,12 @@ let arr = [1, 2, 3]
 double(arr)
 println(arr) // outputs [2, 4, 6]
 ```
+
+A numeric argument (e.g. `int32`) is always passed by value, so it is never a reference.
+
+The `self` receiver of a method is a special case: it is always a reference.
+A method that only reads `self` receives `ref(Self)`; one that mutates it receives `ref(mut(Self))`, so the change is visible to the caller.
+To work on an owned copy of `self` instead, annotate it `self: Self`.
 
 We can use the `infer` type annotation to explicitly infer a specific part of the type:
 
@@ -47,20 +68,19 @@ fun print_all(a: infer[]) {
 print_all(["a", "b", "c"])
 ```
 
-Note that the `infer` annotation does not include `ref` or `mut`.
-So a value annotated with `infer` is deeply copied:
+The `infer` annotation implies neither `ref` nor `mut`: a value annotated with `infer` is a read-only deep copy, so mutating it is an error.
 
 ```prepoly
-fun double(a: infer) {
+fun total(a: infer) -> int32 {
+    let sum = 0
     for e in a {
-        e *= 2
+        sum += e
     }
-    println(a)
+    return sum
 }
 
 const arr = [1, 2, 3]
-double(arr)  // outputs [2, 4, 6]
-println(arr) // outputs [1, 2, 3]
+println(total(arr)) // outputs 6; `a` is a read-only copy
 ```
 
 ## Defining types

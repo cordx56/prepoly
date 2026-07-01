@@ -17,7 +17,7 @@ use crate::analysis::FullAnalysis;
 use crate::document::Document;
 use crate::features::nav;
 use crate::render::{
-    UnknownNamer, render_signature_full, render_type, render_type_def, render_type_def_with,
+    UnknownNamer, render_signature_into, render_type, render_type_def, render_type_def_with,
 };
 
 /// Build the hover response for `pos` in `doc`, using the full analysis.
@@ -151,7 +151,23 @@ fn method_hover(doc: &Document, full: &FullAnalysis, local: usize, global: usize
         .unwrap_or((None, None));
     let call_args = call_span.and_then(|s| nav::call_args_at_span(full, s));
     let specialized = specialize_method_signature(&scheme_sig, call_args.as_deref(), ret.as_ref());
-    let rendered = render_signature_full(&specialized, &[], specialized.ret_ty.as_ref());
+    // Show the inferred `ref`/`mut` passing mode of unannotated parameters
+    // (including `self`): a parameter the method body mutates is a private `mut`
+    // copy (or a `ref(mut(Self))` receiver), otherwise a `ref` borrow.
+    let mutated: Option<Vec<bool>> = method_body(full, &recv_ty, &name).map(|body| {
+        specialized
+            .params
+            .iter()
+            .map(|p| prepoly_hir::mutates_root(body, &p.name))
+            .collect()
+    });
+    let rendered = render_signature_into(
+        &specialized,
+        &[],
+        specialized.ret_ty.as_ref(),
+        mutated.as_deref(),
+        &mut UnknownNamer::default(),
+    );
     Some(markup(rendered, Some(doc.range_of(span))))
 }
 
@@ -342,6 +358,32 @@ fn record_method<'a>(
         TypeKind::Record { methods, .. } => methods.get(name).map(|m| &m.signature),
         _ => None,
     }
+}
+
+/// The body of the method `name` on `recv_ty` -- a record/sum method or a stdlib
+/// primitive method -- used to infer each unannotated parameter's `ref`/`mut`
+/// passing mode for display. `None` when the method or its body is not found (an
+/// interface method has no body).
+fn method_body<'a>(
+    full: &'a FullAnalysis,
+    recv_ty: &Type,
+    name: &str,
+) -> Option<&'a prepoly_parser::ast::Block> {
+    let mut t = recv_ty;
+    while let Type::Ref(i) | Type::Mut(i) | Type::ConstOf(i) | Type::Nullable(i) = t {
+        t = i;
+    }
+    if let Type::Record(n) | Type::Sum(n) = t
+        && let TypeKind::Record { methods, .. } = &full.program.type_by_id(n.id)?.kind
+    {
+        return methods.get(name).and_then(|m| m.decl.body.as_ref());
+    }
+    let class = t.primitive_class()?;
+    let symbol = full
+        .program
+        .primitive_methods
+        .get(&(class.to_string(), name.to_string()))?;
+    full.program.functions.get(symbol).map(|f| &f.decl.body)
 }
 
 /// The signature of a stdlib method implemented on a primitive/array receiver

@@ -28,7 +28,7 @@ type HashMap = {
     // which sizes the array at construction without a sample value and lets the
     // element type be inferred from the `_Entry` values stored into full slots.
     entries: infer?[]
-    states: int32[]
+    _states: int32[]
     // `cap` is the slot count (a power of two is not required; the table grows by
     // doubling). `count` is the number of live pairs; `tombs` the number of
     // tombstones. The table grows when `count + tombs` reaches 3/4 of `cap`, which
@@ -51,7 +51,7 @@ fun HashMap.new() {
         states.push(0)
         i += 1
     }
-    return Self { entries: entries, states: states, cap: cap, count: zero, tombs: zero }
+    return Self { entries: entries, _states: states, cap: cap, count: zero, tombs: zero }
 }
 
 // A map built from an array of `[key, value]` pairs.
@@ -86,7 +86,7 @@ fun HashMap._find(self, key) -> int64 {
     let step: int64 = 0
     while step < self.cap {
         let idx = (h + step) % self.cap
-        let s = self.states[idx]
+        let s = self._states[idx]
         if s == 0 {
             return absent
         }
@@ -112,12 +112,12 @@ fun HashMap._insert(self, key, value) {
     let step: int64 = 0
     while step < self.cap {
         let idx = (h + step) % self.cap
-        if self.states[idx] != 1 {
-            if self.states[idx] == 2 {
+        if self._states[idx] != 1 {
+            if self._states[idx] == 2 {
                 self.tombs -= one
             }
             self.entries[idx] = _Entry { key: key, value: value }
-            self.states[idx] = 1
+            self._states[idx] = 1
             self.count += one
             return
         }
@@ -130,7 +130,7 @@ fun HashMap._insert(self, key, value) {
 fun HashMap._grow(self, new_cap) {
     let zero: int64 = 0
     let old_entries = self.entries
-    let old_states = self.states
+    let old_states = self._states
     let old_cap = self.cap
     let entries = []
     let states = []
@@ -141,7 +141,7 @@ fun HashMap._grow(self, new_cap) {
         i += 1
     }
     self.entries = entries
-    self.states = states
+    self._states = states
     self.cap = new_cap
     self.count = zero
     self.tombs = zero
@@ -157,6 +157,8 @@ fun HashMap._grow(self, new_cap) {
 }
 
 // Insert `key`/`value`, or overwrite the value if `key` is already present.
+// `self` is mutated (it stores into the slot arrays), so it is inferred as a
+// mutable reference `ref(mut(Self))` -- like every other mutating method here.
 fun HashMap.set(self, key, value) {
     let existing = self._find(key)
     if existing >= 0 {
@@ -210,7 +212,7 @@ fun HashMap.delete(self, key) -> bool {
     if idx < 0 {
         return false
     }
-    self.states[idx] = 2
+    self._states[idx] = 2
     self.tombs += one
     self.count -= one
     return true
@@ -229,7 +231,7 @@ fun HashMap.keys(self) {
     let result = []
     let i: int64 = 0
     while i < self.cap {
-        if self.states[i] == 1 {
+        if self._states[i] == 1 {
             if let e = self.entries[i] {
                 result.push(e.key)
             }
@@ -244,7 +246,7 @@ fun HashMap.values(self) {
     let result = []
     let i: int64 = 0
     while i < self.cap {
-        if self.states[i] == 1 {
+        if self._states[i] == 1 {
             if let e = self.entries[i] {
                 result.push(e.value)
             }
@@ -259,7 +261,7 @@ fun HashMap.pairs(self) {
     let result = []
     let i: int64 = 0
     while i < self.cap {
-        if self.states[i] == 1 {
+        if self._states[i] == 1 {
             if let e = self.entries[i] {
                 result.push([e.key, e.value])
             }
@@ -274,7 +276,7 @@ fun HashMap.clear(self) {
     let zero: int64 = 0
     let i: int64 = 0
     while i < self.cap {
-        self.states[i] = 0
+        self._states[i] = 0
         i += 1
     }
     self.count = zero

@@ -143,8 +143,39 @@ pub fn render_signature_full(
         sig,
         inferred_params,
         inferred_ret,
+        None,
         &mut UnknownNamer::default(),
     )
+}
+
+/// Whether a type is passed by value (a primitive), so an unannotated parameter
+/// of this type is shown without a `ref`/`mut` wrapper. Every other (heap) type
+/// -- string, array, record, sum, tuple, closure, or an unresolved variable --
+/// is passed by reference or copy and is shown wrapped.
+fn is_value_display_type(ty: &Type) -> bool {
+    matches!(ty, Type::Bool | Type::Int(_) | Type::Float(_))
+}
+
+/// The display form of an unannotated parameter's inferred passing mode: `self`
+/// is a reference (`ref(mut(Self))` when it mutates itself, else `ref(Self)`); a
+/// non-self heap parameter is a private `mut` copy when mutated, else a shared
+/// `ref` borrow; a value parameter (a primitive) is shown bare. `inner` is the
+/// already-rendered underlying type.
+fn wrap_inferred_mode(inner: String, is_self: bool, is_value: bool, mutated: bool) -> String {
+    if is_self {
+        return if mutated {
+            format!("ref(mut({inner}))")
+        } else {
+            format!("ref({inner})")
+        };
+    }
+    if is_value {
+        inner
+    } else if mutated {
+        format!("mut({inner})")
+    } else {
+        format!("ref({inner})")
+    }
 }
 
 /// Like [`render_signature_full`], but numbering inference variables through the
@@ -155,23 +186,43 @@ pub fn render_signature_into(
     sig: &CallableSignature,
     inferred_params: &[Option<Type>],
     inferred_ret: Option<&Type>,
+    mutated: Option<&[bool]>,
     namer: &mut UnknownNamer,
 ) -> String {
     let mut rendered = Vec::with_capacity(sig.params.len());
     for (i, p) in sig.params.iter().enumerate() {
-        // The method receiver is written bare in source and its type is the
-        // enclosing type, so it is shown as `self` without consuming an
-        // `unknown_N` slot -- the first real unannotated parameter is then
-        // `unknown_0`.
+        let is_mutated = mutated.and_then(|m| m.get(i).copied());
+        // An unannotated `self` is a reference. Without mutation information it is
+        // shown bare (`self`); with it, the inferred wrapper is shown explicitly
+        // (`self: ref(Self)` or `self: ref(mut(Self))`), without consuming an
+        // `unknown_N` slot.
         if p.name == "self" && p.resolved_ty.is_none() {
-            rendered.push("self".to_string());
+            match is_mutated {
+                Some(m) => rendered.push(format!(
+                    "self: {}",
+                    wrap_inferred_mode("Self".into(), true, false, m)
+                )),
+                None => rendered.push("self".to_string()),
+            }
             continue;
         }
         let inferred = inferred_params.get(i).and_then(|o| o.as_ref());
+        // An annotated parameter renders from its type (which already shows any
+        // `ref`/`mut`). An unannotated one renders its inferred type (or a fresh
+        // `unknown_N`) and, when mutation information is available, shows the
+        // inferred `ref`/`mut` passing mode explicitly.
         let ty = match (&p.resolved_ty, inferred) {
             (Some(t), _) => render_type(t, namer),
-            (None, Some(t)) => render_type(t, namer),
-            (None, None) => namer.fresh(),
+            (None, inf) => {
+                let (inner, is_value) = match inf {
+                    Some(t) => (render_type(t, namer), is_value_display_type(t)),
+                    None => (namer.fresh(), false),
+                };
+                match is_mutated {
+                    Some(m) => wrap_inferred_mode(inner, false, is_value, m),
+                    None => inner,
+                }
+            }
         };
         rendered.push(format!("{}: {ty}", p.name));
     }

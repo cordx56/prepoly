@@ -10,6 +10,6 @@
 # User guide
 
 - [Hello, world!](hello.md)
-- [Defining types](types.md)
+- [Type system](types.md)
 - [Modules](modules.md)
 - [LLM agents](llm.md)

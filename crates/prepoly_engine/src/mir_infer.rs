@@ -452,6 +452,16 @@ impl BodyTyper {
             Rvalue::Global(name) => resolver.global_type(name).unwrap_or_else(|| self.fresh()),
             Rvalue::Call(callee, args) => {
                 let arg_types: Vec<Type> = args.iter().map(|a| self.operand_type(a)).collect();
+                // `__deep_copy(x)` (inserted to give a by-value parameter its own
+                // copy) is type-preserving, so it yields its argument's type. This
+                // keeps a copied parameter as precise as the original -- e.g. a
+                // record parameter copied on entry still types its field accesses.
+                if let prepoly_mir::Callee::Builtin(b) = callee
+                    && b == "__deep_copy"
+                    && let Some(t) = arg_types.first()
+                {
+                    return t.clone();
+                }
                 // A method call on a deferred receiver records a method requirement.
                 if let prepoly_mir::Callee::Method(m) = callee
                     && let Some(Type::Unknown(id)) =

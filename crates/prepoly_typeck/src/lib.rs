@@ -982,50 +982,62 @@ mod tests {
     }
 
     #[test]
-    fn const_array_through_a_mutating_function_is_rejected() {
-        // Mutability is inferred from use: `f` pushes to its parameter, so the
-        // parameter is mutable and passing a const array is rejected -- the same
-        // rule whether the push is written directly or behind a function.
-        let e =
+    fn const_to_an_unannotated_mutating_function_is_allowed() {
+        // An unannotated parameter the body mutates is a private deep copy (an
+        // inferred `mut`), so the mutation never reaches the caller. Passing a
+        // const array is therefore allowed -- only a `ref(mut(T))` write-through
+        // parameter rejects a const.
+        let ok =
             errs("fun f(arr) {\n    arr.push(99)\n}\nconst a = [1]\nfun main() {\n    f(a)\n}\n");
         assert!(
-            e.iter().any(|m| m.contains("`a`") && m.contains("mutable")),
-            "passing a const array to a function that pushes should be rejected: {e:?}"
-        );
-        // A `let` array satisfies the mutable parameter.
-        let ok =
-            errs("fun f(arr) {\n    arr.push(99)\n}\nfun main() {\n    let a = [1]\n    f(a)\n}\n");
-        assert!(
             ok.is_empty(),
-            "a mutable array argument must be allowed: {ok:?}"
+            "a const to an unannotated (copied) mutating parameter must be allowed: {ok:?}"
+        );
+        // A `ref(mut(int32[]))` parameter writes through, so a const is rejected.
+        let e = errs(
+            "fun f(arr: ref(mut(int32[]))) {\n    arr.push(99)\n}\nconst a = [1]\nfun main() {\n    f(a)\n}\n",
+        );
+        assert!(
+            e.iter().any(|m| m.contains("`a`") && m.contains("mutable")),
+            "passing a const array to a `ref(mut(T))` parameter should be rejected: {e:?}"
         );
     }
 
     #[test]
-    fn const_through_a_transitive_mutating_function_is_rejected() {
-        // Mutability is interprocedural: `g` mutates its parameter directly and
-        // `f` only forwards its parameter to `g`, so `f`'s parameter is mutable
-        // too. Passing a const through the forwarding `f` must be rejected, and
-        // the chain holds at any depth.
+    fn const_through_a_transitive_write_through_function_is_rejected() {
+        // Write-through is interprocedural: `g` takes `ref(mut(P))` and writes
+        // through it, and `f` only forwards its parameter to `g`, so `f`'s
+        // parameter is a write-through position too. Passing a const through the
+        // forwarding `f` must be rejected, and the chain holds at any depth.
         let two = errs(
-            "type P = { x: int32 }\nfun g(p) { p.x = 5 }\nfun f(p) { g(p) }\nconst c = P { x: 1 }\nfun main() {\n    f(c)\n}\n",
+            "type P = { x: int32 }\nfun g(p: ref(mut(P))) { p.x = 5 }\nfun f(p) { g(p) }\nconst c = P { x: 1 }\nfun main() {\n    f(c)\n}\n",
         );
         assert!(
             two.iter()
                 .any(|m| m.contains("`c`") && m.contains("mutable")),
-            "a const forwarded one level into a mutator should be rejected: {two:?}"
+            "a const forwarded one level into a write-through parameter should be rejected: {two:?}"
         );
         let three = errs(
-            "type P = { x: int32 }\nfun deep(p) { p.x = 9 }\nfun mid(p) { deep(p) }\nfun top(p) { mid(p) }\nconst c = P { x: 1 }\nfun main() {\n    top(c)\n}\n",
+            "type P = { x: int32 }\nfun deep(p: ref(mut(P))) { p.x = 9 }\nfun mid(p) { deep(p) }\nfun top(p) { mid(p) }\nconst c = P { x: 1 }\nfun main() {\n    top(c)\n}\n",
         );
         assert!(
             three
                 .iter()
                 .any(|m| m.contains("`c`") && m.contains("mutable")),
-            "a const forwarded three levels into a mutator should be rejected: {three:?}"
+            "a const forwarded three levels into a write-through parameter should be rejected: {three:?}"
         );
-        // A function that only reads its forwarded parameter places no mutability
-        // requirement, so a const argument is accepted.
+        // Forwarding a const into a parameter that only *copies* it (an
+        // unannotated mutating callee) places no write-through requirement, so the
+        // const argument is accepted -- the mutation hits the callee's own copy.
+        let copied = errs(
+            "type P = { x: int32 }\nfun g(p) { p.x = 5 }\nfun f(p) { g(p) }\nconst c = P { x: 1 }\nfun main() {\n    f(c)\n}\n",
+        );
+        assert!(
+            copied.is_empty(),
+            "a const forwarded into a copying mutator must be allowed: {copied:?}"
+        );
+        // A function that only reads its forwarded parameter places no requirement
+        // either, so a const argument is accepted.
         let ok = errs(
             "type P = { x: int32 }\nfun read(p) -> int32 { return p.x }\nfun fwd(p) -> int32 { return read(p) }\nconst c = P { x: 7 }\nfun main() {\n    println(fwd(c))\n}\n",
         );
@@ -1067,6 +1079,48 @@ mod tests {
         assert!(
             ok.is_empty(),
             "a const argument to a copied array parameter must be allowed: {ok:?}"
+        );
+    }
+
+    #[test]
+    fn mutating_an_infer_parameter_is_rejected() {
+        // `a: infer` receives a read-only deep copy, so mutating it through its
+        // reference is rejected; reading it is fine.
+        let e = errs("fun f(a: infer) {\n    a.push(1)\n}\nfun main() {\n    f([1, 2])\n}\n");
+        assert!(
+            e.iter()
+                .any(|m| m.contains("cannot mutate parameter `a`") && m.contains("infer")),
+            "mutating an `infer` parameter should be rejected: {e:?}"
+        );
+        let ok = errs(
+            "fun f(a: infer) -> int32 {\n    return a[0]\n}\nfun main() {\n    let v: int32 = f([1, 2])\n}\n",
+        );
+        assert!(
+            ok.is_empty(),
+            "reading an `infer` parameter must be allowed: {ok:?}"
+        );
+        // Writing back through a loop variable (`e *= 2`) mutates the iterated
+        // array, so it is rejected on a read-only `infer` parameter too.
+        let loop_e = errs(
+            "fun f(a: infer) {\n    for e in a {\n        e *= 2\n    }\n}\nfun main() {\n    f([1, 2])\n}\n",
+        );
+        assert!(
+            loop_e
+                .iter()
+                .any(|m| m.contains("cannot mutate parameter `a`")),
+            "mutating an `infer` parameter through a loop variable should be rejected: {loop_e:?}"
+        );
+    }
+
+    #[test]
+    fn mutating_an_unannotated_parameter_is_allowed() {
+        // An unannotated parameter the body mutates is inferred as a private `mut`
+        // copy, so mutating it is fine (the caller is unaffected at runtime).
+        let ok =
+            errs("fun f(a) {\n    a.push(1)\n}\nfun main() {\n    let xs = [1]\n    f(xs)\n}\n");
+        assert!(
+            ok.is_empty(),
+            "mutating an unannotated parameter must be allowed: {ok:?}"
         );
     }
 
@@ -1139,16 +1193,25 @@ mod tests {
     }
 
     #[test]
-    fn const_argument_to_mutating_function_is_rejected() {
-        // Passing a const record into a parameter the callee reassigns would
-        // mutate a value declared immutable at the call site.
+    fn const_argument_to_write_through_function_is_rejected() {
+        // Passing a const record into a `ref(mut(P))` parameter would mutate a
+        // value declared immutable at the call site, through the reference.
         let e = errs(
-            "type P = { x: int32 }\nfun f(p: P) { p.x = 5 }\nfun main() {\n    const q = P { x: 1 }\n    f(q)\n}\n",
+            "type P = { x: int32 }\nfun f(p: ref(mut(P))) { p.x = 5 }\nfun main() {\n    const q = P { x: 1 }\n    f(q)\n}\n",
         );
         assert!(
             e.iter()
                 .any(|m| m.contains("cannot pass const value `q` to `f`")),
             "{e:?}"
+        );
+        // A bare-record parameter is a deep copy, so the same const is accepted:
+        // the callee mutates its own copy, not the caller's const.
+        let ok = errs(
+            "type P = { x: int32 }\nfun f(p: P) { p.x = 5 }\nfun main() {\n    const q = P { x: 1 }\n    f(q)\n}\n",
+        );
+        assert!(
+            ok.is_empty(),
+            "a const to a copied record parameter must be allowed: {ok:?}"
         );
     }
 

@@ -99,10 +99,24 @@ fn hover_shows_unknown_numbered_signature() {
     let h = hover::hover(&doc, &full, pos).expect("hover over the function name");
     let text = hover_text(&h);
     assert!(
-        text.contains("fun id(x: unknown_0) -> unknown_0"),
+        text.contains("fun id(x: ref(unknown_0)) -> unknown_0"),
         "identity type: {text}"
     );
     assert!(!text.contains("---"), "no bindings without a call: {text}");
+}
+
+/// An unannotated parameter the body mutates is shown as a private `mut` deep
+/// copy, distinguishing it from an unmutated `ref` borrow.
+#[test]
+fn hover_shows_mut_for_a_mutated_parameter() {
+    let src = "fun grow(xs) {\n    xs.push(1)\n}\nfun main() {\n    let a = [1]\n    grow(a)\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "grow(xs)", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover over grow"));
+    assert!(
+        text.contains("fun grow(xs: mut("),
+        "a mutated unannotated parameter must show `mut`: {text}"
+    );
 }
 
 /// Hovering a *call* of a generic function shows its generic signature and a
@@ -115,7 +129,7 @@ fn hover_shows_call_site_bindings() {
     let h = hover::hover(&doc, &full, pos).expect("hover over the call");
     let text = hover_text(&h);
     assert!(
-        text.contains("fun f(a: unknown_0, b: unknown_1) -> unknown_0"),
+        text.contains("fun f(a: ref(unknown_0), b: ref(unknown_1)) -> unknown_0"),
         "generic signature: {text}"
     );
     assert!(text.contains("---"), "separator: {text}");
@@ -288,7 +302,7 @@ fn hover_method_call_shows_method_signature() {
     let h = hover::hover(&doc, &full, pos).expect("hover over the method call");
     let text = hover_text(&h);
     assert!(
-        text.contains("fun display(self) -> string"),
+        text.contains("fun display(self: ref(Self)) -> string"),
         "method type with inferred return must be shown, not the call result: {text}"
     );
 }
@@ -304,7 +318,7 @@ fn hover_method_call_specializes_unannotated_params() {
     let h = hover::hover(&doc, &full, pos).expect("hover over the set call");
     let text = hover_text(&h);
     assert!(
-        text.contains("fun set(self, key: string, value: string)"),
+        text.contains("fun set(self: ref(mut(Self)), key: string, value: string)"),
         "method parameters must be specialized to the call: {text}"
     );
 }
@@ -319,7 +333,7 @@ fn hover_method_call_resolves_return_from_receiver() {
     let (doc, pos) = position(src, "get(", false);
     let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover the get call"));
     assert!(
-        text.contains("fun get(self, key: string) -> string?"),
+        text.contains("fun get(self: ref(Self), key: string) -> string?"),
         "the return must be resolved to the map's value type: {text}"
     );
 }
@@ -662,7 +676,7 @@ fn hover_infers_for_loop_iterand_and_element() {
     let (doc, pos) = position(src, "for_type(a)", false);
     let sig = hover_text(&hover::hover(&doc, &full, pos).expect("hover fn"));
     assert!(
-        sig.contains("fun for_type(a: unknown_0[]) -> void"),
+        sig.contains("fun for_type(a: ref(unknown_0[])) -> void"),
         "signature: {sig}"
     );
 }
