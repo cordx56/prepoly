@@ -268,8 +268,10 @@ impl<'a> Lexer<'a> {
                     if !cur.is_empty() {
                         parts.push(StrPart::Lit(std::mem::take(&mut cur)));
                     }
+                    // The fragment's own source starts just past the `{`.
+                    let frag_lo = self.pos + 1;
                     let expr = self.read_interpolation(start)?;
-                    parts.push(StrPart::Interp(expr));
+                    parts.push(StrPart::Interp(expr, frag_lo));
                 }
                 _ => {
                     // Copy raw UTF-8 byte; multi-byte chars pass through intact.

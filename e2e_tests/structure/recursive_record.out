@@ -1,0 +1,7 @@
+6
+1
+2
+Node {
+    value: 9,
+    next: null,
+}

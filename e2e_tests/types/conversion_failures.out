@@ -1,0 +1,4 @@
+ok 200
+err integer value 300 is out of range for uint8 (0..=255)
+parse failed: cannot parse `abc` as integer
+124

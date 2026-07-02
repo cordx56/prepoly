@@ -270,6 +270,47 @@ fn same_function_name_in_two_modules_coexists_and_dispatches() {
 }
 
 #[test]
+fn same_global_name_in_two_modules_gets_its_own_slot() {
+    // Both modules define a top-level `let tag`; global storage is keyed per
+    // defining module, so `m`'s function must read `m`'s value while main reads
+    // its own -- bare-name keying collapsed the two into one slot, and a
+    // mutation in `m` must not touch main's `tag` either. Pinned on both back
+    // ends (the JIT and the REPL interpreter share the MIR global keys).
+    let main = setup(
+        "global_per_module",
+        &[
+            (
+                "m.pp",
+                "let tag = \"module\"\nlet counter = 0\n\
+                 fun mtag() -> string { return tag }\n\
+                 fun bump() { counter = counter + 1 }\n\
+                 fun count() -> int64 { return counter }\n",
+            ),
+            (
+                "main.pp",
+                "import m.{ mtag, bump, count }\n\nlet tag = \"main\"\n\
+                 fun main() { println(mtag()) println(tag) bump() bump() println(count()) }\n",
+            ),
+        ],
+    );
+    let expected = "module\nmain\n2\n";
+    let (ok, out) = run(&main);
+    assert!(ok, "expected success, got: {out}");
+    assert_eq!(out, expected, "JIT global slots collided");
+    let out = Command::new(env!("CARGO_BIN_EXE_prepoly"))
+        .arg("repl")
+        .arg(&main)
+        .output()
+        .expect("spawn prepoly repl");
+    assert!(out.status.success(), "repl run failed");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        expected,
+        "REPL global slots collided"
+    );
+}
+
+#[test]
 fn typed_int_functions_compile_and_run_correctly() {
     // Leaf integer-arithmetic functions compile to typed unboxed
     // bodies behind uniform-ABI adapters; results must match the uniform path,
@@ -479,6 +520,69 @@ fn stdlib_string_function_rejects_wrong_argument_type() {
     assert!(!ok, "expected failure");
     assert!(
         out.contains("cannot use `int32` where `string` is required"),
+        "{out}"
+    );
+}
+
+#[test]
+fn phantom_std_import_is_rejected() {
+    // An import from a module that was never loaded (`std.phantom`) used to
+    // fall back to accepting any name defined anywhere in the program, which
+    // made every module's definitions reachable without importing the module.
+    // Only genuine std exports resolve for unloaded paths; anything else is an
+    // unknown module.
+    let main = setup(
+        "phantom_std_import",
+        &[
+            (
+                "a/util.pp",
+                "fun secret_helper() -> int32 { return 42 }\n",
+            ),
+            (
+                "loader.pp",
+                "import a.util.{ secret_helper }\nfun use_it() -> int32 { return secret_helper() }\n",
+            ),
+            (
+                "main.pp",
+                "import loader.{ use_it }\nimport std.phantom.{ secret_helper }\n\
+                 fun main() { println(secret_helper()) }\n",
+            ),
+        ],
+    );
+    let (ok, out) = check(&main);
+    assert!(!ok, "expected failure, got: {out}");
+    assert!(
+        out.contains("cannot import from unknown module `std.phantom`"),
+        "{out}"
+    );
+}
+
+#[test]
+fn bare_prelude_import_still_resolves() {
+    // The bare prelude spelling (`import conv.{ ... }`) aliases the loaded
+    // `std.conv` module and keeps resolving against its real exports, while a
+    // name conv does not export is rejected against those same exports.
+    let main = setup(
+        "bare_prelude_import",
+        &[(
+            "main.pp",
+            "import conv.{ int32_parse }\nfun main() { println(int32_parse(\"41\")! + 1) }\n",
+        )],
+    );
+    let (ok, out) = run(&main);
+    assert!(ok, "expected success, got: {out}");
+    assert!(out.contains("42"), "{out}");
+    let bad = setup(
+        "bare_prelude_import_bad",
+        &[(
+            "main.pp",
+            "import conv.{ no_such_export }\nfun main() { println(1) }\n",
+        )],
+    );
+    let (ok, out) = check(&bad);
+    assert!(!ok, "expected failure, got: {out}");
+    assert!(
+        out.contains("module `conv` has no exported name `no_such_export`"),
         "{out}"
     );
 }

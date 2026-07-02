@@ -200,8 +200,10 @@ fun Box.get(self) {
 }
 ";
     let text = lower_whole(src);
-    // The top-level `let` initializes a module global in an init body.
-    assert!(text.contains("global counter = 0"), "{text}");
+    // The top-level `let` initializes a module global in an init body; the
+    // global is keyed by its defining module so same-named globals in other
+    // modules stay distinct.
+    assert!(text.contains("global counter@main = 0"), "{text}");
     // The instance method reads `self.value` via a field load.
     assert!(text.contains("method Box.get"), "{text}");
     assert!(text.contains("load _0.value"), "{text}");

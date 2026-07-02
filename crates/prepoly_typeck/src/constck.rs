@@ -7,21 +7,25 @@
 use std::collections::HashMap;
 
 use prepoly_hir::{
-    MutationInfo, ParamInfo, Program, Type, TypeKind, mutates_root, param_is_immutable_ref,
-    param_is_infer, root_ident,
+    MutationInfo, NominalInfo, ParamInfo, Program, Type, TypeInfo, TypeKind, mutates_root,
+    param_is_immutable_ref, param_is_infer, root_ident,
 };
 use prepoly_parser::ast::*;
 
 use crate::TypeError;
 
-/// A binding tracked for const checking. `Const` carries the receiver type name
-/// when it is statically known, which is used to detect mutating-method calls.
-/// `Mutable` records a non-const `let` so that it shadows an outer const of the
-/// same name (e.g. a local that reuses a global const's name), suppressing
-/// false positives on assignment to the inner binding.
+/// A binding tracked for const checking. `Const` carries the binding's type
+/// when it is statically derivable (from the annotation, the constructed
+/// value, or a called function's return type), which is used to detect
+/// mutating-method calls through field/element projections. `Fn` records a
+/// local bound to a named free function (`let f = mutate`), so calls through
+/// the alias resolve to the aliased function's write-through facts. `Mutable`
+/// records a non-const `let` so that it shadows an outer const of the same
+/// name, suppressing false positives on assignment to the inner binding.
 #[derive(Clone)]
 enum Binding {
-    Const(Option<String>),
+    Const(Option<Type>),
+    Fn(String),
     Mutable,
 }
 
@@ -50,6 +54,45 @@ pub fn check(program: &Program) -> Vec<TypeError> {
     };
     checker.check_program();
     checker.errors
+}
+
+/// Peel the wrappers that do not change which value a place denotes
+/// (mutability, const-ness, reference-ness, and nullability -- narrowing a
+/// `T?` yields the same shared `T`), so projections and method lookups
+/// dispatch on the underlying type.
+fn peel(ty: &Type) -> &Type {
+    match ty {
+        Type::Mut(inner) | Type::ConstOf(inner) | Type::Ref(inner) | Type::Nullable(inner) => {
+            peel(inner)
+        }
+        _ => ty,
+    }
+}
+
+/// The nominal (record/sum) type name a value of `ty` dispatches methods on.
+fn nominal_name(ty: &Type) -> Option<&str> {
+    match peel(ty) {
+        Type::Record(n) | Type::Sum(n) => Some(n.name()),
+        _ => None,
+    }
+}
+
+/// The element type of an array/slice value.
+fn element_type(ty: &Type) -> Option<Type> {
+    match peel(ty) {
+        Type::Slice(inner) | Type::Array(inner, _) => Some((**inner).clone()),
+        _ => None,
+    }
+}
+
+/// Whether a value of `ty` is a shared heap aggregate: binding it aliases the
+/// same value, so constness must propagate to the alias. Primitives (and
+/// strings, which are immutable) are copied on binding instead.
+fn is_shared_heap(ty: &Type) -> bool {
+    matches!(
+        peel(ty),
+        Type::Record(..) | Type::Sum(..) | Type::Slice(..) | Type::Array(..) | Type::Tuple(..)
+    )
 }
 
 impl ConstChecker<'_> {
@@ -89,6 +132,7 @@ impl ConstChecker<'_> {
         // Top-level init statements build their scope up in order, so a global
         // is only visible to later top-level statements, not earlier ones.
         for init in &self.program.inits {
+            self.current_module = init.path.clone();
             let mut scopes = vec![HashMap::new()];
             for stmt in &init.stmts {
                 self.check_stmt(stmt, &mut scopes);
@@ -116,7 +160,7 @@ impl ConstChecker<'_> {
                 if *is_const {
                     consts.insert(
                         name.clone(),
-                        Binding::Const(binding_type_name(self.program, ty, value)),
+                        Binding::Const(self.binding_const_type(&init.path, ty, value)),
                     );
                 } else {
                     consts.remove(name);
@@ -145,15 +189,20 @@ impl ConstChecker<'_> {
             } => {
                 self.check_expr(value, scopes);
                 if let Pattern::Binding(name, _) = pat {
-                    let alias = self.const_record_alias(value, scopes);
+                    let alias = self.const_alias_type(value, scopes);
+                    let fn_alias = self.fn_value_symbol(value, scopes);
+                    let module = self.current_module.clone();
                     if let Some(top) = scopes.last_mut() {
                         let binding = if *is_const {
-                            Binding::Const(binding_type_name(self.program, ty, value))
-                        } else if let Some(type_name) = alias {
-                            // Aliasing a const record/sum binds another handle to
-                            // the same shared value, so constness propagates. The runtime shares heap objects by
-                            // reference, hence the alias is also immutable.
-                            Binding::Const(type_name)
+                            Binding::Const(self.binding_const_type(&module, ty, value))
+                        } else if let Some(ty) = alias {
+                            // Aliasing a const heap value binds another handle to
+                            // the same shared value, so constness propagates. The
+                            // runtime shares heap objects by reference, hence the
+                            // alias is also immutable.
+                            Binding::Const(ty)
+                        } else if let Some(symbol) = fn_alias {
+                            Binding::Fn(symbol)
                         } else {
                             // Record the shadow so it hides an outer const.
                             Binding::Mutable
@@ -186,7 +235,10 @@ impl ConstChecker<'_> {
                 // const, or a `ref(T)` parameter) binds it const, rejecting an
                 // in-place mutation like `e *= 2`. A mutable array binds it mutable.
                 let binding = if self.const_root(iter, scopes).is_some() {
-                    Binding::Const(None)
+                    let elem = self
+                        .const_place_type(iter, scopes)
+                        .and_then(|t| element_type(&t));
+                    Binding::Const(elem)
                 } else {
                     Binding::Mutable
                 };
@@ -210,6 +262,7 @@ impl ConstChecker<'_> {
             Expr::Call(callee, args, span) => {
                 self.check_mutating_const_call(callee, *span, scopes);
                 self.check_const_args_to_mutating_fn(callee, args, scopes);
+                self.check_const_args_to_mutating_method(callee, args, scopes);
                 self.check_expr(callee, scopes);
                 for arg in args {
                     self.check_expr(&arg.expr, scopes);
@@ -271,13 +324,15 @@ impl ConstChecker<'_> {
         let Expr::Field(receiver, method, _) = callee else {
             return;
         };
+        let place_ty = self.const_place_type(receiver, scopes);
+        let nominal = place_ty.as_ref().and_then(|t| nominal_name(t));
         // A built-in growable-array mutator (`push`/`insert`/`remove`/`pop`) on a
         // const array -- or an array reachable from a const struct/sum/tuple root --
         // modifies a value declared immutable, so it is rejected. The receiver is a
         // const place that is not a user nominal type (records/sums whose own
-        // methods are checked via `mutating_methods` below have a type name).
+        // methods are checked via the mutation facts below have a type name).
         if matches!(method.as_str(), "push" | "insert" | "remove" | "pop")
-            && self.const_place_type(receiver, scopes).is_none()
+            && nominal.is_none()
             && let Some(root) = self.const_root(receiver, scopes)
         {
             self.errors.push(TypeError {
@@ -287,12 +342,12 @@ impl ConstChecker<'_> {
             return;
         }
         // The receiver may be a nested projection of a const value
-        // (e.g. `o.inner.bump()`); a mutating method on any field reachable from
-        // a const root is rejected (propagation).
-        let Some(type_name) = self.const_place_type(receiver, scopes) else {
+        // (e.g. `o.inner.bump()` or `arr[0].bump()`); a mutating method on any
+        // place reachable from a const root is rejected (propagation).
+        let Some(type_name) = nominal else {
             return;
         };
-        if self.mutation.method_writes_through_self(&type_name, method) {
+        if self.mutation.method_writes_through_self(type_name, method) {
             let root = root_ident(receiver).unwrap_or("");
             self.errors.push(TypeError {
                 message: format!("cannot call mutating method `{method}` on const value `{root}`"),
@@ -303,7 +358,8 @@ impl ConstChecker<'_> {
 
     /// The const binding a place is rooted in (its root identifier), or `None`
     /// when the root is not const. Unlike `const_place_type` this does not require
-    /// the place to be a user nominal type, so it also covers const arrays/tuples.
+    /// the place's type to be known, so it also covers const arrays/tuples whose
+    /// element types could not be derived.
     fn const_root<'a>(&self, place: &'a Expr, scopes: &ConstScopes) -> Option<&'a str> {
         let root = root_ident(place)?;
         match self.const_binding(scopes, root) {
@@ -344,6 +400,11 @@ impl ConstChecker<'_> {
     /// Any const-rooted place qualifies (records, sums, arrays, tuples) -- a
     /// primitive parameter is never marked mutable (it cannot be mutated through a
     /// reference), so this does not reject a copied `const` primitive argument.
+    ///
+    /// Covers three shapes: a direct call to a write-through function (by name or
+    /// through a `let f = mutate` fn alias), and a higher-order call that passes a
+    /// write-through function alongside the const it will be applied to
+    /// (`apply(mutate, o)` with `fun apply(f, v) { f(v) }`).
     fn check_const_args_to_mutating_fn(
         &mut self,
         callee: &Expr,
@@ -353,22 +414,87 @@ impl ConstChecker<'_> {
         let Expr::Ident(fname, _) = callee else {
             return;
         };
-        // Resolve the bare callee name to the same storage symbol the fixpoint
-        // keyed on, as seen from the body's own module, so cross-module same-named
-        // functions do not alias.
-        let Some(symbol) = self.program.resolve_fn_symbol(&self.current_module, fname) else {
+        let Some(symbol) = self.callee_fn_symbol(fname, scopes) else {
             return;
         };
-        let Some(indices) = self.mutation.write_through_params(&symbol).cloned() else {
+        if let Some(indices) = self.mutation.write_through_params(&symbol).cloned() {
+            for (i, arg) in args.iter().enumerate() {
+                if indices.contains(&i)
+                    && let Some(root) = self.const_root(&arg.expr, scopes)
+                {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "cannot pass const value `{root}` to `{fname}`, which requires a mutable parameter"
+                        ),
+                        span: arg.expr.span(),
+                    });
+                }
+            }
+        }
+        // Higher-order laundering: the callee calls one of its fn-valued
+        // parameters with (some of) its other parameters. Resolve the function
+        // value actually passed here and check its write-through positions
+        // against the arguments it will receive.
+        let Some(calls) = self.mutation.param_calls(&symbol) else {
             return;
         };
+        let mut hof_errors = Vec::new();
+        for pc in calls {
+            let Some(fn_arg) = args.get(pc.fn_param) else {
+                continue;
+            };
+            let Expr::Ident(gname, _) = &fn_arg.expr else {
+                continue;
+            };
+            let Some(gsym) = self.callee_fn_symbol(gname, scopes) else {
+                continue;
+            };
+            let Some(g_indices) = self.mutation.write_through_params(&gsym) else {
+                continue;
+            };
+            for k in g_indices {
+                let Some(j) = pc.args.get(*k).copied().flatten() else {
+                    continue;
+                };
+                if let Some(arg) = args.get(j)
+                    && let Some(root) = self.const_root(&arg.expr, scopes)
+                {
+                    hof_errors.push(TypeError {
+                        message: format!(
+                            "cannot pass const value `{root}` to `{fname}`, which passes it to `{gname}` requiring a mutable parameter"
+                        ),
+                        span: arg.expr.span(),
+                    });
+                }
+            }
+        }
+        self.errors.extend(hof_errors);
+    }
+
+    /// Reject passing a const-rooted value into a method argument position that
+    /// writes through. The receiver's type is generally unknown here (it may be
+    /// any expression), so positions are matched by method name across all types
+    /// -- conservative in the same way as the fixpoint's forwarding step.
+    fn check_const_args_to_mutating_method(
+        &mut self,
+        callee: &Expr,
+        args: &[Arg],
+        scopes: &ConstScopes,
+    ) {
+        let Expr::Field(_, method, _) = callee else {
+            return;
+        };
+        let indices = self.mutation.method_write_through_args_by_name(method);
+        if indices.is_empty() {
+            return;
+        }
         for (i, arg) in args.iter().enumerate() {
             if indices.contains(&i)
                 && let Some(root) = self.const_root(&arg.expr, scopes)
             {
                 self.errors.push(TypeError {
                     message: format!(
-                        "cannot pass const value `{root}` to `{fname}`, which requires a mutable parameter"
+                        "cannot pass const value `{root}` to method `{method}`, which requires a mutable parameter"
                     ),
                     span: arg.expr.span(),
                 });
@@ -376,11 +502,31 @@ impl ConstChecker<'_> {
         }
     }
 
-    /// The user type name of a place expression that is rooted in a const
-    /// binding, following field projections through the type definitions. Returns
-    /// `None` when the place is not const-rooted or its type is not a known
-    /// nominal type.
-    fn const_place_type(&self, place: &Expr, scopes: &ConstScopes) -> Option<String> {
+    /// Resolve a bare callee name at a call site: a local `let f = mutate` fn
+    /// alias takes priority (a non-fn local shadows any like-named function),
+    /// then the module-visible free function.
+    fn callee_fn_symbol(&self, name: &str, scopes: &ConstScopes) -> Option<String> {
+        match self.const_binding(scopes, name) {
+            Some(Binding::Fn(symbol)) => Some(symbol.clone()),
+            Some(_) => None,
+            None => self.program.resolve_fn_symbol(&self.current_module, name),
+        }
+    }
+
+    /// The symbol of the free function `value` denotes, when binding it makes a
+    /// local fn alias: a bare function name, or another fn alias.
+    fn fn_value_symbol(&self, value: &Expr, scopes: &ConstScopes) -> Option<String> {
+        let Expr::Ident(name, _) = value else {
+            return None;
+        };
+        self.callee_fn_symbol(name, scopes)
+    }
+
+    /// The static type of a place expression that is rooted in a const binding,
+    /// following field and index projections through the type definitions.
+    /// Returns `None` when the place is not const-rooted or its type could not
+    /// be derived.
+    fn const_place_type(&self, place: &Expr, scopes: &ConstScopes) -> Option<Type> {
         match place {
             Expr::Ident(name, _) => match self.const_binding(scopes, name) {
                 Some(Binding::Const(ty)) => ty.clone(),
@@ -392,53 +538,134 @@ impl ConstChecker<'_> {
             },
             Expr::Field(base, field, _) => {
                 let base_ty = self.const_place_type(base, scopes)?;
-                self.field_type_name(&base_ty, field)
+                self.field_type(&base_ty, field)
+            }
+            Expr::Index(base, _, _) => {
+                let base_ty = self.const_place_type(base, scopes)?;
+                element_type(&base_ty)
             }
             _ => None,
         }
     }
 
-    /// The nominal type name of a record field, if it has one.
-    fn field_type_name(&self, type_name: &str, field: &str) -> Option<String> {
-        let info = self.program.types.get(type_name)?;
+    /// The declared type of a record field, resolved by the record's nominal id.
+    fn field_type(&self, base_ty: &Type, field: &str) -> Option<Type> {
+        let Type::Record(n) = peel(base_ty) else {
+            return None;
+        };
+        let info = self.program.type_by_id(n.id)?;
         let TypeKind::Record { fields, .. } = &info.kind else {
             return None;
         };
-        let resolved = fields.iter().find(|f| f.name == field)?.resolved_ty.clone();
-        match resolved? {
-            Type::Record(n) | Type::Sum(n) => Some(n.name().to_string()),
-            _ => None,
-        }
+        fields
+            .iter()
+            .find(|f| f.name == field)?
+            .resolved_ty
+            .clone()
+            .filter(|t| !t.is_unknown())
     }
 
     fn const_binding<'a>(&self, scopes: &'a ConstScopes, name: &str) -> Option<&'a Binding> {
         scopes.iter().rev().find_map(|scope| scope.get(name))
     }
 
-    /// The user type name of a const record/sum that `value` directly aliases,
-    /// if any. Only a bare identifier (or `self`) bound to a const heap value
-    /// qualifies: a method/function call produces a fresh value, and primitives
-    /// are copied rather than shared, so neither propagates constness. Returning
-    /// the type name lets mutating-method detection apply to the alias too.
-    fn const_record_alias(&self, value: &Expr, scopes: &ConstScopes) -> Option<Option<String>> {
-        let name = match value {
-            Expr::Ident(name, _) => name.as_str(),
-            Expr::SelfExpr(_) => "self",
-            _ => return None,
-        };
-        match self.const_binding(scopes, name) {
-            // A type name marks a heap record/sum, which is shared by reference;
-            // a const without one is a primitive and is copied on binding.
-            Some(Binding::Const(Some(type_name))) => Some(Some(type_name.clone())),
+    /// The type under which `value` aliases const heap data, if it does: a
+    /// place (identifier, `self`, or a field/index projection) rooted in a
+    /// const binding whose derived type is a shared heap aggregate. Primitives
+    /// are copied on binding, and a place whose type could not be derived stays
+    /// conservative (no alias), matching the previous behavior for untyped
+    /// consts.
+    fn const_alias_type(&self, value: &Expr, scopes: &ConstScopes) -> Option<Option<Type>> {
+        self.const_root(value, scopes)?;
+        let ty = self.const_place_type(value, scopes)?;
+        is_shared_heap(&ty).then_some(Some(ty))
+    }
+
+    /// The statically derivable type of a const binding: the annotation when it
+    /// resolves, else a type derived from the initializer -- a record/variant
+    /// literal, an array literal (a slice of its first derivable element type),
+    /// a free-function call's declared/inferred return type, or a static method
+    /// call's return type.
+    fn binding_const_type(
+        &self,
+        module: &[String],
+        ty: &Option<TypeExpr>,
+        value: &Expr,
+    ) -> Option<Type> {
+        if let Some(te) = ty
+            && let Ok(t) = prepoly_hir::resolve(te, |n| self.nominal_info(module, n))
+            && !t.is_unknown()
+        {
+            return Some(t);
+        }
+        self.value_type(module, value)
+    }
+
+    fn nominal_info(&self, module: &[String], name: &str) -> Option<NominalInfo> {
+        let info = self.program.resolve_type(module, name)?;
+        Some(match info.kind {
+            TypeKind::Record { .. } => NominalInfo::record(info.id),
+            TypeKind::Sum { .. } => NominalInfo::sum(info.id),
+        })
+    }
+
+    /// A best-effort static type for an initializer expression. Only shapes
+    /// whose type is directly derivable are covered; anything else is `None`
+    /// (which keeps the binding conservative, not mutable).
+    fn value_type(&self, module: &[String], value: &Expr) -> Option<Type> {
+        match value {
+            Expr::TypeLit(name, _, _) | Expr::VariantLit(name, _, _, _) => self
+                .program
+                .resolve_type(module, name)
+                .map(TypeInfo::type_ref),
+            // A literal array is a heap slice; its element type is taken from
+            // the first element whose type is derivable, staying open otherwise
+            // (the slice is still known to be heap data).
+            Expr::Array(items, _) => {
+                let elem = items
+                    .iter()
+                    .find_map(|e| self.value_type(module, e))
+                    .unwrap_or(Type::Unknown(prepoly_hir::INFER_VAR));
+                Some(Type::Slice(Box::new(elem)))
+            }
+            Expr::Call(callee, _, _) => match &**callee {
+                Expr::Ident(fname, _) => self
+                    .program
+                    .resolve_function(module, fname)
+                    .and_then(|f| f.signature.ret_ty.clone())
+                    .filter(|t| !t.is_unknown()),
+                // A static method call `T.new(...)`.
+                Expr::Field(recv, m, _) => {
+                    let Expr::Ident(tname, _) = &**recv else {
+                        return None;
+                    };
+                    let info = self.program.resolve_type(module, tname)?;
+                    type_method(info, m)?
+                        .signature
+                        .ret_ty
+                        .clone()
+                        .filter(|t| !t.is_unknown())
+                }
+                _ => None,
+            },
             _ => None,
         }
     }
 }
 
+/// Look up a method by name on a record or any of a sum's variants.
+fn type_method<'a>(info: &'a TypeInfo, method: &str) -> Option<&'a prepoly_hir::MethodInfo> {
+    match &info.kind {
+        TypeKind::Record { methods, .. } => methods.get(method),
+        TypeKind::Sum { variants } => variants.iter().find_map(|v| v.methods.get(method)),
+    }
+}
+
 /// A scope binding each parameter (and `self` for a method) so it shadows a
 /// like-named global const. A `ref(T)` parameter is an immutable reference, so it
-/// binds as const (mutating through it is rejected); every other parameter binds
-/// as a mutable local (it owns its copy, or is a `ref(mut(T))` mutable reference).
+/// binds as const with its declared type (mutating through it, including via a
+/// self-mutating method, is rejected); every other parameter binds as a mutable
+/// local (it owns its copy, or is a `ref(mut(T))` mutable reference).
 fn param_scope(params: &[prepoly_hir::ParamInfo], is_method: bool) -> HashMap<String, Binding> {
     let mut scope = HashMap::new();
     if is_method {
@@ -446,7 +673,7 @@ fn param_scope(params: &[prepoly_hir::ParamInfo], is_method: bool) -> HashMap<St
     }
     for p in params {
         let binding = if param_is_immutable_ref(p) {
-            Binding::Const(None)
+            Binding::Const(p.resolved_ty.clone().filter(|t| !t.is_unknown()))
         } else {
             Binding::Mutable
         };
@@ -465,18 +692,4 @@ fn param_scope(params: &[prepoly_hir::ParamInfo], is_method: bool) -> HashMap<St
 /// duplicate error.
 fn param_permits_mutation(p: &ParamInfo) -> bool {
     !param_is_infer(p) && !param_is_immutable_ref(p)
-}
-
-fn binding_type_name(program: &Program, ty: &Option<TypeExpr>, value: &Expr) -> Option<String> {
-    match ty {
-        Some(TypeExpr::Named(name, _)) if program.types.contains_key(name) => Some(name.clone()),
-        _ => constructed_type_name(value).filter(|name| program.types.contains_key(name)),
-    }
-}
-
-fn constructed_type_name(value: &Expr) -> Option<String> {
-    match value {
-        Expr::TypeLit(name, _, _) | Expr::VariantLit(name, _, _, _) => Some(name.clone()),
-        _ => None,
-    }
 }

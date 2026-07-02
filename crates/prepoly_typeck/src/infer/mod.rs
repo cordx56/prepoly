@@ -25,6 +25,14 @@ use crate::narrow;
 use crate::solver::{InferenceVarKind, Solver};
 use crate::unify::Subst;
 
+mod assign;
+mod builtins;
+mod instantiate;
+mod light;
+
+use assign::{common_nullable_type, integer_literal_fits};
+use builtins::primitive_static_return;
+
 type ScopeStack = Vec<HashMap<String, Type>>;
 
 struct MethodCall<'a> {
@@ -149,6 +157,16 @@ pub fn analyze(program: &Program) -> Inference {
     checker.const_scopes = vec![HashSet::new()];
     for init in &program.inits {
         checker.current_module = init.path.clone();
+        checker.narrowed_bindings.clear();
+        checker.closure_write_targets = init
+            .stmts
+            .iter()
+            .flat_map(|s| {
+                let mut acc = HashSet::new();
+                collect_closure_writes_stmt(s, false, &mut acc);
+                acc
+            })
+            .collect();
         for s in &init.stmts {
             checker.check_stmt(s, &mut scopes);
         }
@@ -223,6 +241,16 @@ struct Checker<'a> {
     /// slice. Consumed (reset) by the literal itself, so nested literals and any
     /// other position stay slices.
     fixed_array_binding: bool,
+    /// Bindings narrowed non-null in the current callable, with their original
+    /// nullable types. A call can re-null a narrowed GLOBAL (any callee may
+    /// write it) or a narrowed local ASSIGNED INSIDE A CLOSURE of this body (a
+    /// closure value may run during the call), so those narrowings are undone
+    /// after every call (`invalidate_narrowed_after_call`). Plain locals are
+    /// unaffected: no callee can rebind them.
+    narrowed_bindings: Vec<(String, Type)>,
+    /// Names assigned anywhere inside a closure literal of the callable body
+    /// currently being checked; see `narrowed_bindings`.
+    closure_write_targets: HashSet<String>,
 }
 
 impl<'a> Checker<'a> {
@@ -247,6 +275,8 @@ impl<'a> Checker<'a> {
             fn_instances: HashMap::new(),
             schemes: HashMap::new(),
             fixed_array_binding: false,
+            narrowed_bindings: Vec::new(),
+            closure_write_targets: HashSet::new(),
         }
     }
 
@@ -552,513 +582,11 @@ impl<'a> Checker<'a> {
         Some(common)
     }
 
-    fn infer_returns_block(
-        &mut self,
-        block: &Block,
-        env: &mut HashMap<String, Type>,
-        normal: &mut Vec<(Type, Span)>,
-        errors: &mut Vec<(Type, Span)>,
-    ) {
-        for stmt in &block.stmts {
-            match stmt {
-                Stmt::Let { pat, value, .. } => {
-                    let ty = self.infer_expr_light(value, env, errors);
-                    self.bind_pattern_light(pat, &ty, env);
-                }
-                Stmt::Assign { value, .. } => {
-                    self.infer_expr_light(value, env, errors);
-                }
-                Stmt::Expr(value) => {
-                    // Grow a locally-built collection's element type: a
-                    // `result = []` then `result.push(x)` pins `result`'s element
-                    // to `x`, so an unannotated function that returns the built
-                    // collection (e.g. `slice`/`map`) infers its element type from
-                    // the values pushed -- which the rest of this light pass would
-                    // otherwise miss, leaving the return an unconstrained `?[]`.
-                    self.track_collection_growth(value, env, errors);
-                    self.infer_returns_expr(value, env, normal, errors);
-                }
-                Stmt::While { cond, body, .. } => {
-                    self.infer_expr_light(cond, env, errors);
-                    self.infer_returns_block(body, &mut env.clone(), normal, errors);
-                }
-                Stmt::For {
-                    var, iter, body, ..
-                } => {
-                    let iter_ty = self.infer_expr_light(iter, env, errors);
-                    let item_ty = prepoly_hir::index_element(&iter_ty)
-                        .unwrap_or_else(|| self.fresh_unknown());
-                    let mut inner = env.clone();
-                    inner.insert(var.clone(), item_ty);
-                    self.infer_returns_block(body, &mut inner, normal, errors);
-                }
-                Stmt::Return(Some(expr), _) => {
-                    let ty = self.infer_expr_light(expr, env, errors);
-                    let resolved = self.resolve(&ty);
-                    match resolved.result_payloads() {
-                        Some((ok, err)) if ok.is_unknown() => {
-                            errors.push((err.clone(), expr.span()))
-                        }
-                        _ => normal.push((ty, expr.span())),
-                    }
-                }
-                Stmt::Return(None, span) => normal.push((Type::Void, *span)),
-                Stmt::Break(_) | Stmt::Continue(_) => {}
-            }
-        }
-    }
-
-    fn infer_returns_expr(
-        &mut self,
-        expr: &Expr,
-        env: &mut HashMap<String, Type>,
-        normal: &mut Vec<(Type, Span)>,
-        errors: &mut Vec<(Type, Span)>,
-    ) {
-        match expr {
-            Expr::If(cond, then, els, _) => {
-                self.infer_expr_light(cond, env, errors);
-                self.infer_returns_block(then, &mut env.clone(), normal, errors);
-                if let Some(els) = els {
-                    self.infer_returns_expr(els, &mut env.clone(), normal, errors);
-                }
-            }
-            Expr::IfLet(_, scrut, then, els, _) => {
-                self.infer_expr_light(scrut, env, errors);
-                self.infer_returns_block(then, &mut env.clone(), normal, errors);
-                if let Some(els) = els {
-                    self.infer_returns_expr(els, &mut env.clone(), normal, errors);
-                }
-            }
-            Expr::Match(scrut, arms, _) => {
-                self.infer_expr_light(scrut, env, errors);
-                for arm in arms {
-                    self.infer_returns_expr(&arm.body, &mut env.clone(), normal, errors);
-                }
-            }
-            Expr::Block(block, _) => {
-                self.infer_returns_block(block, &mut env.clone(), normal, errors)
-            }
-            other => {
-                self.infer_expr_light(other, env, errors);
-            }
-        }
-    }
-
-    /// If `expr` is `recv.push(value)` or `recv.insert(idx, value)` where `recv`
-    /// is a slice/array, unify its element type with the pushed value's type.
-    /// This pins the (fresh, local) element variable of a collection being built
-    /// up, so the light return-inference pass sees the grown element type. It
-    /// only ever binds the local's own element variable, not the function's
-    /// parameter variables.
-    fn track_collection_growth(
-        &mut self,
-        expr: &Expr,
-        env: &HashMap<String, Type>,
-        errors: &mut Vec<(Type, Span)>,
-    ) {
-        if let Expr::Call(callee, args, _) = expr
-            && let Expr::Field(recv, method, _) = callee.as_ref()
-            && matches!(method.as_str(), "push" | "insert")
-            && let Some(value_arg) = args.last()
-        {
-            let recv_ty = self.infer_expr_light(recv, env, errors);
-            if let Some(elem) = prepoly_hir::index_element(&self.resolve(&recv_ty)) {
-                let value_ty = self.infer_expr_light(&value_arg.expr, env, errors);
-                let _ = self.solver.unify(&elem, &value_ty);
-            }
-        }
-    }
-
-    fn infer_expr_light(
-        &mut self,
-        expr: &Expr,
-        env: &HashMap<String, Type>,
-        errors: &mut Vec<(Type, Span)>,
-    ) -> Type {
-        match expr {
-            Expr::Int(v, _) => Type::Int(int_literal_kind(*v)),
-            Expr::Float(..) => Type::Float(FloatKind::F64),
-            Expr::Bool(..) => Type::Bool,
-            Expr::Null(_) => Type::null(),
-            Expr::Str(..) => Type::Str,
-            Expr::Ident(name, _) => env
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| self.fresh_unknown()),
-            Expr::SelfExpr(_) => env
-                .get("self")
-                .cloned()
-                .unwrap_or_else(|| self.fresh_unknown()),
-            Expr::Unary(_, inner, _) => self.infer_expr_light(inner, env, errors),
-            Expr::Binary(op, left, right, _) => {
-                let left = self.infer_expr_light(left, env, errors);
-                let right = self.infer_expr_light(right, env, errors);
-                self.infer_binary_light(*op, left, right)
-            }
-            Expr::Call(callee, args, _) => self.infer_call_light(callee, args, env, errors),
-            Expr::Field(base, name, _) => self.infer_field_light(base, name, env, errors),
-            Expr::Index(base, _, _) => match self.infer_expr_light(base, env, errors) {
-                ref bt if prepoly_hir::index_element(bt).is_some() => {
-                    prepoly_hir::index_element(bt).unwrap()
-                }
-                Type::Str => Type::Str,
-                _ => self.fresh_unknown(),
-            },
-            Expr::ErrorProp(inner, span) => {
-                let ty = self.infer_expr_light(inner, env, errors);
-                if let Some((ok, err)) = ty.result_payloads() {
-                    errors.push((err.clone(), *span));
-                    ok.clone()
-                } else {
-                    self.fresh_unknown()
-                }
-            }
-            Expr::Closure(params, body, _) => {
-                let mut inner = env.clone();
-                for param in params {
-                    let ty = param
-                        .ty
-                        .as_ref()
-                        .and_then(|t| self.resolve_type(t).ok())
-                        .unwrap_or_else(|| self.fresh_unknown());
-                    inner.insert(param.name.clone(), ty);
-                }
-                let ret = self.infer_expr_light(body, &inner, errors);
-                Type::Fun(
-                    params
-                        .iter()
-                        .map(|p| {
-                            inner
-                                .get(&p.name)
-                                .cloned()
-                                .unwrap_or_else(|| self.fresh_unknown())
-                        })
-                        .collect(),
-                    Box::new(ret),
-                )
-            }
-            Expr::Array(items, _) => Type::Slice(Box::new(
-                items
-                    .first()
-                    .map(|e| self.infer_expr_light(e, env, errors))
-                    .unwrap_or_else(|| self.fresh_unknown()),
-            )),
-            Expr::Range(lo, _, _) => Type::Slice(Box::new(self.infer_expr_light(lo, env, errors))),
-            Expr::TypeLit(name, fields, _) => self.infer_type_lit_light(name, fields, env, errors),
-            Expr::VariantLit(name, variant, fields, _) => {
-                self.infer_variant_lit_light(name, variant, fields, env, errors)
-            }
-            Expr::If(_, then, els, _) => {
-                let then_ty = self.infer_block_value_light(then, &mut env.clone(), errors);
-                let else_ty = els
-                    .as_ref()
-                    .map(|e| self.infer_expr_light(e, env, errors))
-                    .unwrap_or(Type::Void);
-                self.common_type_or_unknown(then_ty, else_ty)
-            }
-            Expr::IfLet(_, scrut, then, els, _) => {
-                self.infer_expr_light(scrut, env, errors);
-                let then_ty = self.infer_block_value_light(then, &mut env.clone(), errors);
-                let else_ty = els
-                    .as_ref()
-                    .map(|e| self.infer_expr_light(e, env, errors))
-                    .unwrap_or(Type::Void);
-                self.common_type_or_unknown(then_ty, else_ty)
-            }
-            Expr::Match(scrut, arms, _) => {
-                self.infer_expr_light(scrut, env, errors);
-                let tys: Vec<Type> = arms
-                    .iter()
-                    .map(|arm| self.infer_expr_light(&arm.body, env, errors))
-                    .collect();
-                self.common_type_list(&tys)
-                    .unwrap_or_else(|| self.fresh_unknown())
-            }
-            Expr::Block(block, _) => self.infer_block_value_light(block, &mut env.clone(), errors),
-        }
-    }
-
-    fn infer_call_light(
-        &mut self,
-        callee: &Expr,
-        args: &[Arg],
-        env: &HashMap<String, Type>,
-        errors: &mut Vec<(Type, Span)>,
-    ) -> Type {
-        if let Expr::Ident(name, _) = callee {
-            if name == "error" {
-                let err = args
-                    .first()
-                    .map(|a| self.infer_expr_light(&a.expr, env, errors))
-                    .unwrap_or(Type::Void);
-                return Type::result(self.fresh_unknown(), err);
-            }
-            if let Some(ret) = self.builtin_function_type_light(name) {
-                args.iter().for_each(|arg| {
-                    self.infer_expr_light(&arg.expr, env, errors);
-                });
-                return ret;
-            }
-            if let Some(ret) = self.function_returns.get(name).cloned() {
-                args.iter().for_each(|arg| {
-                    self.infer_expr_light(&arg.expr, env, errors);
-                });
-                return ret;
-            }
-        }
-        if let Expr::Field(base, method, _) = callee {
-            if let Expr::Ident(tname, _) = &**base
-                && env.get(tname).is_none()
-            {
-                let ret = self.primitive_static_type(tname, method);
-                if ret.is_some() {
-                    args.iter().for_each(|arg| {
-                        self.infer_expr_light(&arg.expr, env, errors);
-                    });
-                }
-                if let Some(ret) = ret {
-                    return ret;
-                }
-            }
-            let recv = self.infer_expr_light(base, env, errors);
-            if let Some(ret) = builtin_method_return(&recv, method) {
-                args.iter().for_each(|arg| {
-                    self.infer_expr_light(&arg.expr, env, errors);
-                });
-                return ret;
-            }
-        }
-        args.iter().for_each(|arg| {
-            self.infer_expr_light(&arg.expr, env, errors);
-        });
-        self.fresh_unknown()
-    }
-
-    fn infer_field_light(
-        &mut self,
-        base: &Expr,
-        name: &str,
-        env: &HashMap<String, Type>,
-        errors: &mut Vec<(Type, Span)>,
-    ) -> Type {
-        let shadowed = matches!(base, Expr::Ident(n, _) if env.contains_key(n));
-        if let Some(ty) = self.unit_variant_type(base, name, shadowed) {
-            return ty;
-        }
-        // Resolve the base before matching: an indexed element or other
-        // intermediate may still be an open inference variable that the solver has
-        // since pinned to a record (e.g. `self.entries[idx]` is the map's entry
-        // type once a `push` fixed it). Without resolving, the match falls through
-        // and the field type is lost as a fresh unknown.
-        let base_ty = self.infer_expr_light(base, env, errors);
-        match self.resolve(&base_ty) {
-            Type::Record(record) => record.substitution.get(name).cloned().unwrap_or_else(|| {
-                self.program
-                    .types
-                    .get(record.name())
-                    .and_then(|info| match &info.kind {
-                        TypeKind::Record { fields, .. } => fields.iter().find(|f| f.name == name),
-                        TypeKind::Sum { .. } => None,
-                    })
-                    .and_then(|f| f.resolved_ty.clone())
-                    .unwrap_or_else(|| self.fresh_unknown())
-            }),
-            Type::Sum(sum) => self
-                .self_variant_field_type(base, &sum, name)
-                .or_else(|| self.common_sum_field_type(&sum, name))
-                .unwrap_or_else(|| self.fresh_unknown()),
-            _ => self.fresh_unknown(),
-        }
-    }
-
-    fn infer_type_lit_light(
-        &mut self,
-        name: &str,
-        fields: &[(String, Expr)],
-        env: &HashMap<String, Type>,
-        errors: &mut Vec<(Type, Span)>,
-    ) -> Type {
-        if name.is_empty() {
-            let field_tys: Vec<(String, Type)> = fields
-                .iter()
-                .map(|(fname, e)| (fname.clone(), self.infer_expr_light(e, env, errors)))
-                .collect();
-            return prepoly_hir::structural_record(field_tys);
-        }
-        let tn = self.resolve_self_name(name);
-        let resolved = self
-            .resolve_type_symbol(&tn)
-            .and_then(|symbol| self.program.types.get(&symbol))
-            .and_then(|info| {
-                let TypeKind::Record { fields, .. } = &info.kind else {
-                    return None;
-                };
-                Some((info.type_ref(), fields.clone()))
-            });
-        let Some((ret, declared)) = resolved else {
-            fields.iter().for_each(|(_, expr)| {
-                self.infer_expr_light(expr, env, errors);
-            });
-            return self.fresh_unknown();
-        };
-        let substitution = self.infer_lit_field_substitution(None, &declared, fields, env, errors);
-        apply_nominal_substitution(ret, substitution)
-    }
-
-    fn infer_variant_lit_light(
-        &mut self,
-        type_name: &str,
-        variant: &str,
-        fields: &[(String, Expr)],
-        env: &HashMap<String, Type>,
-        errors: &mut Vec<(Type, Span)>,
-    ) -> Type {
-        let tn = self.resolve_self_name(type_name);
-        let resolved = self
-            .resolve_type_symbol(&tn)
-            .and_then(|symbol| self.program.types.get(&symbol))
-            .and_then(|info| {
-                let variant = info.variant(variant)?;
-                Some((info.type_ref(), variant.fields.clone()))
-            });
-        let Some((ret, declared)) = resolved else {
-            fields.iter().for_each(|(_, expr)| {
-                self.infer_expr_light(expr, env, errors);
-            });
-            return self.fresh_unknown();
-        };
-        let substitution =
-            self.infer_lit_field_substitution(Some(variant), &declared, fields, env, errors);
-        apply_nominal_substitution(ret, substitution)
-    }
-
-    fn infer_lit_field_substitution(
-        &mut self,
-        variant: Option<&str>,
-        declared: &[prepoly_hir::FieldInfo],
-        fields: &[(String, Expr)],
-        env: &HashMap<String, Type>,
-        errors: &mut Vec<(Type, Span)>,
-    ) -> Substitution {
-        let mut substitution = Substitution::empty();
-        for field in declared {
-            if let Some((_, expr)) = fields.iter().find(|(name, _)| name == &field.name) {
-                let got = self.infer_expr_light(expr, env, errors);
-                if field.resolved_ty.as_ref().is_some_and(Type::is_unknown) {
-                    substitution.insert(field_substitution_key(variant, &field.name), got);
-                }
-            }
-        }
-        substitution
-    }
-
-    fn infer_block_value_light(
-        &mut self,
-        block: &Block,
-        env: &mut HashMap<String, Type>,
-        errors: &mut Vec<(Type, Span)>,
-    ) -> Type {
-        let mut last = Type::Void;
-        for stmt in &block.stmts {
-            match stmt {
-                Stmt::Let { pat, value, .. } => {
-                    let ty = self.infer_expr_light(value, env, errors);
-                    self.bind_pattern_light(pat, &ty, env);
-                    last = Type::Void;
-                }
-                Stmt::Expr(expr) => last = self.infer_expr_light(expr, env, errors),
-                Stmt::Return(Some(expr), _) => return self.infer_expr_light(expr, env, errors),
-                _ => last = Type::Void,
-            }
-        }
-        last
-    }
-
-    fn infer_binary_light(&mut self, op: BinOp, left: Type, right: Type) -> Type {
-        match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
-                if self.can_unify(&left, &right) {
-                    left
-                } else {
-                    self.fresh_unknown()
-                }
-            }
-            BinOp::Eq
-            | BinOp::Ne
-            | BinOp::Lt
-            | BinOp::Gt
-            | BinOp::Le
-            | BinOp::Ge
-            | BinOp::And
-            | BinOp::Or => Type::Bool,
-            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
-                if self.can_unify(&left, &right) {
-                    left
-                } else {
-                    self.fresh_unknown()
-                }
-            }
-        }
-    }
-
     fn primitive_static_type(&self, tname: &str, method: &str) -> Option<Type> {
         if matches!((tname, method), ("File", "stdin" | "stdout" | "stderr")) {
             return Some(self.type_by_name("File"));
         }
         primitive_static_return(tname, method)
-    }
-
-    fn common_type_list(&mut self, types: &[Type]) -> Option<Type> {
-        let (first, rest) = types.split_first()?;
-        let mut common = first.clone();
-        for ty in rest {
-            if let Some(nullable) = common_nullable_type(&common, ty) {
-                common = nullable;
-                continue;
-            }
-            if !self.can_unify(&common, ty) {
-                return Some(self.fresh_unknown());
-            }
-        }
-        Some(common)
-    }
-
-    fn bind_pattern_light(&mut self, pat: &Pattern, ty: &Type, env: &mut HashMap<String, Type>) {
-        match pat {
-            Pattern::Binding(name, _) if !self.is_unit_variant_name(name) => {
-                env.insert(name.clone(), ty.clone());
-            }
-            Pattern::Record(variant, fields, _) => {
-                let field_types = self.pattern_field_types(ty, variant);
-                for field in fields {
-                    let fty = field_types
-                        .get(&field.name)
-                        .cloned()
-                        .unwrap_or_else(|| self.fresh_unknown());
-                    if let Some(subpat) = &field.pat {
-                        self.bind_pattern_light(subpat, &fty, env);
-                    } else {
-                        env.insert(field.name.clone(), fty);
-                    }
-                }
-            }
-            Pattern::Array(pats, _) => {
-                if let Type::Tuple(elems) = ty {
-                    for (pat, ety) in pats.iter().zip(elems) {
-                        self.bind_pattern_light(pat, ety, env);
-                    }
-                } else {
-                    let elem = match ty {
-                        Type::Array(inner, _) | Type::Slice(inner) => &**inner,
-                        _ => ty,
-                    };
-                    pats.iter()
-                        .for_each(|pat| self.bind_pattern_light(pat, elem, env));
-                }
-            }
-            _ => {}
-        }
     }
 
     fn fresh_unknown(&mut self) -> Type {
@@ -1279,6 +807,11 @@ impl<'a> Checker<'a> {
         ret: Option<&Type>,
     ) -> Option<Type> {
         let saved = std::mem::replace(&mut self.const_scopes, vec![HashSet::new()]);
+        let saved_narrowed = std::mem::take(&mut self.narrowed_bindings);
+        let saved_closure_writes = std::mem::replace(
+            &mut self.closure_write_targets,
+            closure_write_targets_block(b),
+        );
         self.return_contexts.push(match ret {
             Some(ty) => ReturnContext::Explicit(ty.clone()),
             None => ReturnContext::Inferred,
@@ -1287,6 +820,8 @@ impl<'a> Checker<'a> {
         self.check_block(b, scopes);
         let collected = self.return_values.pop().unwrap_or_default();
         self.return_contexts.pop();
+        self.closure_write_targets = saved_closure_writes;
+        self.narrowed_bindings = saved_narrowed;
         self.const_scopes = saved;
         if ret.is_none() {
             self.reconcile_return_types(&collected, false)
@@ -2001,19 +1536,30 @@ impl<'a> Checker<'a> {
                 let cond_ty = self.check_condition(cond, scopes);
                 let mut truth = cond_ty.static_truthiness();
                 // Structural graceful degradation (the goal's structure-type rules):
-                // when the condition is a field access on a structural value that
-                // does not satisfy the then-branch for this concrete value (a
-                // missing field reads as `never?`, or a present field whose type the
-                // then-branch cannot use), the `if` is statically false rather than a
-                // type error. Probe the then-branch; if it does not type-check, fold
-                // the condition to false so its dead arm is discarded.
+                // when the condition is a field access whose then-branch does not
+                // type for this concrete value (a present field whose type the
+                // branch's `return` cannot produce; a missing field is already
+                // `never?` and statically false above), the `if` folds to
+                // statically false rather than a type error. The fold must mirror
+                // the back end EXACTLY: the back end prunes an arm only when its
+                // unconditionally-reached `return` value kind-conflicts with the
+                // function's return type (`then_return_conflicts` in the engine).
+                // Folding on any other branch error would discard diagnostics for
+                // an arm the back end still emits and executes -- a type-check
+                // bypass straight into the unboxed code.
                 if truth != Some(false) && matches!(&**cond, Expr::Field(..)) {
                     let mark = self.errors.len();
                     let mut probe = scopes.clone();
                     self.apply_truthy_narrowing(cond, &mut probe);
+                    // Isolate the probe's collected returns: they describe the
+                    // (possibly dead) arm, not the enclosing callable, and the
+                    // real walk below re-collects the live ones.
+                    self.return_values.push(Vec::new());
                     self.check_branch(then, &mut probe, false);
-                    if self.errors.len() > mark {
-                        self.errors.truncate(mark);
+                    let probe_returns = self.return_values.pop().unwrap_or_default();
+                    let failed = self.errors.len() > mark;
+                    self.errors.truncate(mark);
+                    if failed && self.then_branch_return_conflicts(then, &probe_returns) {
                         truth = Some(false);
                     }
                 }
@@ -2148,6 +1694,57 @@ impl<'a> Checker<'a> {
         ty
     }
 
+    /// AST mirror of the back end's `then_return_conflicts` (engine `mono`): the
+    /// then-branch reaches a `return <value>` through straight-line statements
+    /// only (any branching construct becomes a MIR `CondBranch`, which the back
+    /// end does not fold through), and the returned value's primitive kind
+    /// clearly conflicts with the enclosing declared return type (its Ok payload
+    /// for a fallible signature). Only such arms are pruned by the back end, so
+    /// only such arms may the checker fold; anything looser would tolerate an
+    /// arm that still executes.
+    fn then_branch_return_conflicts(
+        &mut self,
+        then: &Block,
+        probe_returns: &[(Type, prepoly_lexer::Span)],
+    ) -> bool {
+        let Some(ReturnContext::Explicit(want)) = self.return_contexts.last().cloned() else {
+            return false;
+        };
+        let resolved_want = self.resolve(&want);
+        let target = match resolved_want.result_payloads() {
+            Some((ok, _)) => ok.clone(),
+            None => resolved_want,
+        };
+        let mut ret_span = None;
+        for stmt in &then.stmts {
+            match stmt {
+                Stmt::Return(Some(value), span) => {
+                    if expr_may_branch(value) {
+                        return false;
+                    }
+                    ret_span = Some(*span);
+                    break;
+                }
+                Stmt::Return(None, _) => return false,
+                s if stmt_may_branch(s) => return false,
+                _ => {}
+            }
+        }
+        let Some(span) = ret_span else {
+            return false;
+        };
+        let Some((ty, _)) = probe_returns.iter().find(|(_, s)| *s == span) else {
+            return false;
+        };
+        let ty = self.resolve(ty);
+        // A returned `Result` flows whole rather than as the Ok payload; the
+        // back end never folds on it.
+        if ty.is_result_type() {
+            return false;
+        }
+        prepoly_hir::primitive_kind_conflict(&ty, &target)
+    }
+
     fn check_block_expr(&mut self, b: &Block, scopes: &mut ScopeStack) -> Type {
         scopes.push(HashMap::new());
         self.const_scopes.push(HashSet::new());
@@ -2177,7 +1774,7 @@ impl<'a> Checker<'a> {
                 if let Some(elem) = prepoly_hir::index_element(&resolved) {
                     return elem;
                 }
-                match resolved {
+                match prepoly_hir::peel_modes(&resolved).clone() {
                     // A store into an open array variable pins its element type,
                     // the way `push` pins it on the read side: `self.entries[i] =
                     // v` ties the field's still-open element to `v`'s type while
@@ -2193,6 +1790,17 @@ impl<'a> Checker<'a> {
                     }
                     Type::Nullable(_) => {
                         self.report_nullable_use(*span);
+                        self.fresh_unknown()
+                    }
+                    // A string is immutable and not element-addressable storage;
+                    // it is indexable in read position, but never a valid store
+                    // target (the unboxed back end has no cell to write).
+                    Type::Str => {
+                        self.errors.push(TypeError {
+                            message: "cannot assign through a string index; strings are immutable"
+                                .to_string(),
+                            span: *span,
+                        });
                         self.fresh_unknown()
                     }
                     other => {
@@ -2332,6 +1940,22 @@ impl<'a> Checker<'a> {
                             Some(s) => substitute_self(want, s),
                             None => want.clone(),
                         };
+                        // A bare unannotated field's declared variable is SHARED
+                        // by every use of the declaration -- method co-checking
+                        // deliberately binds through it (the scheme links the
+                        // type and its methods). A literal must not check its
+                        // value against whatever that co-checking bound (the
+                        // binding mixes another body's local variables in), so
+                        // each literal checks against a fresh variable and
+                        // records the value's own type in the substitution
+                        // below. Partially-inferred annotations (an `infer?[]`
+                        // slot) keep the shared variable: the store-pin
+                        // machinery relies on it.
+                        let want = if want.is_unknown() {
+                            self.fresh_unknown()
+                        } else {
+                            want
+                        };
                         self.check_expr_against(expr, &want, scopes)
                     } else {
                         self.check_expr(expr, scopes)
@@ -2422,7 +2046,11 @@ impl<'a> Checker<'a> {
             }
         }
         let base_ty = self.check_expr(base, scopes);
-        match self.resolve(&base_ty) {
+        // A `ref`/`mut`/`const` view exposes the underlying value's members, so
+        // the lookup peels the mode wrappers; otherwise a `ref(mut(T))` base
+        // would fall to the permissive arm and skip field type checking.
+        let resolved = self.resolve(&base_ty);
+        match prepoly_hir::peel_modes(&resolved).clone() {
             Type::Record(record) => {
                 if let Some(ty) = record.substitution.get(name) {
                     return ty.clone();
@@ -2592,7 +2220,9 @@ impl<'a> Checker<'a> {
                 // final zonking pass then resolves this recorded type through it,
                 // so `fun apply(f, x) { f(x) }` shows `f` as `(U) -> V`.
                 self.record_expr_type(callee, &local);
-                return self.check_callable_value(local, args, span, scopes);
+                let ret = self.check_callable_value(local, args, span, scopes);
+                self.invalidate_narrowed_after_call(scopes);
+                return ret;
             }
             // Only a function visible from the current module resolves here; a
             // function defined in another, non-imported module is invisible and
@@ -2625,7 +2255,7 @@ impl<'a> Checker<'a> {
                         entry.push(resolved_args);
                     }
                 }
-                return self.instantiate_function_call(
+                let ret = self.instantiate_function_call(
                     &symbol,
                     &module,
                     &signature_params,
@@ -2634,6 +2264,10 @@ impl<'a> Checker<'a> {
                     fallback_ret,
                     &arg_types,
                 );
+                // User code ran conceptually: a narrowed global (or a local a
+                // closure of this body assigns) may have been re-nulled.
+                self.invalidate_narrowed_after_call(scopes);
+                return ret;
             }
             // The callee is a bare identifier that is not `error`, a builtin, a
             // local value, or a known free function. A runtime builtin (e.g.
@@ -2653,7 +2287,9 @@ impl<'a> Checker<'a> {
         }
         if let Expr::Field(base, method, _) = callee {
             if let Some(qualifier) = self.static_qualifier(base, scopes) {
-                return self.check_static_call(&qualifier, method, args, span, scopes);
+                let ret = self.check_static_call(&qualifier, method, args, span, scopes);
+                self.invalidate_narrowed_after_call(scopes);
+                return ret;
             }
             let recv_ty = self.check_expr(base, scopes);
             if let Type::Nullable(_) = self.resolve(&recv_ty) {
@@ -2729,6 +2365,9 @@ impl<'a> Checker<'a> {
                 if foreign_method && self.errors.len() > before {
                     self.reattribute_errors_to_call(before, method, span);
                 }
+                // The method body ran conceptually: undo narrowings it may have
+                // invalidated (see `invalidate_narrowed_after_call`).
+                self.invalidate_narrowed_after_call(scopes);
                 // Type the call's result by instantiating the method's scheme
                 // against the receiver instance (schemes are built before the
                 // function bodies that call them). The re-elaboration above still
@@ -2749,9 +2388,37 @@ impl<'a> Checker<'a> {
             if let Some(ret) =
                 self.check_primitive_method_call(&recv_ty, method, args, span, scopes)
             {
+                // Stdlib primitive methods are user-defined prepoly code.
+                self.invalidate_narrowed_after_call(scopes);
                 return ret;
             }
-            if let Type::Record(record) = self.resolve(&recv_ty) {
+            // The missing-method diagnostics below look through mode wrappers so
+            // a `ref(mut(T))` receiver reports against `T` instead of deferring.
+            let peeled_recv = prepoly_hir::peel_modes(&self.resolve(&recv_ty)).clone();
+            if let Type::Record(record) = &peeled_recv {
+                // A function-typed FIELD is callable through the same syntax (a
+                // method of the same name takes precedence, resolved above):
+                // `a.func(4)` calls the closure the field holds.
+                if let Some(fty) = self.field_value_type(record, method) {
+                    let resolved = self.resolve(&fty);
+                    if matches!(resolved, Type::Fun(..) | Type::Unknown(_)) {
+                        self.record_expr_type(callee, &fty);
+                        let ret = self.apply_callable(fty, args, span, scopes);
+                        self.invalidate_narrowed_after_call(scopes);
+                        return ret;
+                    }
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "field `{method}` of `{record}` has type `{}` and is not callable",
+                            resolved.display()
+                        ),
+                        span,
+                    });
+                    for a in args {
+                        self.check_expr(&a.expr, scopes);
+                    }
+                    return self.fresh_unknown();
+                }
                 self.errors.push(TypeError {
                     message: format!("`{record}` has no method `{method}`"),
                     span,
@@ -2761,7 +2428,7 @@ impl<'a> Checker<'a> {
                 }
                 return self.fresh_unknown();
             }
-            if let Type::Sum(sum) = self.resolve(&recv_ty) {
+            if let Type::Sum(sum) = &peeled_recv {
                 self.errors.push(TypeError {
                     message: format!("`{sum}` has no common method `{method}`"),
                     span,
@@ -2774,7 +2441,7 @@ impl<'a> Checker<'a> {
             // A primitive receiver has a fully known type with no user methods,
             // so an unresolved call is a static error rather than deferred
             // structural dispatch (shape constraints).
-            let resolved = self.resolve(&recv_ty);
+            let resolved = peeled_recv;
             if is_concrete_primitive(&resolved) {
                 self.errors.push(TypeError {
                     message: format!("`{}` has no method `{method}`", resolved.display()),
@@ -2799,7 +2466,9 @@ impl<'a> Checker<'a> {
             return self.fresh_unknown();
         }
         let callee_ty = self.check_expr(callee, scopes);
-        self.apply_callable(callee_ty, args, span, scopes)
+        let ret = self.apply_callable(callee_ty, args, span, scopes);
+        self.invalidate_narrowed_after_call(scopes);
+        ret
     }
 
     /// Type-check a call `recv.m(args)` to a stdlib method implemented on a
@@ -2815,7 +2484,9 @@ impl<'a> Checker<'a> {
         span: prepoly_lexer::Span,
         scopes: &mut ScopeStack,
     ) -> Option<Type> {
-        let class = self.resolve(recv_ty).primitive_class()?;
+        // Mode wrappers are peeled so a `ref(string)` / `mut(T[])` receiver still
+        // dispatches to the stdlib primitive method of the underlying class.
+        let class = prepoly_hir::peel_modes(&self.resolve(recv_ty)).primitive_class()?;
         let symbol = self
             .program
             .primitive_methods
@@ -2888,6 +2559,22 @@ impl<'a> Checker<'a> {
     /// Given a resolved callee type, check argument compatibility for `Fun`
     /// types and yield the call's result type. Each argument is checked exactly
     /// once here.
+    /// The stored type of record field `name` on instance `record`, if the field
+    /// exists: the instance substitution (an inferred field pinned at
+    /// construction) wins over the declaration's annotation. `None` when the
+    /// record has no such field.
+    fn field_value_type(&mut self, record: &NominalType, name: &str) -> Option<Type> {
+        if let Some(t) = record.substitution.get(name) {
+            return Some(t.clone());
+        }
+        let info = self.program.type_by_id(record.id)?;
+        let TypeKind::Record { fields, .. } = &info.kind else {
+            return None;
+        };
+        let f = fields.iter().find(|f| f.name == name)?;
+        Some(f.resolved_ty.clone().unwrap_or_else(|| self.fresh_unknown()))
+    }
+
     fn apply_callable(
         &mut self,
         callee_ty: Type,
@@ -2910,6 +2597,19 @@ impl<'a> Checker<'a> {
                     if let Some(param) = params.get(idx) {
                         let got = self.check_expr_against(&arg.expr, param, scopes);
                         let _ = subst.unify(param, &got);
+                        // Calling through a CONCRETE parameter type pins an open
+                        // argument variable persistently: `(x) -> g(x)` with
+                        // `g: (int32) -> int32` fixes `x = int32`, so the
+                        // enclosing closure's recorded type is concrete (a
+                        // closure stored into an unannotated record field takes
+                        // its instance type from this). A parameter still
+                        // carrying its own inference variables stays local-only:
+                        // pinning through it would defeat let-polymorphism.
+                        if self.solver.free_vars(param).is_empty()
+                            && matches!(self.resolve(&got), Type::Unknown(_))
+                        {
+                            let _ = self.solver.unify(&got, param);
+                        }
                         // Verify any structural constraints the closure body
                         // recorded on this parameter (e.g. `(x) -> x + 1`
                         // requires a numeric argument) now that the concrete
@@ -2946,592 +2646,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn builtin_function_type(
-        &mut self,
-        name: &str,
-        args: &[Arg],
-        span: prepoly_lexer::Span,
-        scopes: &mut ScopeStack,
-    ) -> Option<Type> {
-        // `len` is a runtime primitive usable as a free
-        // function. Its result is always `int64`, and its single argument must
-        // be a collection or string; a concrete non-collection argument is a
-        // static error rather than a deferred runtime panic.
-        if name == "len" {
-            self.check_arg_count("len", 1, args.len(), span);
-            let arg_ty = args
-                .first()
-                .map(|a| self.check_expr(&a.expr, scopes))
-                .unwrap_or(Type::Void);
-            for a in args.iter().skip(1) {
-                self.check_expr(&a.expr, scopes);
-            }
-            if let Some(arg) = args.first() {
-                let resolved = self.resolve(&arg_ty);
-                if !is_maybe_indexable(&resolved) {
-                    self.errors.push(TypeError {
-                        message: format!(
-                            "`len` expects an array or string, found `{}`",
-                            resolved.display()
-                        ),
-                        span: arg.expr.span(),
-                    });
-                }
-            }
-            return Some(Type::Int(IntKind::I64));
-        }
-        if matches!(name, "print" | "println") {
-            args.iter().for_each(|a| {
-                self.check_expr(&a.expr, scopes);
-            });
-            return Some(Type::Void);
-        }
-        if name == "input" {
-            self.check_arg_count("input", 0, args.len(), span);
-            args.iter().for_each(|a| {
-                self.check_expr(&a.expr, scopes);
-            });
-            return Some(Type::Str);
-        }
-        if let Some(ret) = self.array_builtin_type(name, args, span, scopes) {
-            return Some(ret);
-        }
-        if let Some(ret) = self.string_builtin_type(name, args, span, scopes) {
-            return Some(ret);
-        }
-        if let Some(ret) = self.numeric_helper_type(name, args, span, scopes) {
-            return Some(ret);
-        }
-        if let Some(ret) = self.concurrency_builtin_type(name, args, span, scopes) {
-            return Some(ret);
-        }
-        if name == "open" {
-            // `open(path: string, mode: string) -> File!`.
-            self.check_builtin_args_against("open", args, &[Type::Str, Type::Str], span, scopes);
-            return Some(Type::result(self.type_by_name("File"), Type::Str));
-        }
-        None
-    }
-
-    /// Static contracts for the numeric runtime helpers. These
-    /// map onto LLVM/runtime primitives, so the value class of each argument
-    /// must be correct before the runtime reads its payload bits: passing a
-    /// float to `_int_to_string`, for example, would reinterpret a bit pattern
-    /// as an integer. Concrete wrong classes are static errors; unknown
-    /// arguments stay deferred to the runtime tag checks.
-    fn numeric_helper_type(
-        &mut self,
-        name: &str,
-        args: &[Arg],
-        span: prepoly_lexer::Span,
-        scopes: &mut ScopeStack,
-    ) -> Option<Type> {
-        let i64_ty = Type::Int(IntKind::I64);
-        let f64_ty = Type::Float(FloatKind::F64);
-        let (params, ret): (Vec<NumericClass>, Type) = match name {
-            "_int_to_string" => (vec![NumericClass::Int], Type::Str),
-            "_float_to_string" => (vec![NumericClass::Float], Type::Str),
-            "_int_parse" => (vec![NumericClass::Str], Type::result(i64_ty, Type::Str)),
-            "_float_parse" => (vec![NumericClass::Str], Type::result(f64_ty, Type::Str)),
-            "_int_to_float" => (vec![NumericClass::Int, NumericClass::Int], f64_ty),
-            "_float_to_int" => (
-                vec![NumericClass::Float, NumericClass::Int, NumericClass::Bool],
-                Type::result(i64_ty, Type::Str),
-            ),
-            "_float_sqrt" | "_float_floor" | "_float_ceil" => (vec![NumericClass::Float], f64_ty),
-            "_float_pow" => (vec![NumericClass::Float, NumericClass::Float], f64_ty),
-            // Integer width conversions: widening always succeeds;
-            // narrowing range-checks and yields a Result. Bits/signedness are passed
-            // so the runtime matches the target type.
-            "_int_widen" => (
-                vec![
-                    NumericClass::Int,
-                    NumericClass::Int,
-                    NumericClass::Int,
-                    NumericClass::Bool,
-                ],
-                i64_ty,
-            ),
-            "_int_narrow" => (
-                vec![
-                    NumericClass::Int,
-                    NumericClass::Int,
-                    NumericClass::Int,
-                    NumericClass::Bool,
-                ],
-                Type::result(i64_ty, Type::Str),
-            ),
-            _ => return None,
-        };
-        self.check_arg_count(name, params.len(), args.len(), span);
-        for (idx, class) in params.iter().enumerate() {
-            let Some(arg) = args.get(idx) else { continue };
-            let got = self.check_expr(&arg.expr, scopes);
-            let resolved = self.resolve(&got);
-            if resolved.is_unknown() {
-                continue;
-            }
-            if !class.accepts(&resolved) {
-                self.errors.push(TypeError {
-                    message: format!(
-                        "`{name}` expects {} for argument {}, found `{}`",
-                        class.describe(),
-                        idx + 1,
-                        resolved.display()
-                    ),
-                    span: arg.expr.span(),
-                });
-            }
-        }
-        for arg in args.iter().skip(params.len()) {
-            self.check_expr(&arg.expr, scopes);
-        }
-        Some(ret)
-    }
-
-    /// Minimal static contracts for the concurrency primitives.
-    /// `spawn(f: () -> void) -> void` and `with(c, f) -> U` are the only
-    /// programmer-facing concurrency API. Until cown typing is real the first
-    /// `with` argument stays untyped (the closure parameter is deferred), but
-    /// the callable shape and `spawn`'s zero-arity are enforced now.
-    fn concurrency_builtin_type(
-        &mut self,
-        name: &str,
-        args: &[Arg],
-        span: prepoly_lexer::Span,
-        scopes: &mut ScopeStack,
-    ) -> Option<Type> {
-        match name {
-            "spawn" => {
-                self.check_arg_count("spawn", 1, args.len(), span);
-                if let Some(arg) = args.first() {
-                    let got = self.check_expr(&arg.expr, scopes);
-                    match self.resolve(&got) {
-                        Type::Fun(params, _) if !params.is_empty() => {
-                            self.errors.push(TypeError {
-                                message: "`spawn` expects a zero-argument closure `() -> void`"
-                                    .to_string(),
-                                span: arg.expr.span(),
-                            });
-                        }
-                        Type::Fun(_, _) | Type::Unknown(_) => {}
-                        other => {
-                            self.errors.push(TypeError {
-                                message: format!(
-                                    "`spawn` expects a closure `() -> void`, found `{}`",
-                                    other.display()
-                                ),
-                                span: arg.expr.span(),
-                            });
-                        }
-                    }
-                }
-                for arg in args.iter().skip(1) {
-                    self.check_expr(&arg.expr, scopes);
-                }
-                Some(Type::Void)
-            }
-            "with" => {
-                self.check_arg_count("with", 2, args.len(), span);
-                if let Some(arg) = args.first() {
-                    self.check_expr(&arg.expr, scopes);
-                }
-                let ret = match args.get(1) {
-                    Some(arg) => {
-                        let got = self.check_expr(&arg.expr, scopes);
-                        match self.resolve(&got) {
-                            Type::Fun(params, ret) => {
-                                if params.len() != 1 {
-                                    self.errors.push(TypeError {
-                                        message:
-                                            "`with` expects a one-argument closure as its second \
-                                             argument"
-                                                .to_string(),
-                                        span: arg.expr.span(),
-                                    });
-                                }
-                                *ret
-                            }
-                            Type::Unknown(_) => self.fresh_unknown(),
-                            other => {
-                                self.errors.push(TypeError {
-                                    message: format!(
-                                        "`with` expects a closure as its second argument, found \
-                                         `{}`",
-                                        other.display()
-                                    ),
-                                    span: arg.expr.span(),
-                                });
-                                self.fresh_unknown()
-                            }
-                        }
-                    }
-                    None => self.fresh_unknown(),
-                };
-                for arg in args.iter().skip(2) {
-                    self.check_expr(&arg.expr, scopes);
-                }
-                Some(ret)
-            }
-            // `sync()` joins every thread spawned so far, so values mutated by a
-            // `spawn` become observable before the program continues (R6
-            // value-observability / structured-concurrency barrier).
-            "sync" => {
-                self.check_arg_count("sync", 0, args.len(), span);
-                for arg in args {
-                    self.check_expr(&arg.expr, scopes);
-                }
-                Some(Type::Void)
-            }
-            // `_cown(c)` / `_freeze(c)` are inserted by the spawn auto-acquire pass
-            // to promote a capture to an atomic-count owner before the spawn; each
-            // takes the capture and yields nothing.
-            "_cown" | "_freeze" => {
-                self.check_arg_count(name, 1, args.len(), span);
-                for arg in args {
-                    self.check_expr(&arg.expr, scopes);
-                }
-                Some(Type::Void)
-            }
-            _ => None,
-        }
-    }
-
-    fn builtin_function_type_light(&self, name: &str) -> Option<Type> {
-        match name {
-            "open" => Some(Type::result(self.type_by_name("File"), Type::Str)),
-            "len" => Some(Type::Int(IntKind::I64)),
-            "print" | "println" | "assert" => Some(Type::Void),
-            "input" => Some(Type::Str),
-            "_string_concat" | "_string_slice" | "_string_char_at" => Some(Type::Str),
-            "_string_bytes" => Some(Type::Slice(Box::new(Type::Int(IntKind::U8)))),
-            "_string_from_bytes" => Some(Type::result(Type::Str, Type::Str)),
-            "_string_find" => Some(Type::Nullable(Box::new(Type::Int(IntKind::I64)))),
-            "_string_cmp" => Some(Type::Int(IntKind::I32)),
-            "_int_to_string" | "_float_to_string" => Some(Type::Str),
-            "_int_parse" => Some(Type::result(Type::Int(IntKind::I64), Type::Str)),
-            "_float_parse" => Some(Type::result(Type::Float(FloatKind::F64), Type::Str)),
-            "_int_to_float" | "_float_sqrt" | "_float_floor" | "_float_ceil" | "_float_pow" => {
-                Some(Type::Float(FloatKind::F64))
-            }
-            "_float_to_int" | "_int_narrow" => {
-                Some(Type::result(Type::Int(IntKind::I64), Type::Str))
-            }
-            "_int_widen" => Some(Type::Int(IntKind::I64)),
-            "spawn" | "sync" | "_cown" | "_freeze" => Some(Type::Void),
-            _ => None,
-        }
-    }
-
-    fn array_builtin_type(
-        &mut self,
-        name: &str,
-        args: &[Arg],
-        span: prepoly_lexer::Span,
-        scopes: &mut ScopeStack,
-    ) -> Option<Type> {
-        match name {
-            "_array_push" => {
-                self.check_arg_count(name, 2, args.len(), span);
-                let arr_ty = args
-                    .first()
-                    .map(|arg| self.check_expr(&arg.expr, scopes))
-                    .unwrap_or(Type::Void);
-                let elem_ty = match self.resolve(&arr_ty) {
-                    Type::Slice(inner) => *inner,
-                    Type::Array(_, _) => {
-                        if let Some(arg) = args.first() {
-                            self.errors.push(TypeError {
-                                message: "`_array_push` expects a slice, found fixed array"
-                                    .to_string(),
-                                span: arg.expr.span(),
-                            });
-                        }
-                        self.fresh_unknown()
-                    }
-                    Type::Unknown(_) => self.fresh_unknown(),
-                    other => {
-                        if let Some(arg) = args.first() {
-                            self.errors.push(TypeError {
-                                message: format!(
-                                    "`_array_push` expects a slice, found `{}`",
-                                    other.display()
-                                ),
-                                span: arg.expr.span(),
-                            });
-                        }
-                        self.fresh_unknown()
-                    }
-                };
-                if let Some(value) = args.get(1) {
-                    let got = self.check_expr(&value.expr, scopes);
-                    self.expect_expr_assignable(&got, &elem_ty, &value.expr);
-                    if matches!(self.resolve(&elem_ty), Type::Unknown(_)) {
-                        let _ = self.solver.unify(&elem_ty, &got);
-                    }
-                }
-                for arg in args.iter().skip(2) {
-                    self.check_expr(&arg.expr, scopes);
-                }
-                Some(Type::Void)
-            }
-            "_array_pop" => {
-                self.check_arg_count(name, 1, args.len(), span);
-                let arr_ty = args
-                    .first()
-                    .map(|arg| self.check_expr(&arg.expr, scopes))
-                    .unwrap_or(Type::Void);
-                for arg in args.iter().skip(1) {
-                    self.check_expr(&arg.expr, scopes);
-                }
-                let elem_ty = match self.resolve(&arr_ty) {
-                    Type::Slice(inner) => *inner,
-                    Type::Array(_, _) => {
-                        if let Some(arg) = args.first() {
-                            self.errors.push(TypeError {
-                                message: "`_array_pop` expects a slice, found fixed array"
-                                    .to_string(),
-                                span: arg.expr.span(),
-                            });
-                        }
-                        self.fresh_unknown()
-                    }
-                    Type::Unknown(_) => self.fresh_unknown(),
-                    other => {
-                        if let Some(arg) = args.first() {
-                            self.errors.push(TypeError {
-                                message: format!(
-                                    "`_array_pop` expects a slice, found `{}`",
-                                    other.display()
-                                ),
-                                span: arg.expr.span(),
-                            });
-                        }
-                        self.fresh_unknown()
-                    }
-                };
-                Some(Type::Nullable(Box::new(elem_ty)))
-            }
-            // `_array_insert(arr, idx, elem)` / `_array_remove(arr, idx)` primitives: the slice's element type drives the index/element
-            // checks. Insert yields void; remove yields the removed element.
-            "_array_insert" | "_array_remove" => {
-                let want_args = if name == "_array_insert" { 3 } else { 2 };
-                self.check_arg_count(name, want_args, args.len(), span);
-                let arr_ty = args
-                    .first()
-                    .map(|arg| self.check_expr(&arg.expr, scopes))
-                    .unwrap_or(Type::Void);
-                let elem_ty = match self.resolve(&arr_ty) {
-                    Type::Slice(inner) => *inner,
-                    Type::Unknown(_) => self.fresh_unknown(),
-                    other => {
-                        if let Some(arg) = args.first() {
-                            self.errors.push(TypeError {
-                                message: format!(
-                                    "`{name}` expects a slice, found `{}`",
-                                    other.display()
-                                ),
-                                span: arg.expr.span(),
-                            });
-                        }
-                        self.fresh_unknown()
-                    }
-                };
-                // The index argument is an int64 offset.
-                if let Some(idx) = args.get(1) {
-                    let got = self.check_expr(&idx.expr, scopes);
-                    self.expect_expr_assignable(&got, &Type::Int(IntKind::I64), &idx.expr);
-                }
-                if name == "_array_insert" {
-                    if let Some(value) = args.get(2) {
-                        let got = self.check_expr(&value.expr, scopes);
-                        self.expect_expr_assignable(&got, &elem_ty, &value.expr);
-                        if matches!(self.resolve(&elem_ty), Type::Unknown(_)) {
-                            let _ = self.solver.unify(&elem_ty, &got);
-                        }
-                    }
-                    for arg in args.iter().skip(3) {
-                        self.check_expr(&arg.expr, scopes);
-                    }
-                    Some(Type::Void)
-                } else {
-                    for arg in args.iter().skip(2) {
-                        self.check_expr(&arg.expr, scopes);
-                    }
-                    Some(elem_ty)
-                }
-            }
-            _ => None,
-        }
-    }
-
-    fn string_builtin_type(
-        &mut self,
-        name: &str,
-        args: &[Arg],
-        span: prepoly_lexer::Span,
-        scopes: &mut ScopeStack,
-    ) -> Option<Type> {
-        if name == "_string_find" {
-            self.check_arg_count(name, 2, args.len(), span);
-            args.iter().for_each(|arg| {
-                self.check_expr(&arg.expr, scopes);
-            });
-            return Some(Type::Nullable(Box::new(Type::Int(IntKind::I64))));
-        }
-        let i64_ty = Type::Int(IntKind::I64);
-        let bytes_ty = Type::Slice(Box::new(Type::Int(IntKind::U8)));
-        let (params, ret) = match name {
-            "_string_concat" => (vec![Type::Str, Type::Str], Type::Str),
-            "_string_slice" => (vec![Type::Str, i64_ty.clone(), i64_ty.clone()], Type::Str),
-            "_string_bytes" => (vec![Type::Str], bytes_ty),
-            "_string_from_bytes" => (vec![bytes_ty], Type::result(Type::Str, Type::Str)),
-            "_string_char_at" => (vec![Type::Str, i64_ty], Type::Str),
-            "_string_cmp" => (vec![Type::Str, Type::Str], Type::Int(IntKind::I32)),
-            _ => return None,
-        };
-        self.check_builtin_args_against(name, args, &params, span, scopes);
-        Some(ret)
-    }
-
-    fn check_builtin_args_against(
-        &mut self,
-        name: &str,
-        args: &[Arg],
-        params: &[Type],
-        span: prepoly_lexer::Span,
-        scopes: &mut ScopeStack,
-    ) {
-        self.check_arg_count(name, params.len(), args.len(), span);
-        for (arg, want) in args.iter().zip(params) {
-            self.check_expr_against(&arg.expr, want, scopes);
-        }
-        for arg in args.iter().skip(params.len()) {
-            self.check_expr(&arg.expr, scopes);
-        }
-    }
-
-    fn builtin_method_type(
-        &mut self,
-        recv_ty: &Type,
-        method: &str,
-        args: &[Arg],
-        scopes: &mut ScopeStack,
-        span: prepoly_lexer::Span,
-    ) -> Option<Type> {
-        if let Some(ret) = self.array_method_type(recv_ty, method, args, scopes, span) {
-            return Some(ret);
-        }
-        let ret = builtin_method_return(recv_ty, method)?;
-        args.iter().for_each(|arg| {
-            self.check_expr(&arg.expr, scopes);
-        });
-        Some(ret)
-    }
-
-    /// Type the builtin collection methods so their element types are enforced:
-    /// `push(self: T[], value: T) -> void`,
-    /// `pop(self: T[]) -> T?`, and `len(self) -> int64`. Element checking turns
-    /// `[1].push("x")` into a static error.
-    ///
-    /// `push`/`pop` are slice-only: a fixed array `T[n]` has a statically fixed
-    /// length (modeled as an inline `[n x T]`), so a
-    /// length-changing call on one is rejected. `len` and indexing remain valid
-    /// for both `T[n]` and `T[]` (indexing is handled in the `Index`/place
-    /// paths).
-    fn array_method_type(
-        &mut self,
-        recv_ty: &Type,
-        method: &str,
-        args: &[Arg],
-        scopes: &mut ScopeStack,
-        span: prepoly_lexer::Span,
-    ) -> Option<Type> {
-        let resolved = self.resolve(recv_ty);
-        // `ref(..)`/`mut(..)` are transparent wrappers, so a method on
-        // `ref(mut(T[]))` reaches the same collection as one on `T[]`. Peeling
-        // them lets `push`/`len`/... be recognised -- and lets `push` pin the
-        // element variable to the pushed value -- through a reference.
-        let base = peel_ref_mut(&resolved);
-        let (elem, is_fixed) = match base {
-            Type::Slice(inner) => (Some((**inner).clone()), false),
-            Type::Array(inner, _) => (Some((**inner).clone()), true),
-            _ => (None, false),
-        };
-        match (method, &elem) {
-            ("push" | "pop" | "insert" | "remove", Some(elem)) if is_fixed => {
-                args.iter().for_each(|arg| {
-                    self.check_expr(&arg.expr, scopes);
-                });
-                self.errors.push(TypeError {
-                    message: format!(
-                        "fixed array type `{}` has no method `{method}`",
-                        resolved.display()
-                    ),
-                    span,
-                });
-                // Return the shape the slice method would have had so the call
-                // site does not also report a cascading "no method" error.
-                Some(match method {
-                    "push" | "insert" => Type::Void,
-                    "remove" => elem.clone(),
-                    _ => Type::Nullable(Box::new(elem.clone())),
-                })
-            }
-            ("push", Some(elem)) => {
-                if let Some(arg) = args.first() {
-                    let got = self.check_expr(&arg.expr, scopes);
-                    self.expect_element_assignable(&got, elem, &arg.expr);
-                }
-                self.reject_extra_args(method, args, 1, scopes, span);
-                Some(Type::Void)
-            }
-            ("pop", Some(elem)) => {
-                args.iter().for_each(|arg| {
-                    self.check_expr(&arg.expr, scopes);
-                });
-                Some(Type::Nullable(Box::new(elem.clone())))
-            }
-            // `arr.insert(idx, v)`: idx is int64, v is the element.
-            ("insert", Some(elem)) => {
-                if let Some(idx) = args.first() {
-                    let got = self.check_expr(&idx.expr, scopes);
-                    self.expect_expr_assignable(&got, &Type::Int(IntKind::I64), &idx.expr);
-                }
-                if let Some(value) = args.get(1) {
-                    let got = self.check_expr(&value.expr, scopes);
-                    self.expect_element_assignable(&got, elem, &value.expr);
-                }
-                self.reject_extra_args(method, args, 2, scopes, span);
-                Some(Type::Void)
-            }
-            // `arr.remove(idx) -> T`: removes and returns the element.
-            ("remove", Some(elem)) => {
-                if let Some(idx) = args.first() {
-                    let got = self.check_expr(&idx.expr, scopes);
-                    self.expect_expr_assignable(&got, &Type::Int(IntKind::I64), &idx.expr);
-                }
-                for arg in args.iter().skip(1) {
-                    self.check_expr(&arg.expr, scopes);
-                }
-                Some(elem.clone())
-            }
-            ("len", Some(_)) => {
-                args.iter().for_each(|arg| {
-                    self.check_expr(&arg.expr, scopes);
-                });
-                Some(Type::Int(IntKind::I64))
-            }
-            _ if method == "len" && matches!(base, Type::Str) => {
-                args.iter().for_each(|arg| {
-                    self.check_expr(&arg.expr, scopes);
-                });
-                Some(Type::Int(IntKind::I64))
-            }
-            _ => None,
-        }
-    }
-
     fn check_static_call(
         &mut self,
         qualifier: &str,
@@ -3556,8 +2670,20 @@ impl<'a> Checker<'a> {
                     _ => None,
                 });
             if let Some(ty) = target {
-                if let Some(arg) = args.first() {
+                // Every argument is still type-checked (an undeclared name in a
+                // trailing argument must surface), and the conversion's arity is
+                // exactly one.
+                for arg in args {
                     self.check_expr(&arg.expr, scopes);
+                }
+                if args.len() != 1 {
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "`{qualifier}.from` takes 1 argument, found {}",
+                            args.len()
+                        ),
+                        span,
+                    });
                 }
                 return Type::Nullable(Box::new(ty));
             }
@@ -3660,313 +2786,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn instantiate_function_call(
-        &mut self,
-        symbol: &str,
-        module: &[String],
-        params: &[ParamInfo],
-        body: &Block,
-        declared_ret: Option<Type>,
-        fallback_ret: Type,
-        arg_types: &[Type],
-    ) -> Type {
-        if params.len() != arg_types.len() {
-            return fallback_ret;
-        }
-        let key = format!("fn:{symbol}");
-        if !self.instantiating.insert(key.clone()) {
-            // Recursive call: re-checking the body again would not terminate, so
-            // fall back to the declared/precomputed return type.
-            tracing::debug!(symbol = %symbol, "recursive call, using fallback return type");
-            return fallback_ret;
-        }
-        tracing::debug!(
-            symbol = %symbol,
-            args = ?arg_types.iter().map(|t| self.resolve(t).display()).collect::<Vec<_>>(),
-            "re-elaborating function body at call site"
-        );
-        // Re-check the callee body in its own module so its internal names
-        // resolve under that module's visibility, not the caller's.
-        let saved_module = std::mem::replace(&mut self.current_module, module.to_vec());
-        let frame = self.signature_call_frame(params, arg_types, None);
-        let mut scopes = vec![frame.clone()];
-        let full_ret = self.check_block_root(body, &mut scopes, declared_ret.as_ref());
-        let ret = match declared_ret {
-            Some(ret) => ret,
-            None => self.prefer_full_return(full_ret, body, frame),
-        };
-        self.current_module = saved_module;
-        self.instantiating.remove(&key);
-        ret
-    }
-
-    /// Choose an inferred-return body's return type: the full check's
-    /// reconciliation when it produced one and is not a `Result` (the full check
-    /// observes the stores/pushes the light pass misses), otherwise the light
-    /// `infer_return_from_frame`, which assembles a fallible body's `Result` from
-    /// its error sites -- something the normal-return reconciliation does not do.
-    fn prefer_full_return(
-        &mut self,
-        full_ret: Option<Type>,
-        body: &Block,
-        frame: HashMap<String, Type>,
-    ) -> Type {
-        let light = self.infer_return_from_frame(body, frame);
-        match full_ret {
-            Some(t) if !self.resolve(&light).is_result_type() => t,
-            _ => light,
-        }
-    }
-
-    /// Type a method call's result by instantiating the method's scheme against
-    /// the receiver instance: the scheme expresses the return over the type's
-    /// inferred parameters, and matching the scheme's field types to the
-    /// receiver's resolved field substitution fixes them (`get`'s `-> V?` becomes
-    /// `-> string?` for a `string`-valued map). Returns `None` when the receiver
-    /// is not a scheme'd record, the method is not in the scheme, or the return
-    /// still has an open parameter the instance did not pin (a parameter that only
-    /// flows through `==`, never a store or field read) -- the caller then keeps
-    /// the re-elaborated return.
-    fn scheme_method_return(&self, recv_ty: &Type, method: &str) -> Option<Type> {
-        let mut t = self.resolve(recv_ty);
-        while let Type::Ref(i) | Type::Mut(i) | Type::ConstOf(i) | Type::Nullable(i) = t {
-            t = *i;
-        }
-        let Type::Record(nominal) = t else {
-            return None;
-        };
-        let info = self.program.type_by_id(nominal.id)?;
-        let scheme = self.schemes.get(&info.name)?;
-        let scheme_method = scheme.methods.get(method)?;
-        let map = scheme_instance_map(scheme, &nominal);
-        let ret = apply_scheme_param_map(&scheme_method.ret, &map);
-        // Only adopt the instantiated return when it is fully resolved; an open
-        // variable means the instance did not constrain it, so the re-elaborated
-        // return (which can still defer) is the safer choice.
-        self.solver.free_vars(&ret).is_empty().then_some(ret)
-    }
-
-    fn instantiate_method_call(&mut self, call: MethodCall<'_>) -> Type {
-        let MethodCall {
-            owner,
-            self_type,
-            name: method_name,
-            method,
-            signature_params,
-            receiver_ty,
-            declared_ret,
-            fallback_ret,
-            arg_types,
-        } = call;
-        let has_self = signature_params.first().is_some_and(|p| p.name == "self");
-        if signature_params.len().saturating_sub(usize::from(has_self)) != arg_types.len() {
-            return fallback_ret;
-        }
-        let key = format!("method:{owner}.{method_name}");
-        if !self.instantiating.insert(key.clone()) {
-            return fallback_ret;
-        }
-        let saved = self.self_type.replace(self_type.to_string());
-        let saved_variant = self.self_variant.clone();
-        self.self_variant = owner
-            .split_once('.')
-            .map(|(_, variant)| (self_type.to_string(), variant.to_string()));
-        // Re-check the method body in its defining type's module.
-        let owner_type = self_type.to_string();
-        let saved_module =
-            self.swap_module_for(|p| p.types.get(&owner_type).map(|t| t.module.clone()));
-        let frame = self.signature_call_frame(signature_params, arg_types, receiver_ty);
-        let full_ret = if let Some(body) = &method.body {
-            let mut scopes = vec![frame.clone()];
-            self.check_block_root(body, &mut scopes, declared_ret.as_ref())
-        } else {
-            None
-        };
-        let ret = match (&method.body, declared_ret) {
-            (_, Some(ret)) => ret,
-            (Some(body), None) => self.prefer_full_return(full_ret, body, frame),
-            (None, None) => Type::Void,
-        };
-        self.self_type = saved;
-        self.self_variant = saved_variant;
-        self.current_module = saved_module;
-        self.instantiating.remove(&key);
-        ret
-    }
-
-    fn signature_call_frame(
-        &mut self,
-        params: &[ParamInfo],
-        arg_types: &[Type],
-        receiver_ty: Option<Type>,
-    ) -> HashMap<String, Type> {
-        // Re-checking a callee body sees top-level globals; signature
-        // parameters layer on top so they shadow same-named globals.
-        let mut frame = self.global_scope.clone();
-        let mut arg_idx = 0;
-        for param in params {
-            // A method called with the receiver passed separately (`receiver_ty`)
-            // binds `self` to it and does not consume an argument slot. A
-            // primitive/array method (`fun infer[].slice`) is instead instantiated
-            // like a function: its receiver is `arg_types[0]`, aligned with the
-            // `self` parameter, so `self` is handled by the ordinary positional
-            // branch below (instantiating its `infer[]` annotation against the
-            // receiver and advancing `arg_idx`).
-            let ty = if param.name == "self" && receiver_ty.is_some() {
-                receiver_ty
-                    .clone()
-                    .or_else(|| param.resolved_ty.clone())
-                    .unwrap_or_else(|| self.fresh_unknown())
-            } else if let Some(annotated) = param_expected_type(param).cloned() {
-                let ty = arg_types
-                    .get(arg_idx)
-                    .map(|arg| self.instantiate_annotated_type(&annotated, arg))
-                    .unwrap_or(annotated);
-                arg_idx += 1;
-                ty
-            } else {
-                let ty = arg_types
-                    .get(arg_idx)
-                    .cloned()
-                    .or_else(|| param.resolved_ty.clone())
-                    .unwrap_or_else(|| self.fresh_unknown());
-                arg_idx += 1;
-                ty
-            };
-            frame.insert(param.name.clone(), ty);
-        }
-        frame
-    }
-
-    fn instantiate_annotated_type(&self, annotated: &Type, actual: &Type) -> Type {
-        // Match against the actual value type, looking through `const`/`mut`/`ref`
-        // wrappers (an argument's mutability/reference does not change which
-        // element type a generic parameter is instantiated with).
-        let actual = peel_value_wrappers(&self.resolve(actual)).clone();
-        match (self.resolve(annotated), actual) {
-            // A bare `infer` parameter takes the argument's type.
-            (Type::Unknown(_), have) => have,
-            // A generic container parameter (`infer[]`, `infer[]?`, ...) is
-            // instantiated element-wise, so e.g. `slice(arr: infer[])` applied to
-            // an `int32[]` returns an `int32[]` rather than an unconstrained `?[]`.
-            (Type::Slice(want), Type::Slice(have) | Type::Array(have, _)) => {
-                Type::Slice(Box::new(self.instantiate_annotated_type(&want, &have)))
-            }
-            (Type::Array(want, n), Type::Array(have, _) | Type::Slice(have)) => {
-                Type::Array(Box::new(self.instantiate_annotated_type(&want, &have)), n)
-            }
-            (Type::Nullable(want), Type::Nullable(have)) => {
-                Type::Nullable(Box::new(self.instantiate_annotated_type(&want, &have)))
-            }
-            (Type::Record(want), Type::Record(have)) => {
-                let mut substitution = want.substitution.clone();
-                if let Some(TypeKind::Record { fields, .. }) =
-                    self.program.type_by_id(want.id).map(|info| &info.kind)
-                {
-                    for field in fields {
-                        if field.resolved_ty.as_ref().is_some_and(Type::is_unknown)
-                            && let Some(actual_ty) = self.record_field_type(&have, &field.name)
-                        {
-                            substitution.insert(field.name.clone(), actual_ty);
-                        }
-                    }
-                }
-                if let Some(TypeKind::Record { methods, .. }) =
-                    self.program.type_by_id(want.id).map(|info| &info.kind)
-                {
-                    for (method_name, want_method) in methods {
-                        let Some(have_method) =
-                            self.program
-                                .type_by_id(have.id)
-                                .and_then(|info| match &info.kind {
-                                    TypeKind::Record { methods, .. } => methods.get(method_name),
-                                    TypeKind::Sum { .. } => None,
-                                })
-                        else {
-                            continue;
-                        };
-                        for (want_param, have_param) in want_method
-                            .signature
-                            .params
-                            .iter()
-                            .zip(&have_method.signature.params)
-                        {
-                            if want_param.name == "self" {
-                                continue;
-                            }
-                            if want_param
-                                .resolved_ty
-                                .as_ref()
-                                .is_some_and(Type::is_unknown)
-                            {
-                                let key =
-                                    method_param_substitution_key(method_name, &want_param.name);
-                                if let Some(actual_ty) = have
-                                    .substitution
-                                    .get(&key)
-                                    .cloned()
-                                    .or_else(|| have_param.resolved_ty.clone())
-                                {
-                                    substitution.insert(key, actual_ty);
-                                }
-                            }
-                        }
-                        if want_method
-                            .signature
-                            .ret_ty
-                            .as_ref()
-                            .is_some_and(Type::is_unknown)
-                        {
-                            let key = method_return_substitution_key(method_name);
-                            let actual_ret = have
-                                .substitution
-                                .get(&key)
-                                .cloned()
-                                .or_else(|| have_method.signature.ret_ty.clone())
-                                .or_else(|| {
-                                    self.method_returns
-                                        .get(&(have.name().to_string(), method_name.clone()))
-                                        .cloned()
-                                });
-                            if let Some(actual_ret) = actual_ret {
-                                substitution.insert(key, actual_ret);
-                            }
-                        }
-                    }
-                }
-                apply_nominal_substitution(Type::Record(want), substitution)
-            }
-            _ => annotated.clone(),
-        }
-    }
-
-    fn record_field_type(&self, record: &NominalType, field: &str) -> Option<Type> {
-        record.substitution.get(field).cloned().or_else(|| {
-            self.program
-                .types
-                .get(record.name())
-                .and_then(|info| match &info.kind {
-                    TypeKind::Record { fields, .. } => fields
-                        .iter()
-                        .find(|candidate| candidate.name == field)
-                        .and_then(|candidate| candidate.resolved_ty.clone()),
-                    TypeKind::Sum { .. } => None,
-                })
-        })
-    }
-
-    fn infer_return_from_frame(&mut self, body: &Block, mut env: HashMap<String, Type>) -> Type {
-        let mut normal = Vec::new();
-        let mut errors = Vec::new();
-        self.infer_returns_block(body, &mut env, &mut normal, &mut errors);
-        // Call-site re-inference does not report conflicts; the definition site
-        // already did.
-        let normal_ty = self.reconcile_return_types(&normal, false);
-        let err_ty = self.reconcile_error_payloads(&errors, false);
-        self.result_from_payloads(normal_ty, err_ty)
-    }
-
     fn check_signature_args_collect(
         &mut self,
         params: &[ParamInfo],
@@ -4048,171 +2867,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_unary(&mut self, op: UnaryOp, ty: &Type, span: prepoly_lexer::Span) -> Type {
-        match self.resolve(ty) {
-            Type::Nullable(_) => {
-                if matches!(op, UnaryOp::Not) {
-                    Type::Bool
-                } else {
-                    self.report_nullable_use(span);
-                    self.fresh_unknown()
-                }
-            }
-            Type::Int(k) if matches!(op, UnaryOp::Neg | UnaryOp::BitNot) => Type::Int(k),
-            Type::Float(k) if matches!(op, UnaryOp::Neg) => Type::Float(k),
-            Type::Bool if matches!(op, UnaryOp::Not) => Type::Bool,
-            Type::Unknown(_) => self.fresh_unknown(),
-            other => {
-                self.errors.push(TypeError {
-                    message: format!(
-                        "operator `{}` is not defined for `{}`",
-                        unary_op_str(op),
-                        other.display()
-                    ),
-                    span,
-                });
-                self.fresh_unknown()
-            }
-        }
-    }
-
-    fn check_binary(
-        &mut self,
-        op: BinOp,
-        left: &Type,
-        right: &Type,
-        span: prepoly_lexer::Span,
-    ) -> Type {
-        self.check_binary_core(op, None, left, None, right, span)
-    }
-
-    fn check_binary_expr(
-        &mut self,
-        op: BinOp,
-        left_expr: &Expr,
-        left: &Type,
-        right_expr: &Expr,
-        right: &Type,
-        span: prepoly_lexer::Span,
-    ) -> Type {
-        self.check_binary_core(op, Some(left_expr), left, Some(right_expr), right, span)
-    }
-
-    fn check_binary_core(
-        &mut self,
-        op: BinOp,
-        left_expr: Option<&Expr>,
-        left: &Type,
-        right_expr: Option<&Expr>,
-        right: &Type,
-        span: prepoly_lexer::Span,
-    ) -> Type {
-        // See through reference/mutability wrappers: an operand read through a
-        // reference (e.g. a `ref(mut(int32))` array element bound by a `for` loop)
-        // operates on its underlying value, and the operator yields that value type.
-        let left = peel_ref_mut(&self.resolve(left)).clone();
-        let right = peel_ref_mut(&self.resolve(right)).clone();
-        if matches!(left, Type::Nullable(_)) || matches!(right, Type::Nullable(_)) {
-            if is_null_comparison(op, &left, &right) {
-                return Type::Bool;
-            }
-            self.report_nullable_use(span);
-            return self.fresh_unknown();
-        }
-        self.record_binary_shape(op, &left, &right);
-        if let Some(ty) = integer_literal_binary_type(op, left_expr, &left, right_expr, &right) {
-            return ty;
-        }
-        // Numeric arithmetic/comparison between mixed types implicitly converts
-        // both operands to their common type.
-        let is_unknown = matches!(left, Type::Unknown(_)) || matches!(right, Type::Unknown(_));
-        let numeric_common = common_numeric_type(&left, &right);
-        match op {
-            BinOp::Add if matches!((&left, &right), (Type::Str, Type::Str)) => Type::Str,
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
-                if is_unknown {
-                    // One operand is still an open inference variable. The result
-                    // takes the *other* operand's numeric type when it is a known
-                    // number, so a value flowing only through `x + 1` is concretely
-                    // typed (a count read back as `int32`) and a store of it pins
-                    // the destination. The open variable itself is not committed
-                    // here -- a concrete re-elaboration may make it `float64` -- so
-                    // numeric polymorphism is preserved.
-                    match (&left, &right) {
-                        (Type::Unknown(_), Type::Int(_) | Type::Float(_)) => right.clone(),
-                        (Type::Int(_) | Type::Float(_), Type::Unknown(_)) => left.clone(),
-                        _ => self.fresh_unknown(),
-                    }
-                } else if let Some(t) = numeric_common {
-                    t
-                } else {
-                    self.binary_error(op, &left, &right, span)
-                }
-            }
-            // Remainder is integer-only (the widths may still differ).
-            BinOp::Rem => {
-                if is_unknown {
-                    self.fresh_unknown()
-                } else if let Some(t @ Type::Int(_)) = numeric_common {
-                    t
-                } else {
-                    self.binary_error(op, &left, &right, span)
-                }
-            }
-            BinOp::Eq | BinOp::Ne => {
-                if numeric_common.is_some()
-                    || self.can_unify(&left, &right)
-                    || matches!(left, Type::Never)
-                    || matches!(right, Type::Never)
-                {
-                    Type::Bool
-                } else {
-                    self.binary_error(op, &left, &right, span)
-                }
-            }
-            // Ordering comparisons are numeric only. Strings have
-            // no ordering: `==`/`!=` compare them, but `<`/`>`/`<=`/`>=` do not.
-            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                if numeric_common.is_some() || is_unknown {
-                    Type::Bool
-                } else {
-                    self.binary_error(op, &left, &right, span)
-                }
-            }
-            BinOp::And | BinOp::Or => match (&left, &right) {
-                (Type::Bool, Type::Bool) => Type::Bool,
-                (Type::Unknown(_), _) | (_, Type::Unknown(_)) => Type::Bool,
-                _ => self.binary_error(op, &left, &right, span),
-            },
-            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
-                match (&left, &right) {
-                    (Type::Int(a), Type::Int(b)) if a == b => left,
-                    (Type::Unknown(_), _) | (_, Type::Unknown(_)) => self.fresh_unknown(),
-                    _ => self.binary_error(op, &left, &right, span),
-                }
-            }
-        }
-    }
-
-    fn binary_error(
-        &mut self,
-        op: BinOp,
-        left: &Type,
-        right: &Type,
-        span: prepoly_lexer::Span,
-    ) -> Type {
-        self.errors.push(TypeError {
-            message: format!(
-                "operator `{}` is not defined for `{}` and `{}` (no applicable conversion)",
-                op_str(op),
-                left.display(),
-                right.display()
-            ),
-            span,
-        });
-        self.fresh_unknown()
-    }
-
     /// The element type bound by a `for` loop over `iter_ty`, seeing through
     /// reference/mutability wrappers and re-applying them to the element (over a
     /// `ref(mut(T[]))` each element is a `ref(mut(T))`). An as-yet-unconstrained
@@ -4245,217 +2899,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn expect_expr_assignable(&mut self, got: &Type, want: &Type, expr: &Expr) {
-        if integer_literal_fits(expr, want) {
-            return;
-        }
-        self.expect_assignable(got, want, expr.span());
-    }
-
-    fn expect_assignable(&mut self, got: &Type, want: &Type, span: prepoly_lexer::Span) {
-        let got = self.resolve(got);
-        let want = self.resolve(want);
-        // An unconstrained inference variable whose type cannot be inferred
-        // reaching a concrete required position is an error rather than a silent
-        // unification: a bare empty array carries no
-        // element, and a function that only returns `error(...)` has no `Ok`
-        // payload type. A `want` that is itself unknown leaves the contract
-        // deferred rather than wrong.
-        if let Type::Unknown(id) = &got
-            && !want.is_unknown()
-        {
-            match self.solver.kind_of(*id) {
-                Some(InferenceVarKind::EmptyArrayElem) => {
-                    self.errors.push(TypeError {
-                        message: "cannot infer element type of empty array; add a type annotation"
-                            .to_string(),
-                        span,
-                    });
-                    return;
-                }
-                Some(InferenceVarKind::ErrorOnlyOk) => {
-                    self.errors.push(TypeError {
-                        message: "cannot infer the Ok payload type of a function that only \
-                                      returns errors; add a non-error return or an annotation"
-                            .to_string(),
-                        span,
-                    });
-                    return;
-                }
-                _ => {}
-            }
-        }
-        if got.is_null() && !matches!(want, Type::Nullable(_)) {
-            self.errors.push(TypeError {
-                message: format!(
-                    "cannot use `{}` where `{}` is required",
-                    got.display(),
-                    want.display()
-                ),
-                span,
-            });
-            return;
-        }
-        if matches!(got, Type::Nullable(_)) && !matches!(want, Type::Nullable(_)) {
-            self.report_nullable_use(span);
-            return;
-        }
-        if let Type::Nullable(inner) = &want
-            && (self.can_unify(&got, inner)
-                || numeric_flows_into(&got, &self.resolve(inner))
-                || matches!(got, Type::Never))
-        {
-            return;
-        }
-        if self.can_unify(&got, &want)
-            || crate::structural::types_compatible(self.program, &got, &want)
-        {
-            return;
-        }
-        // Automatic numeric conversion: a numeric value flows into a numeric
-        // position of another type (int widths/signedness, int -> float); the
-        // back ends convert at the flow point. float -> int stays explicit.
-        if numeric_flows_into(&got, &want) {
-            return;
-        }
-        self.errors.push(TypeError {
-            message: format!(
-                "cannot use `{}` where `{}` is required",
-                got.display(),
-                want.display()
-            ),
-            span,
-        });
-    }
-
     fn can_unify(&self, a: &Type, b: &Type) -> bool {
         Subst::new().unify(a, b).is_ok()
             || crate::structural::types_compatible(self.program, a, b)
             || crate::structural::types_compatible(self.program, b, a)
-    }
-
-    /// Check a value pushed/inserted into a slice against its element type. Unlike
-    /// the bidirectional `expect_assignable` (whose reverse structural check the
-    /// per-call hm pass re-gates for ordinary flow positions, but not for slice
-    /// methods), this is one-directional: the value must be usable *as* the
-    /// element, so a structural supertype is rejected and cannot corrupt the
-    /// unboxed element layout. When the element type is still an open inference
-    /// variable it is pinned to the value through `solver.unify`, so the occurs
-    /// check fires -- pushing an array into itself (`a.push(a)`) is reported here
-    /// instead of leaving the element unbound to be mistyped at the call site.
-    fn expect_element_assignable(&mut self, got: &Type, elem: &Type, expr: &Expr) {
-        let got = self.resolve(got);
-        let want = self.resolve(elem);
-        if integer_literal_fits(expr, &want) {
-            return;
-        }
-        // The element type carries an open inference variable -- either it is one
-        // (a fresh `?[]`) or it is a record/array with open components (an
-        // `_Entry<?, ?>` element whose key/value are not yet fixed). Pin it to the
-        // value by committing the unification, so the stored value's concrete type
-        // refines the element through the solver's record/array unification.
-        if !self.solver.free_vars(&want).is_empty() {
-            // Pushing/storing `null` into a still-open element makes the element a
-            // *nullable with an open inner* (`Nullable(?)`), rather than collapsing
-            // it to `Nullable(Never)`. This is what lets a slot array seeded with
-            // `null` (`entries.push(null)`) still take its element type from the
-            // non-null values stored later: the open inner is refined below.
-            if got.is_null() && matches!(want, Type::Unknown(_)) {
-                let inner = self.fresh_unknown();
-                let _ = self.solver.unify(elem, &Type::Nullable(Box::new(inner)));
-                return;
-            }
-            // A non-null value stored into a nullable element refines the element's
-            // *inner* type (a concrete `_Entry<K, V>` into a `_Entry?[]` slot pins
-            // `K` and `V`), so a nullable container fixes its element from the
-            // values inserted while still accepting `null`. Otherwise the value
-            // refines the element directly.
-            let outcome = match &want {
-                Type::Nullable(inner) if !got.is_null() && !matches!(got, Type::Nullable(_)) => {
-                    self.solver.unify(inner, &got)
-                }
-                _ => self.solver.unify(elem, &got),
-            };
-            if outcome.is_err() && want.is_unknown() {
-                // The only hard failure on a *bare* element variable is the occurs
-                // check: pushing the array into itself, an infinite element type.
-                self.errors.push(TypeError {
-                    message: "cannot push a value whose type contains this array; \
-                              the element type would be infinite"
-                        .to_string(),
-                    span: expr.span(),
-                });
-            }
-            // A failure against a *partially* fixed element (a record/array with
-            // open components) is left to defer rather than reported: the store may
-            // go through a witness alias the body itself re-reads (the table's
-            // `_grow` re-inserts `old_entries[0]`), which is loose by construction.
-            // A genuine clash on a fully concrete element is caught by the concrete
-            // path below, which still runs because such an element has no free var.
-            return;
-        }
-        if got.is_null() && !matches!(want, Type::Nullable(_)) {
-            self.report_element_mismatch(&got, &want, expr.span());
-            return;
-        }
-        if matches!(got, Type::Nullable(_)) && !matches!(want, Type::Nullable(_)) {
-            self.report_nullable_use(expr.span());
-            return;
-        }
-        if let Type::Nullable(inner) = &want
-            && (self.assignable_into(&got, inner) || matches!(got, Type::Never))
-        {
-            return;
-        }
-        if self.assignable_into(&got, &want) {
-            return;
-        }
-        self.report_element_mismatch(&got, &want, expr.span());
-    }
-
-    /// One-directional assignability: whether `got` is usable where `want` is
-    /// required, by inference-variable unification or structural subtyping, and
-    /// without the reverse structural check `can_unify` adds.
-    fn assignable_into(&self, got: &Type, want: &Type) -> bool {
-        Subst::new().unify(got, want).is_ok()
-            || crate::structural::types_compatible(self.program, got, want)
-    }
-
-    fn report_element_mismatch(&mut self, got: &Type, want: &Type, span: prepoly_lexer::Span) {
-        self.errors.push(TypeError {
-            message: format!(
-                "cannot use `{}` where `{}` is required",
-                got.display(),
-                want.display()
-            ),
-            span,
-        });
-    }
-
-    /// Report (and still type-check, to surface their own errors) arguments beyond
-    /// the fixed arity of a builtin slice mutator, so `a.push(x, y)` is rejected
-    /// rather than silently dropping `y` -- which previously let `a.push(a, 2)`
-    /// parse as a self-push.
-    fn reject_extra_args(
-        &mut self,
-        method: &str,
-        args: &[Arg],
-        arity: usize,
-        scopes: &mut ScopeStack,
-        span: prepoly_lexer::Span,
-    ) {
-        for arg in args.iter().skip(arity) {
-            self.check_expr(&arg.expr, scopes);
-        }
-        if args.len() > arity {
-            self.errors.push(TypeError {
-                message: format!(
-                    "method `{method}` takes {arity} argument(s), found {}",
-                    args.len()
-                ),
-                span,
-            });
-        }
     }
 
     /// Resolve a type through the persistent substitution, following solved
@@ -4523,11 +2970,47 @@ impl<'a> Checker<'a> {
 
     fn narrow_non_null(&mut self, name: &str, scopes: &mut ScopeStack) {
         for scope in scopes.iter_mut().rev() {
-            if let Some(Type::Nullable(inner)) = scope.get(name).cloned().map(|t| self.resolve(&t))
-            {
+            if let Some(original) = scope.get(name).cloned() {
+                let Type::Nullable(inner) = self.resolve(&original) else {
+                    return;
+                };
                 tracing::debug!(name, to = %inner.display(), "narrowing nullable to non-null");
-                scope.insert(name.to_string(), *inner);
+                scope.insert(name.to_string(), (*inner).clone());
+                // Remember the pre-narrowing type so a later call can undo the
+                // narrowing when the binding is reachable by the callee (a
+                // global or a closure-assigned local).
+                self.narrowed_bindings
+                    .push((name.to_string(), Type::Nullable(inner)));
                 break;
+            }
+        }
+    }
+
+    /// Undo narrowings a call may have invalidated: a narrowed GLOBAL (frame 0
+    /// of the scope stack; any callee can assign it) and a narrowed local that
+    /// some closure in this body assigns (the closure may run during the call).
+    /// The nullable type is restored in the current (branch-local) scope clone,
+    /// so uses after the call must re-check for null. Plain locals stay
+    /// narrowed: no callee can rebind them.
+    fn invalidate_narrowed_after_call(&mut self, scopes: &mut ScopeStack) {
+        if self.narrowed_bindings.is_empty() {
+            return;
+        }
+        let narrowed = self.narrowed_bindings.clone();
+        for (name, original) in narrowed {
+            let Some(frame_idx) = scopes.iter().rposition(|s| s.contains_key(&name)) else {
+                continue;
+            };
+            let global = frame_idx == 0;
+            if !global && !self.closure_write_targets.contains(&name) {
+                continue;
+            }
+            let still_narrowed = scopes[frame_idx]
+                .get(&name)
+                .is_some_and(|t| !matches!(self.resolve(t), Type::Nullable(_)));
+            if still_narrowed {
+                tracing::debug!(name, "re-widening narrowed binding after call");
+                scopes[frame_idx].insert(name.clone(), original.clone());
             }
         }
     }
@@ -4574,39 +3057,61 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Whether the resolved scrutinee type can produce a value matching a
+    /// variant pattern named `variant`. Membership is decided against the
+    /// scrutinee's OWN sum definition -- two sums may share a variant name, so
+    /// picking an arbitrary "owning" sum from the type table and comparing its
+    /// name would accept or reject depending on hash order.
+    fn scrutinee_accepts_variant(&mut self, scrutinee: &Type, variant: &str) -> bool {
+        let resolved = self.resolve(scrutinee);
+        if resolved.is_result_type() {
+            return matches!(variant, "Ok" | "Err");
+        }
+        match resolved {
+            Type::Sum(sum) => match self.program.type_by_id(sum.id) {
+                Some(info) => info.variant(variant).is_some(),
+                // No table entry (e.g. a synthesized sum): fall back to
+                // matching the sum's name against the variant's possible owners.
+                None => self
+                    .program
+                    .sums_containing_variant(variant)
+                    .iter()
+                    .any(|info| sum.is_name(&info.name)),
+            },
+            Type::Unknown(_) => true,
+            _ => false,
+        }
+    }
+
     fn check_pattern_against(&mut self, scrutinee: &Type, pat: &Pattern) {
         match pat {
             Pattern::Binding(name, span) => {
-                if let Some(owner) = self.variant_owner(name) {
-                    match self.resolve(scrutinee) {
-                        Type::Sum(sum) if sum.is_name(&owner) => {}
-                        ty if owner == "Result" && ty.is_result_type() => {}
-                        Type::Unknown(_) => {}
-                        other => self.errors.push(TypeError {
-                            message: format!(
-                                "pattern variant `{name}` belongs to `{owner}`, not `{}`",
-                                other.display()
-                            ),
-                            span: *span,
-                        }),
-                    }
+                if let Some(owner) = self.variant_owner(name)
+                    && !self.scrutinee_accepts_variant(scrutinee, name)
+                {
+                    let other = self.resolve(scrutinee);
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "pattern variant `{name}` belongs to `{owner}`, not `{}`",
+                            other.display()
+                        ),
+                        span: *span,
+                    });
                 }
             }
             Pattern::Record(name, fields, span) => {
                 let owner = self.variant_owner(name);
-                if let Some(owner) = &owner {
-                    match self.resolve(scrutinee) {
-                        Type::Sum(sum) if sum.is_name(owner) => {}
-                        ty if owner == "Result" && ty.is_result_type() => {}
-                        Type::Unknown(_) => {}
-                        other => self.errors.push(TypeError {
-                            message: format!(
-                                "pattern variant `{name}` belongs to `{owner}`, not `{}`",
-                                other.display()
-                            ),
-                            span: *span,
-                        }),
-                    }
+                if let Some(owner) = &owner
+                    && !self.scrutinee_accepts_variant(scrutinee, name)
+                {
+                    let other = self.resolve(scrutinee);
+                    self.errors.push(TypeError {
+                        message: format!(
+                            "pattern variant `{name}` belongs to `{owner}`, not `{}`",
+                            other.display()
+                        ),
+                        span: *span,
+                    });
                 }
                 let field_types = self.pattern_field_types(scrutinee, name);
                 for fp in fields {
@@ -4717,7 +3222,7 @@ impl<'a> Checker<'a> {
                 })
                 .unwrap_or_default();
         }
-        let sum_name = self.sum_containing_variant(variant);
+        let sum_name = self.variant_owner(variant);
         let fields = sum_name
             .and_then(|name| self.program.types.get(&name))
             .and_then(|info| info.variant(variant))
@@ -4738,7 +3243,10 @@ impl<'a> Checker<'a> {
     }
 
     fn methods_for_type(&self, ty: &Type, method: &str) -> Option<Vec<ResolvedMethod>> {
-        match self.resolve(ty) {
+        // Mode wrappers expose the underlying value's methods: a call through a
+        // `ref(mut(T))` parameter must resolve (and type-check its arguments
+        // against) `T`'s methods rather than deferring to runtime dispatch.
+        match prepoly_hir::peel_modes(&self.resolve(ty)).clone() {
             Type::Record(name) => {
                 // Resolve by the receiver's unique id, and key the resolved
                 // method on the type's symbol so dispatch is correct when two
@@ -5160,20 +3668,15 @@ impl<'a> Checker<'a> {
         })
     }
 
-    fn sum_containing_variant(&self, variant: &str) -> Option<String> {
-        self.program
-            .types
-            .values()
-            .find_map(|info| match &info.kind {
-                TypeKind::Sum { variants } if variants.iter().any(|v| v.name == variant) => {
-                    Some(info.name.clone())
-                }
-                _ => None,
-            })
-    }
-
+    /// A sum type defining a variant named `variant`, when one exists. Several
+    /// sums may share a variant name; the first of the deterministic order is
+    /// returned (used for messages and as a fallback when the scrutinee's own
+    /// type is unknown), so results never depend on type-table hash order.
     fn variant_owner(&self, variant: &str) -> Option<String> {
-        self.sum_containing_variant(variant)
+        self.program
+            .sums_containing_variant(variant)
+            .first()
+            .map(|info| info.name.clone())
     }
 }
 
@@ -5195,6 +3698,7 @@ fn is_runtime_builtin_value(name: &str) -> bool {
             | "sync"
             | "_cown"
             | "_freeze"
+            | "_with_all"
             | "input"
             | "read_file"
             | "write_file"
@@ -5224,36 +3728,6 @@ fn is_runtime_builtin_value(name: &str) -> bool {
             | "_array_insert"
             | "_array_remove"
     )
-}
-
-/// Value class expected by a numeric runtime helper argument. Used to reject a
-/// concrete wrong class (e.g. a float where an integer is required) before the
-/// runtime reinterprets payload bits.
-enum NumericClass {
-    Int,
-    Float,
-    Str,
-    Bool,
-}
-
-impl NumericClass {
-    fn accepts(&self, ty: &Type) -> bool {
-        match self {
-            NumericClass::Int => matches!(ty, Type::Int(_)),
-            NumericClass::Float => matches!(ty, Type::Float(_)),
-            NumericClass::Str => matches!(ty, Type::Str),
-            NumericClass::Bool => matches!(ty, Type::Bool),
-        }
-    }
-
-    fn describe(&self) -> &'static str {
-        match self {
-            NumericClass::Int => "an integer",
-            NumericClass::Float => "a float",
-            NumericClass::Str => "a string",
-            NumericClass::Bool => "a bool",
-        }
-    }
 }
 
 /// Whether `ty` is a fully known primitive with no user fields or methods.
@@ -5320,60 +3794,6 @@ fn peel_value_wrappers(ty: &Type) -> &Type {
     }
 }
 
-fn builtin_method_return(recv_ty: &Type, method: &str) -> Option<Type> {
-    let Type::Record(name) = recv_ty else {
-        return None;
-    };
-    if !name.is_name("File") {
-        return None;
-    }
-    match method {
-        "write" | "size" => Some(Type::result(Type::Int(IntKind::I64), Type::Str)),
-        "read" => Some(Type::result(
-            Type::Slice(Box::new(Type::Int(IntKind::U8))),
-            Type::Str,
-        )),
-        "close" | "seek" => Some(Type::result(Type::Void, Type::Str)),
-        _ => None,
-    }
-}
-
-fn primitive_static_return(tname: &str, method: &str) -> Option<Type> {
-    if let Some(k) = IntKind::from_name(tname) {
-        return match method {
-            "from" | "parse" => Some(Type::result(Type::Int(k), Type::Str)),
-            _ => None,
-        };
-    }
-    match (tname, method) {
-        ("float32", "from") => Some(Type::Float(FloatKind::F32)),
-        ("float32", "parse") => Some(Type::result(Type::Float(FloatKind::F32), Type::Str)),
-        ("float64", "from") => Some(Type::Float(FloatKind::F64)),
-        ("float64", "parse") => Some(Type::result(Type::Float(FloatKind::F64), Type::Str)),
-        ("string", "from") => Some(Type::Str),
-        _ => None,
-    }
-}
-
-fn integer_literal_fits(expr: &Expr, want: &Type) -> bool {
-    // See through a nullable cell and the reference/mutability wrappers: assigning
-    // an integer literal to a `ref(mut(int32))` element (an array index through a
-    // mutable reference) targets the underlying `int32`.
-    fn int_kind(t: &Type) -> Option<IntKind> {
-        match t {
-            Type::Int(kind) => Some(*kind),
-            Type::Nullable(inner) | Type::Ref(inner) | Type::Mut(inner) | Type::ConstOf(inner) => {
-                int_kind(inner)
-            }
-            _ => None,
-        }
-    }
-    match (expr, int_kind(want)) {
-        (Expr::Int(value, _), Some(kind)) => int_fits_kind(*value, kind),
-        _ => false,
-    }
-}
-
 fn literal_pattern_type(expr: &Expr) -> Option<Type> {
     match expr {
         Expr::Int(v, _) => Some(Type::Int(int_literal_kind(*v))),
@@ -5391,42 +3811,6 @@ fn literal_pattern_matches(expr: &Expr, lit_ty: &Type, scrutinee: &Type) -> bool
         (Expr::Int(..), Type::Int(_)) => integer_literal_fits(expr, scrutinee),
         (Expr::Null(_), Type::Nullable(_) | Type::Never) => true,
         _ => Subst::new().unify(lit_ty, scrutinee).is_ok(),
-    }
-}
-
-fn integer_literal_binary_type(
-    op: BinOp,
-    left_expr: Option<&Expr>,
-    left: &Type,
-    right_expr: Option<&Expr>,
-    right: &Type,
-) -> Option<Type> {
-    if left_expr.is_some_and(|expr| integer_literal_fits(expr, right)) {
-        return integer_literal_binary_result(op, right);
-    }
-    if right_expr.is_some_and(|expr| integer_literal_fits(expr, left)) {
-        return integer_literal_binary_result(op, left);
-    }
-    None
-}
-
-fn integer_literal_binary_result(op: BinOp, contextual_type: &Type) -> Option<Type> {
-    if !matches!(contextual_type, Type::Int(_)) {
-        return None;
-    }
-    match op {
-        BinOp::Add
-        | BinOp::Sub
-        | BinOp::Mul
-        | BinOp::Div
-        | BinOp::Rem
-        | BinOp::BitAnd
-        | BinOp::BitOr
-        | BinOp::BitXor
-        | BinOp::Shl
-        | BinOp::Shr => Some(contextual_type.clone()),
-        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => Some(Type::Bool),
-        BinOp::And | BinOp::Or => None,
     }
 }
 
@@ -5511,96 +3895,6 @@ fn visit_unknowns(ty: &Type, record: &mut impl FnMut(u32)) {
         | Type::Never
         | Type::SelfType => {}
     }
-}
-
-fn common_nullable_type(left: &Type, right: &Type) -> Option<Type> {
-    match (left.is_null(), right.is_null()) {
-        (true, true) => Some(Type::null()),
-        (true, false) => Some(nullable_common_side(right)),
-        (false, true) => Some(nullable_common_side(left)),
-        (false, false) => None,
-    }
-}
-
-fn nullable_common_side(ty: &Type) -> Type {
-    match ty {
-        Type::Unknown(_) | Type::Nullable(_) => ty.clone(),
-        other => Type::Nullable(Box::new(other.clone())),
-    }
-}
-
-/// Map each scheme parameter to the receiver instance's concrete type by matching
-/// the scheme's field types against the receiver's resolved field substitution
-/// (`entries : _Entry<K, V>[]` vs `entries : _Entry<string, string>[]` gives `K
-/// -> string`, `V -> string`). Used to instantiate a method's scheme at a call.
-fn scheme_instance_map(scheme: &TypeScheme, recv: &NominalType) -> HashMap<u32, Type> {
-    let mut map = HashMap::new();
-    for (fname, fty) in &scheme.fields {
-        if let Some(actual) = recv.substitution.get(fname) {
-            match_scheme_param(fty, actual, &scheme.params, &mut map);
-        }
-    }
-    map
-}
-
-/// Record `param -> actual` where a scheme parameter variable aligns with a
-/// concrete position in the receiver's field type, recursing structurally.
-fn match_scheme_param(
-    scheme_ty: &Type,
-    actual: &Type,
-    params: &[u32],
-    map: &mut HashMap<u32, Type>,
-) {
-    match (scheme_ty, actual) {
-        (Type::Unknown(id), a) if params.contains(id) => {
-            map.entry(*id).or_insert_with(|| a.clone());
-        }
-        (Type::Slice(s), Type::Slice(a))
-        | (Type::Slice(s), Type::Array(a, _))
-        | (Type::Array(s, _), Type::Slice(a))
-        | (Type::Array(s, _), Type::Array(a, _))
-        | (Type::Nullable(s), Type::Nullable(a))
-        | (Type::Ref(s), Type::Ref(a))
-        | (Type::Mut(s), Type::Mut(a))
-        | (Type::ConstOf(s), Type::ConstOf(a)) => match_scheme_param(s, a, params, map),
-        (Type::Record(sn), Type::Record(an)) | (Type::Sum(sn), Type::Sum(an)) => {
-            for (k, sv) in sn.substitution.iter() {
-                if let Some(av) = an.substitution.get(k) {
-                    match_scheme_param(sv, av, params, map);
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Substitute scheme parameters with their concrete types throughout a type.
-fn apply_scheme_param_map(ty: &Type, map: &HashMap<u32, Type>) -> Type {
-    match ty {
-        Type::Unknown(id) => map.get(id).cloned().unwrap_or_else(|| ty.clone()),
-        Type::Slice(e) => Type::Slice(Box::new(apply_scheme_param_map(e, map))),
-        Type::Array(e, n) => Type::Array(Box::new(apply_scheme_param_map(e, map)), *n),
-        Type::Nullable(e) => Type::Nullable(Box::new(apply_scheme_param_map(e, map))),
-        Type::Ref(e) => Type::Ref(Box::new(apply_scheme_param_map(e, map))),
-        Type::Mut(e) => Type::Mut(Box::new(apply_scheme_param_map(e, map))),
-        Type::ConstOf(e) => Type::ConstOf(Box::new(apply_scheme_param_map(e, map))),
-        Type::Fun(ps, r) => Type::Fun(
-            ps.iter().map(|p| apply_scheme_param_map(p, map)).collect(),
-            Box::new(apply_scheme_param_map(r, map)),
-        ),
-        Type::Tuple(es) => Type::Tuple(es.iter().map(|e| apply_scheme_param_map(e, map)).collect()),
-        Type::Record(n) => Type::Record(map_scheme_nominal(n, map)),
-        Type::Sum(n) => Type::Sum(map_scheme_nominal(n, map)),
-        other => other.clone(),
-    }
-}
-
-fn map_scheme_nominal(n: &NominalType, map: &HashMap<u32, Type>) -> NominalType {
-    let mut subst = Substitution::empty();
-    for (k, v) in n.substitution.iter() {
-        subst.insert(k, apply_scheme_param_map(v, map));
-    }
-    NominalType::with_substitution(n.id, n.name().to_string(), subst)
 }
 
 fn apply_nominal_substitution(ty: Type, substitution: Substitution) -> Type {
@@ -5762,34 +4056,173 @@ fn block_always_returns(block: &Block) -> bool {
     block.stmts.iter().any(|s| matches!(s, Stmt::Return(..)))
 }
 
-fn op_str(op: BinOp) -> &'static str {
-    match op {
-        BinOp::Add => "+",
-        BinOp::Sub => "-",
-        BinOp::Mul => "*",
-        BinOp::Div => "/",
-        BinOp::Rem => "%",
-        BinOp::Eq => "==",
-        BinOp::Ne => "!=",
-        BinOp::Lt => "<",
-        BinOp::Gt => ">",
-        BinOp::Le => "<=",
-        BinOp::Ge => ">=",
-        BinOp::And => "&&",
-        BinOp::Or => "||",
-        BinOp::BitAnd => "&",
-        BinOp::BitOr => "|",
-        BinOp::BitXor => "^",
-        BinOp::Shl => "<<",
-        BinOp::Shr => ">>",
+/// Names assigned (rebound) anywhere inside a closure literal of `b`. A closure
+/// captures such a binding by reference, so any call made while the binding is
+/// narrowed non-null can run the closure and re-null it; the narrowing pass
+/// treats these names like globals and re-widens them after calls. Shadowing is
+/// not tracked (a closure-local `let` of the same name over-approximates),
+/// which only re-widens more than strictly needed -- never less.
+fn closure_write_targets_block(b: &Block) -> HashSet<String> {
+    let mut acc = HashSet::new();
+    for s in &b.stmts {
+        collect_closure_writes_stmt(s, false, &mut acc);
+    }
+    acc
+}
+
+fn collect_closure_writes_stmt(stmt: &Stmt, in_closure: bool, acc: &mut HashSet<String>) {
+    match stmt {
+        Stmt::Let { value, .. } => collect_closure_writes_expr(value, in_closure, acc),
+        Stmt::Assign { target, value, .. } => {
+            if in_closure && let Expr::Ident(name, _) = target {
+                acc.insert(name.clone());
+            }
+            collect_closure_writes_expr(target, in_closure, acc);
+            collect_closure_writes_expr(value, in_closure, acc);
+        }
+        Stmt::Expr(e) => collect_closure_writes_expr(e, in_closure, acc),
+        Stmt::While { cond, body, .. } => {
+            collect_closure_writes_expr(cond, in_closure, acc);
+            for s in &body.stmts {
+                collect_closure_writes_stmt(s, in_closure, acc);
+            }
+        }
+        Stmt::For { iter, body, .. } => {
+            collect_closure_writes_expr(iter, in_closure, acc);
+            for s in &body.stmts {
+                collect_closure_writes_stmt(s, in_closure, acc);
+            }
+        }
+        Stmt::Return(value, _) => {
+            if let Some(e) = value {
+                collect_closure_writes_expr(e, in_closure, acc);
+            }
+        }
+        Stmt::Break(_) | Stmt::Continue(_) => {}
     }
 }
 
-fn unary_op_str(op: UnaryOp) -> &'static str {
-    match op {
-        UnaryOp::Neg => "-",
-        UnaryOp::Not => "!",
-        UnaryOp::BitNot => "~",
+fn collect_closure_writes_expr(expr: &Expr, in_closure: bool, acc: &mut HashSet<String>) {
+    match expr {
+        Expr::Closure(_, body, _) => collect_closure_writes_expr(body, true, acc),
+        Expr::Block(b, _) => {
+            for s in &b.stmts {
+                collect_closure_writes_stmt(s, in_closure, acc);
+            }
+        }
+        Expr::Unary(_, inner, _) | Expr::ErrorProp(inner, _) => {
+            collect_closure_writes_expr(inner, in_closure, acc)
+        }
+        Expr::Binary(_, a, b, _) | Expr::Range(a, b, _) => {
+            collect_closure_writes_expr(a, in_closure, acc);
+            collect_closure_writes_expr(b, in_closure, acc);
+        }
+        Expr::Call(callee, args, _) => {
+            collect_closure_writes_expr(callee, in_closure, acc);
+            for a in args {
+                collect_closure_writes_expr(&a.expr, in_closure, acc);
+            }
+        }
+        Expr::Field(base, _, _) => collect_closure_writes_expr(base, in_closure, acc),
+        Expr::Index(base, idx, _) => {
+            collect_closure_writes_expr(base, in_closure, acc);
+            collect_closure_writes_expr(idx, in_closure, acc);
+        }
+        Expr::Array(items, _) => {
+            for e in items {
+                collect_closure_writes_expr(e, in_closure, acc);
+            }
+        }
+        Expr::TypeLit(_, fields, _) | Expr::VariantLit(_, _, fields, _) => {
+            for (_, e) in fields {
+                collect_closure_writes_expr(e, in_closure, acc);
+            }
+        }
+        Expr::Str(segs, _) => {
+            for seg in segs {
+                if let StrSeg::Expr(e) = seg {
+                    collect_closure_writes_expr(e, in_closure, acc);
+                }
+            }
+        }
+        Expr::If(cond, then, els, _) => {
+            collect_closure_writes_expr(cond, in_closure, acc);
+            for s in &then.stmts {
+                collect_closure_writes_stmt(s, in_closure, acc);
+            }
+            if let Some(e) = els {
+                collect_closure_writes_expr(e, in_closure, acc);
+            }
+        }
+        Expr::IfLet(_, scrut, then, els, _) => {
+            collect_closure_writes_expr(scrut, in_closure, acc);
+            for s in &then.stmts {
+                collect_closure_writes_stmt(s, in_closure, acc);
+            }
+            if let Some(e) = els {
+                collect_closure_writes_expr(e, in_closure, acc);
+            }
+        }
+        Expr::Match(scrut, arms, _) => {
+            collect_closure_writes_expr(scrut, in_closure, acc);
+            for arm in arms {
+                collect_closure_writes_expr(&arm.body, in_closure, acc);
+            }
+        }
+        Expr::Int(..)
+        | Expr::Float(..)
+        | Expr::Bool(..)
+        | Expr::Null(_)
+        | Expr::Ident(..)
+        | Expr::SelfExpr(_) => {}
+    }
+}
+
+/// Whether lowering this statement can produce a MIR branch (a `CondBranch`
+/// terminator) before control reaches the next statement. Used by the
+/// structural if-probe: the back end's fold follows only straight-line
+/// `Goto`/`Return` chains, so any branching statement before the arm's
+/// `return` makes the arm non-foldable. Conservative: `true` when unsure.
+fn stmt_may_branch(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Let { value, .. } => expr_may_branch(value),
+        Stmt::Assign { target, value, .. } => expr_may_branch(target) || expr_may_branch(value),
+        Stmt::Expr(e) => expr_may_branch(e),
+        Stmt::While { .. } | Stmt::For { .. } => true,
+        Stmt::Return(..) | Stmt::Break(_) | Stmt::Continue(_) => true,
+    }
+}
+
+/// Whether evaluating this expression can produce a MIR branch. Short-circuit
+/// operators, `expr!` propagation and every conditional construct lower through
+/// a `CondBranch`; a closure literal does not (its body is a separate function).
+fn expr_may_branch(e: &Expr) -> bool {
+    match e {
+        Expr::Int(..)
+        | Expr::Float(..)
+        | Expr::Bool(..)
+        | Expr::Null(_)
+        | Expr::Ident(..)
+        | Expr::SelfExpr(_)
+        | Expr::Closure(..) => false,
+        Expr::Str(segs, _) => segs
+            .iter()
+            .any(|s| matches!(s, StrSeg::Expr(e) if expr_may_branch(e))),
+        Expr::Unary(_, inner, _) => expr_may_branch(inner),
+        Expr::Binary(BinOp::And | BinOp::Or, ..) => true,
+        Expr::Binary(_, a, b, _) => expr_may_branch(a) || expr_may_branch(b),
+        Expr::Call(callee, args, _) => {
+            expr_may_branch(callee) || args.iter().any(|a| expr_may_branch(&a.expr))
+        }
+        Expr::Field(base, ..) => expr_may_branch(base),
+        Expr::Index(base, idx, _) => expr_may_branch(base) || expr_may_branch(idx),
+        Expr::ErrorProp(..) => true,
+        Expr::Array(items, _) => items.iter().any(expr_may_branch),
+        Expr::Range(lo, hi, _) => expr_may_branch(lo) || expr_may_branch(hi),
+        Expr::TypeLit(_, fields, _) => fields.iter().any(|(_, e)| expr_may_branch(e)),
+        Expr::VariantLit(_, _, fields, _) => fields.iter().any(|(_, e)| expr_may_branch(e)),
+        Expr::If(..) | Expr::IfLet(..) | Expr::Match(..) => true,
+        Expr::Block(b, _) => b.stmts.iter().any(stmt_may_branch),
     }
 }
 

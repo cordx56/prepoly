@@ -137,13 +137,18 @@ impl FnLower<'_, '_> {
                 };
                 self.b.terminate(Terminator::Return(v));
             }
+            // `break`/`continue` end the current iteration, so a pending `for`
+            // write-back must run on these edges too, not only on the body's
+            // fall-through tail.
             Stmt::Break(_) => {
-                if let Some((_, brk)) = self.loops.last().copied() {
+                if let Some(brk) = self.loops.last().map(|f| f.brk) {
+                    self.emit_loop_writeback();
                     self.b.terminate(Terminator::Goto(brk));
                 }
             }
             Stmt::Continue(_) => {
-                if let Some((cont, _)) = self.loops.last().copied() {
+                if let Some(cont) = self.loops.last().map(|f| f.cont) {
+                    self.emit_loop_writeback();
                     self.b.terminate(Terminator::Goto(cont));
                 }
             }
@@ -234,7 +239,8 @@ impl FnLower<'_, '_> {
             }
             Expr::Ident(name, _) => match self.lookup(name) {
                 Some(local) => PlaceTarget::Local(local),
-                None => PlaceTarget::Global(name.clone()),
+                // Module-qualified, matching the read path in `lower_ident`.
+                None => PlaceTarget::Global(self.ctx.global_symbol(&self.module, name)),
             },
             Expr::Field(base, field, _) => {
                 let recv = self.lower_expr(base);
@@ -289,13 +295,32 @@ impl FnLower<'_, '_> {
         });
 
         self.b.switch_to(body_bb);
-        self.loops.push((cond_bb, end_bb));
+        self.loops.push(crate::lower::LoopFrame {
+            cont: cond_bb,
+            brk: end_bb,
+            writeback: None,
+        });
         let _ = self.lower_block_value(body);
         if !self.b.terminated() {
             self.b.terminate(Terminator::Goto(cond_bb));
         }
         self.loops.pop();
         self.b.switch_to(end_bb);
+    }
+
+    /// Emit the innermost loop's pending element write-back, if any: a `for`
+    /// body that reassigns its loop variable binds the element by reference, so
+    /// the variable's current value is stored back into the array slot on every
+    /// edge that ends the iteration.
+    fn emit_loop_writeback(&mut self) {
+        let Some((arr, idx, var)) = self.loops.last().and_then(|f| f.writeback.clone()) else {
+            return;
+        };
+        let e = self.lower_ident(&var);
+        self.b.push(MirStmt::Store(
+            Place::projected(arr, vec![Projection::Index(Operand::Local(idx))]),
+            e,
+        ));
     }
 
     /// `for v in iter` desugars to an index loop over the iterable's length,
@@ -338,21 +363,21 @@ impl FnLower<'_, '_> {
             vec![Projection::Index(Operand::Local(i))],
         )));
         self.bind_value(var, elem);
-        self.loops.push((incr_bb, end_bb));
+        // A loop body that reassigns the loop variable (`e *= 2`, `e = ...`)
+        // means the element is bound by reference: the new value is written back
+        // into the slot so the array is mutated in place. (A managed element
+        // mutated through its own fields aliases the slot already, so only a
+        // bare reassignment needs this.) The write-back is carried on the loop
+        // frame so `continue`/`break` edges emit it too.
+        let writeback = reassigns_var(body, var).then(|| (arr, i, var.to_string()));
+        self.loops.push(crate::lower::LoopFrame {
+            cont: incr_bb,
+            brk: end_bb,
+            writeback,
+        });
         let _ = self.lower_block_value(body);
         if !self.b.terminated() {
-            // A loop body that reassigns the loop variable (`e *= 2`, `e = ...`)
-            // means the element is bound by reference: write the new value back into
-            // the slot so the array is mutated in place. (A managed element mutated
-            // through its own fields aliases the slot already, so only a bare
-            // reassignment needs this.)
-            if reassigns_var(body, var) {
-                let e = self.lower_ident(var);
-                self.b.push(MirStmt::Store(
-                    Place::projected(arr, vec![Projection::Index(Operand::Local(i))]),
-                    e,
-                ));
-            }
+            self.emit_loop_writeback();
             self.b.terminate(Terminator::Goto(incr_bb));
         }
         self.loops.pop();

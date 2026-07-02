@@ -66,6 +66,8 @@ pub fn symbols() -> Vec<(&'static str, usize)> {
         conc::pp_unlock,
         conc::pp_lock_all,
         conc::pp_unlock_all,
+        conc::pp_lock_span,
+        conc::pp_unlock_span,
         conc::pp_make_cown,
         region::pp_region_open,
         region::pp_region_open_nested,

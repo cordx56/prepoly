@@ -636,7 +636,7 @@ impl<'p> Hm<'p> {
                 self.scopes.pop();
                 Type::Fun(param_tys, Box::new(cret))
             }
-            Expr::Array(elems, span) => {
+            Expr::Array(elems, _) => {
                 let elem_tys: Vec<Type> = elems.iter().map(|e| self.infer_expr(e)).collect();
                 // A bracket literal whose elements are all concrete and not all the
                 // same type is a fixed-length tuple; otherwise it is an array whose
@@ -656,7 +656,6 @@ impl<'p> Hm<'p> {
                         }
                         self.unify(&elem, t, e.span());
                     }
-                    let _ = span;
                     if saw_null && !matches!(self.solver.resolve(&elem), Type::Nullable(_)) {
                         Type::Slice(Box::new(Type::Nullable(Box::new(elem))))
                     } else {
@@ -695,7 +694,10 @@ impl<'p> Hm<'p> {
             // primitive, or a missing record field, is an error.
             Expr::Field(base, field, span) => {
                 let bt = self.infer_expr(base);
-                let resolved = self.solver.resolve(&bt);
+                // Mode wrappers (`ref`/`mut`/`const`) expose the underlying
+                // value's fields; peeling keeps a `ref(mut(T))` base from
+                // falling to the permissive arm and skipping the field check.
+                let resolved = prepoly_hir::peel_modes(&self.solver.resolve(&bt)).clone();
                 match &resolved {
                     // A known record/sum: the field must exist (a sum field must
                     // be common to all variants). A built-in/unknown nominal (e.g.
@@ -767,8 +769,22 @@ impl<'p> Hm<'p> {
                         }
                     }
                 } else {
+                    // Any integer width indexes (the int -> int flow rule); only
+                    // an open index is pinned to the default index type, and a
+                    // concrete non-integer is an error. A strict `int64` unify
+                    // here would reject an `int32` index that the flow rules --
+                    // and the top-level path -- accept.
                     let it = self.infer_expr(idx);
-                    self.unify(&it, &Type::Int(prepoly_hir::IntKind::I64), *span);
+                    match self.solver.resolve(&it) {
+                        Type::Int(_) => {}
+                        Type::Unknown(_) => {
+                            self.unify(&it, &Type::Int(prepoly_hir::IntKind::I64), *span)
+                        }
+                        other => self.error(
+                            format!("cannot index with `{}`; an integer is required", other.display()),
+                            *span,
+                        ),
+                    }
                     match array_elem(&resolved) {
                         Some(elem) => elem,
                         None => {
@@ -1217,8 +1233,11 @@ impl<'p> Hm<'p> {
     // ----- type definitions (records, sums, methods) -----
 
     /// The program type definition `ty` resolves to (a record or sum), if any.
+    /// Mode wrappers are peeled so a `ref`/`mut`/`const` view of a record still
+    /// resolves to its declaration (member checks must not go silent through a
+    /// wrapper).
     fn type_def(&self, ty: &Type) -> Option<&TypeInfo> {
-        match self.solver.resolve(ty) {
+        match prepoly_hir::peel_modes(&self.solver.resolve(ty)) {
             Type::Record(n) | Type::Sum(n) => self.program.type_by_id(n.id),
             _ => None,
         }
@@ -1396,6 +1415,10 @@ impl<'p> Hm<'p> {
                     let _ = self.solver.unify(&resolved, &default);
                 }
                 (Type::Int(_), true) | (Type::Float(_), false) => {}
+                // An integer literal in a float context becomes a float (the
+                // documented numeric-flow rule); the top-level path already
+                // accepts this, so the in-function pass must too.
+                (Type::Float(_), true) => {}
                 (other, true) => self.errors.push(TypeError {
                     message: format!(
                         "integer literal used where `{}` is required",

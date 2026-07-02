@@ -1,0 +1,536 @@
+//! Light (best-effort) inference pass used before full checking:
+//! return-type discovery for unannotated functions and a cheap
+//! expression walker that types bodies without reporting errors.
+
+use super::builtins::builtin_method_return;
+use super::*;
+
+impl<'a> Checker<'a> {
+    pub(super) fn infer_returns_block(
+        &mut self,
+        block: &Block,
+        env: &mut HashMap<String, Type>,
+        normal: &mut Vec<(Type, Span)>,
+        errors: &mut Vec<(Type, Span)>,
+    ) {
+        for stmt in &block.stmts {
+            match stmt {
+                Stmt::Let { pat, value, .. } => {
+                    let ty = self.infer_expr_light(value, env, errors);
+                    self.bind_pattern_light(pat, &ty, env);
+                }
+                Stmt::Assign { value, .. } => {
+                    self.infer_expr_light(value, env, errors);
+                }
+                Stmt::Expr(value) => {
+                    // Grow a locally-built collection's element type: a
+                    // `result = []` then `result.push(x)` pins `result`'s element
+                    // to `x`, so an unannotated function that returns the built
+                    // collection (e.g. `slice`/`map`) infers its element type from
+                    // the values pushed -- which the rest of this light pass would
+                    // otherwise miss, leaving the return an unconstrained `?[]`.
+                    self.track_collection_growth(value, env, errors);
+                    self.infer_returns_expr(value, env, normal, errors);
+                }
+                Stmt::While { cond, body, .. } => {
+                    self.infer_expr_light(cond, env, errors);
+                    self.infer_returns_block(body, &mut env.clone(), normal, errors);
+                }
+                Stmt::For {
+                    var, iter, body, ..
+                } => {
+                    let iter_ty = self.infer_expr_light(iter, env, errors);
+                    let item_ty = prepoly_hir::index_element(&iter_ty)
+                        .unwrap_or_else(|| self.fresh_unknown());
+                    let mut inner = env.clone();
+                    inner.insert(var.clone(), item_ty);
+                    self.infer_returns_block(body, &mut inner, normal, errors);
+                }
+                Stmt::Return(Some(expr), _) => {
+                    let ty = self.infer_expr_light(expr, env, errors);
+                    let resolved = self.resolve(&ty);
+                    match resolved.result_payloads() {
+                        Some((ok, err)) if ok.is_unknown() => {
+                            errors.push((err.clone(), expr.span()))
+                        }
+                        _ => normal.push((ty, expr.span())),
+                    }
+                }
+                Stmt::Return(None, span) => normal.push((Type::Void, *span)),
+                Stmt::Break(_) | Stmt::Continue(_) => {}
+            }
+        }
+    }
+
+    fn infer_returns_expr(
+        &mut self,
+        expr: &Expr,
+        env: &mut HashMap<String, Type>,
+        normal: &mut Vec<(Type, Span)>,
+        errors: &mut Vec<(Type, Span)>,
+    ) {
+        match expr {
+            Expr::If(cond, then, els, _) => {
+                self.infer_expr_light(cond, env, errors);
+                self.infer_returns_block(then, &mut env.clone(), normal, errors);
+                if let Some(els) = els {
+                    self.infer_returns_expr(els, &mut env.clone(), normal, errors);
+                }
+            }
+            Expr::IfLet(_, scrut, then, els, _) => {
+                self.infer_expr_light(scrut, env, errors);
+                self.infer_returns_block(then, &mut env.clone(), normal, errors);
+                if let Some(els) = els {
+                    self.infer_returns_expr(els, &mut env.clone(), normal, errors);
+                }
+            }
+            Expr::Match(scrut, arms, _) => {
+                self.infer_expr_light(scrut, env, errors);
+                for arm in arms {
+                    self.infer_returns_expr(&arm.body, &mut env.clone(), normal, errors);
+                }
+            }
+            Expr::Block(block, _) => {
+                self.infer_returns_block(block, &mut env.clone(), normal, errors)
+            }
+            other => {
+                self.infer_expr_light(other, env, errors);
+            }
+        }
+    }
+
+    /// If `expr` is `recv.push(value)` or `recv.insert(idx, value)` where `recv`
+    /// is a slice/array, unify its element type with the pushed value's type.
+    /// This pins the (fresh, local) element variable of a collection being built
+    /// up, so the light return-inference pass sees the grown element type. It
+    /// only ever binds the local's own element variable, not the function's
+    /// parameter variables.
+    fn track_collection_growth(
+        &mut self,
+        expr: &Expr,
+        env: &HashMap<String, Type>,
+        errors: &mut Vec<(Type, Span)>,
+    ) {
+        if let Expr::Call(callee, args, _) = expr
+            && let Expr::Field(recv, method, _) = callee.as_ref()
+            && matches!(method.as_str(), "push" | "insert")
+            && let Some(value_arg) = args.last()
+        {
+            let recv_ty = self.infer_expr_light(recv, env, errors);
+            if let Some(elem) = prepoly_hir::index_element(&self.resolve(&recv_ty)) {
+                let value_ty = self.infer_expr_light(&value_arg.expr, env, errors);
+                let _ = self.solver.unify(&elem, &value_ty);
+            }
+        }
+    }
+
+    pub(super) fn infer_expr_light(
+        &mut self,
+        expr: &Expr,
+        env: &HashMap<String, Type>,
+        errors: &mut Vec<(Type, Span)>,
+    ) -> Type {
+        match expr {
+            Expr::Int(v, _) => Type::Int(int_literal_kind(*v)),
+            Expr::Float(..) => Type::Float(FloatKind::F64),
+            Expr::Bool(..) => Type::Bool,
+            Expr::Null(_) => Type::null(),
+            Expr::Str(..) => Type::Str,
+            Expr::Ident(name, _) => env
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| self.fresh_unknown()),
+            Expr::SelfExpr(_) => env
+                .get("self")
+                .cloned()
+                .unwrap_or_else(|| self.fresh_unknown()),
+            Expr::Unary(_, inner, _) => self.infer_expr_light(inner, env, errors),
+            Expr::Binary(op, left, right, _) => {
+                let left = self.infer_expr_light(left, env, errors);
+                let right = self.infer_expr_light(right, env, errors);
+                self.infer_binary_light(*op, left, right)
+            }
+            Expr::Call(callee, args, _) => self.infer_call_light(callee, args, env, errors),
+            Expr::Field(base, name, _) => self.infer_field_light(base, name, env, errors),
+            Expr::Index(base, _, _) => match self.infer_expr_light(base, env, errors) {
+                ref bt if prepoly_hir::index_element(bt).is_some() => {
+                    prepoly_hir::index_element(bt).unwrap()
+                }
+                Type::Str => Type::Str,
+                _ => self.fresh_unknown(),
+            },
+            Expr::ErrorProp(inner, span) => {
+                let ty = self.infer_expr_light(inner, env, errors);
+                if let Some((ok, err)) = ty.result_payloads() {
+                    errors.push((err.clone(), *span));
+                    ok.clone()
+                } else {
+                    self.fresh_unknown()
+                }
+            }
+            Expr::Closure(params, body, _) => {
+                let mut inner = env.clone();
+                for param in params {
+                    let ty = param
+                        .ty
+                        .as_ref()
+                        .and_then(|t| self.resolve_type(t).ok())
+                        .unwrap_or_else(|| self.fresh_unknown());
+                    inner.insert(param.name.clone(), ty);
+                }
+                let ret = self.infer_expr_light(body, &inner, errors);
+                Type::Fun(
+                    params
+                        .iter()
+                        .map(|p| {
+                            inner
+                                .get(&p.name)
+                                .cloned()
+                                .unwrap_or_else(|| self.fresh_unknown())
+                        })
+                        .collect(),
+                    Box::new(ret),
+                )
+            }
+            Expr::Array(items, _) => {
+                let elem_tys: Vec<Type> = items
+                    .iter()
+                    .map(|e| self.infer_expr_light(e, env, errors))
+                    .collect();
+                // Mirror the full check's array-vs-tuple classification and its
+                // null handling. The light pass seeds `global_scope`: a global
+                // typed `int32[]` here while module init (and the back end)
+                // types the same literal as a tuple would let function bodies
+                // read tuple slots at the wrong type.
+                if let Some(tuple) = self.tuple_of_elements(items, &elem_tys) {
+                    Type::Tuple(tuple)
+                } else {
+                    let base = elem_tys
+                        .iter()
+                        .zip(items)
+                        .find(|(_, e)| !matches!(e, Expr::Null(_)))
+                        .map(|(t, _)| t.clone())
+                        .unwrap_or_else(|| self.fresh_empty_array_elem());
+                    let saw_null = items.iter().any(|e| matches!(e, Expr::Null(_)));
+                    if saw_null && !matches!(self.resolve(&base), Type::Nullable(_)) {
+                        Type::Slice(Box::new(Type::Nullable(Box::new(base))))
+                    } else {
+                        Type::Slice(Box::new(base))
+                    }
+                }
+            }
+            Expr::Range(lo, _, _) => Type::Slice(Box::new(self.infer_expr_light(lo, env, errors))),
+            Expr::TypeLit(name, fields, _) => self.infer_type_lit_light(name, fields, env, errors),
+            Expr::VariantLit(name, variant, fields, _) => {
+                self.infer_variant_lit_light(name, variant, fields, env, errors)
+            }
+            Expr::If(_, then, els, _) => {
+                let then_ty = self.infer_block_value_light(then, &mut env.clone(), errors);
+                let else_ty = els
+                    .as_ref()
+                    .map(|e| self.infer_expr_light(e, env, errors))
+                    .unwrap_or(Type::Void);
+                self.common_type_or_unknown(then_ty, else_ty)
+            }
+            Expr::IfLet(_, scrut, then, els, _) => {
+                self.infer_expr_light(scrut, env, errors);
+                let then_ty = self.infer_block_value_light(then, &mut env.clone(), errors);
+                let else_ty = els
+                    .as_ref()
+                    .map(|e| self.infer_expr_light(e, env, errors))
+                    .unwrap_or(Type::Void);
+                self.common_type_or_unknown(then_ty, else_ty)
+            }
+            Expr::Match(scrut, arms, _) => {
+                self.infer_expr_light(scrut, env, errors);
+                let tys: Vec<Type> = arms
+                    .iter()
+                    .map(|arm| self.infer_expr_light(&arm.body, env, errors))
+                    .collect();
+                self.common_type_list(&tys)
+                    .unwrap_or_else(|| self.fresh_unknown())
+            }
+            Expr::Block(block, _) => self.infer_block_value_light(block, &mut env.clone(), errors),
+        }
+    }
+
+    fn infer_call_light(
+        &mut self,
+        callee: &Expr,
+        args: &[Arg],
+        env: &HashMap<String, Type>,
+        errors: &mut Vec<(Type, Span)>,
+    ) -> Type {
+        if let Expr::Ident(name, _) = callee {
+            if name == "error" {
+                let err = args
+                    .first()
+                    .map(|a| self.infer_expr_light(&a.expr, env, errors))
+                    .unwrap_or(Type::Void);
+                return Type::result(self.fresh_unknown(), err);
+            }
+            if let Some(ret) = self.builtin_function_type_light(name) {
+                args.iter().for_each(|arg| {
+                    self.infer_expr_light(&arg.expr, env, errors);
+                });
+                return ret;
+            }
+            if let Some(ret) = self.function_returns.get(name).cloned() {
+                args.iter().for_each(|arg| {
+                    self.infer_expr_light(&arg.expr, env, errors);
+                });
+                return ret;
+            }
+        }
+        if let Expr::Field(base, method, _) = callee {
+            if let Expr::Ident(tname, _) = &**base
+                && env.get(tname).is_none()
+            {
+                let ret = self.primitive_static_type(tname, method);
+                if ret.is_some() {
+                    args.iter().for_each(|arg| {
+                        self.infer_expr_light(&arg.expr, env, errors);
+                    });
+                }
+                if let Some(ret) = ret {
+                    return ret;
+                }
+            }
+            let recv = self.infer_expr_light(base, env, errors);
+            if let Some(ret) = builtin_method_return(&recv, method) {
+                args.iter().for_each(|arg| {
+                    self.infer_expr_light(&arg.expr, env, errors);
+                });
+                return ret;
+            }
+        }
+        args.iter().for_each(|arg| {
+            self.infer_expr_light(&arg.expr, env, errors);
+        });
+        self.fresh_unknown()
+    }
+
+    fn infer_field_light(
+        &mut self,
+        base: &Expr,
+        name: &str,
+        env: &HashMap<String, Type>,
+        errors: &mut Vec<(Type, Span)>,
+    ) -> Type {
+        let shadowed = matches!(base, Expr::Ident(n, _) if env.contains_key(n));
+        if let Some(ty) = self.unit_variant_type(base, name, shadowed) {
+            return ty;
+        }
+        // Resolve the base before matching: an indexed element or other
+        // intermediate may still be an open inference variable that the solver has
+        // since pinned to a record (e.g. `self.entries[idx]` is the map's entry
+        // type once a `push` fixed it). Without resolving, the match falls through
+        // and the field type is lost as a fresh unknown.
+        let base_ty = self.infer_expr_light(base, env, errors);
+        match self.resolve(&base_ty) {
+            Type::Record(record) => record.substitution.get(name).cloned().unwrap_or_else(|| {
+                self.program
+                    .types
+                    .get(record.name())
+                    .and_then(|info| match &info.kind {
+                        TypeKind::Record { fields, .. } => fields.iter().find(|f| f.name == name),
+                        TypeKind::Sum { .. } => None,
+                    })
+                    .and_then(|f| f.resolved_ty.clone())
+                    .unwrap_or_else(|| self.fresh_unknown())
+            }),
+            Type::Sum(sum) => self
+                .self_variant_field_type(base, &sum, name)
+                .or_else(|| self.common_sum_field_type(&sum, name))
+                .unwrap_or_else(|| self.fresh_unknown()),
+            _ => self.fresh_unknown(),
+        }
+    }
+
+    fn infer_type_lit_light(
+        &mut self,
+        name: &str,
+        fields: &[(String, Expr)],
+        env: &HashMap<String, Type>,
+        errors: &mut Vec<(Type, Span)>,
+    ) -> Type {
+        if name.is_empty() {
+            let field_tys: Vec<(String, Type)> = fields
+                .iter()
+                .map(|(fname, e)| (fname.clone(), self.infer_expr_light(e, env, errors)))
+                .collect();
+            return prepoly_hir::structural_record(field_tys);
+        }
+        let tn = self.resolve_self_name(name);
+        let resolved = self
+            .resolve_type_symbol(&tn)
+            .and_then(|symbol| self.program.types.get(&symbol))
+            .and_then(|info| {
+                let TypeKind::Record { fields, .. } = &info.kind else {
+                    return None;
+                };
+                Some((info.type_ref(), fields.clone()))
+            });
+        let Some((ret, declared)) = resolved else {
+            fields.iter().for_each(|(_, expr)| {
+                self.infer_expr_light(expr, env, errors);
+            });
+            return self.fresh_unknown();
+        };
+        let substitution = self.infer_lit_field_substitution(None, &declared, fields, env, errors);
+        apply_nominal_substitution(ret, substitution)
+    }
+
+    fn infer_variant_lit_light(
+        &mut self,
+        type_name: &str,
+        variant: &str,
+        fields: &[(String, Expr)],
+        env: &HashMap<String, Type>,
+        errors: &mut Vec<(Type, Span)>,
+    ) -> Type {
+        let tn = self.resolve_self_name(type_name);
+        let resolved = self
+            .resolve_type_symbol(&tn)
+            .and_then(|symbol| self.program.types.get(&symbol))
+            .and_then(|info| {
+                let variant = info.variant(variant)?;
+                Some((info.type_ref(), variant.fields.clone()))
+            });
+        let Some((ret, declared)) = resolved else {
+            fields.iter().for_each(|(_, expr)| {
+                self.infer_expr_light(expr, env, errors);
+            });
+            return self.fresh_unknown();
+        };
+        let substitution =
+            self.infer_lit_field_substitution(Some(variant), &declared, fields, env, errors);
+        apply_nominal_substitution(ret, substitution)
+    }
+
+    fn infer_lit_field_substitution(
+        &mut self,
+        variant: Option<&str>,
+        declared: &[prepoly_hir::FieldInfo],
+        fields: &[(String, Expr)],
+        env: &HashMap<String, Type>,
+        errors: &mut Vec<(Type, Span)>,
+    ) -> Substitution {
+        let mut substitution = Substitution::empty();
+        for field in declared {
+            if let Some((_, expr)) = fields.iter().find(|(name, _)| name == &field.name) {
+                let got = self.infer_expr_light(expr, env, errors);
+                if field.resolved_ty.as_ref().is_some_and(Type::is_unknown) {
+                    substitution.insert(field_substitution_key(variant, &field.name), got);
+                }
+            }
+        }
+        substitution
+    }
+
+    fn infer_block_value_light(
+        &mut self,
+        block: &Block,
+        env: &mut HashMap<String, Type>,
+        errors: &mut Vec<(Type, Span)>,
+    ) -> Type {
+        let mut last = Type::Void;
+        for stmt in &block.stmts {
+            match stmt {
+                Stmt::Let { pat, value, .. } => {
+                    let ty = self.infer_expr_light(value, env, errors);
+                    self.bind_pattern_light(pat, &ty, env);
+                    last = Type::Void;
+                }
+                Stmt::Expr(expr) => last = self.infer_expr_light(expr, env, errors),
+                Stmt::Return(Some(expr), _) => return self.infer_expr_light(expr, env, errors),
+                _ => last = Type::Void,
+            }
+        }
+        last
+    }
+
+    fn infer_binary_light(&mut self, op: BinOp, left: Type, right: Type) -> Type {
+        match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+                if self.can_unify(&left, &right) {
+                    left
+                } else {
+                    self.fresh_unknown()
+                }
+            }
+            BinOp::Eq
+            | BinOp::Ne
+            | BinOp::Lt
+            | BinOp::Gt
+            | BinOp::Le
+            | BinOp::Ge
+            | BinOp::And
+            | BinOp::Or => Type::Bool,
+            BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                if self.can_unify(&left, &right) {
+                    left
+                } else {
+                    self.fresh_unknown()
+                }
+            }
+        }
+    }
+
+    pub(super) fn common_type_list(&mut self, types: &[Type]) -> Option<Type> {
+        let (first, rest) = types.split_first()?;
+        let mut common = first.clone();
+        for ty in rest {
+            if let Some(nullable) = common_nullable_type(&common, ty) {
+                common = nullable;
+                continue;
+            }
+            if !self.can_unify(&common, ty) {
+                return Some(self.fresh_unknown());
+            }
+        }
+        Some(common)
+    }
+
+    pub(super) fn bind_pattern_light(
+        &mut self,
+        pat: &Pattern,
+        ty: &Type,
+        env: &mut HashMap<String, Type>,
+    ) {
+        match pat {
+            Pattern::Binding(name, _) if !self.is_unit_variant_name(name) => {
+                env.insert(name.clone(), ty.clone());
+            }
+            Pattern::Record(variant, fields, _) => {
+                let field_types = self.pattern_field_types(ty, variant);
+                for field in fields {
+                    let fty = field_types
+                        .get(&field.name)
+                        .cloned()
+                        .unwrap_or_else(|| self.fresh_unknown());
+                    if let Some(subpat) = &field.pat {
+                        self.bind_pattern_light(subpat, &fty, env);
+                    } else {
+                        env.insert(field.name.clone(), fty);
+                    }
+                }
+            }
+            Pattern::Array(pats, _) => {
+                if let Type::Tuple(elems) = ty {
+                    for (pat, ety) in pats.iter().zip(elems) {
+                        self.bind_pattern_light(pat, ety, env);
+                    }
+                } else {
+                    let elem = match ty {
+                        Type::Array(inner, _) | Type::Slice(inner) => &**inner,
+                        _ => ty,
+                    };
+                    pats.iter()
+                        .for_each(|pat| self.bind_pattern_light(pat, elem, env));
+                }
+            }
+            _ => {}
+        }
+    }
+}

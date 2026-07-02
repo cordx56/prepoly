@@ -23,24 +23,8 @@ use clap::{Parser, Subcommand};
 
 use prepoly_hir::{LoadedModule, Program, lower};
 use prepoly_lexer::{Span, line_col};
-use prepoly_parser::ast::{ImportDecl, Module, Stmt, TopLevel};
+use prepoly_parser::ast::{Module, Stmt, TopLevel};
 use prepoly_parser::{ParseError, parse, parse_with_base};
-
-/// Embedded standard-library modules (implicit prelude). A name with a `/` is a
-/// nested module: its segments become the path under `std` (so `collections/hashmap`
-/// is the module `std.collections.hashmap`).
-const STDLIB: &[(&str, &str)] = &[
-    ("io", include_str!("../../../std/io.pp")),
-    ("array", include_str!("../../../std/array.pp")),
-    ("string", include_str!("../../../std/string.pp")),
-    ("math", include_str!("../../../std/math.pp")),
-    ("conv", include_str!("../../../std/conv.pp")),
-    ("assert", include_str!("../../../std/assert.pp")),
-    (
-        "collections/hashmap",
-        include_str!("../../../std/collections/hashmap.pp"),
-    ),
-];
 
 /// The Prepoly toolchain driver.
 ///
@@ -123,22 +107,159 @@ fn exit_code(r: Result<(), u8>) -> ExitCode {
 
 /// Apply the spawn auto-acquire transform to every function and
 /// method body in each module, before lowering. This rewrites a `spawn` closure
-/// that mutates a captured cown to acquire it with `with`, so the source needs no
-/// ownership annotations yet concurrent mutation is serialized by the cown lock.
+/// that mutates a captured cown to acquire it with `with` (or the `_with_all`
+/// group form), so the source needs no ownership annotations yet concurrent
+/// mutation is serialized by the cown lock. Interprocedural spawn-capture
+/// summaries are computed first over all modules, so a caller handing a local to
+/// a helper that spawns is promoted and guarded too. Returns the compile errors
+/// for `spawn` arguments the analysis cannot see through (each such spawn would
+/// otherwise share state with no guard at all).
 #[cfg(jit_backend)]
-fn auto_acquire_modules(modules: &mut [LoadedModule]) {
-    use prepoly_jit_llvm::ownership::auto_acquire;
-    use prepoly_parser::ast::{Member, TypeBody};
+fn auto_acquire_modules(modules: &mut [LoadedModule]) -> Vec<(String, Span)> {
+    use prepoly_jit_llvm::ownership::{auto_acquire, spawn_capture_summaries};
+    use prepoly_parser::ast::{Block, Member, TypeBody};
 
     let names = |params: &[prepoly_parser::ast::Param]| -> HashSet<String> {
         params.iter().map(|p| p.name.clone()).collect()
     };
+    let name_list = |params: &[prepoly_parser::ast::Param]| -> Vec<String> {
+        params.iter().map(|p| p.name.clone()).collect()
+    };
+
+    // Interprocedural pass: which parameters of which function/method are
+    // captured by a spawn reachable inside it (methods contribute their explicit
+    // `self` at index 0, matching a method call's receiver position).
+    let summaries = {
+        let mut fns: Vec<(String, Vec<String>, &Block)> = Vec::new();
+        for m in modules.iter() {
+            for item in &m.ast.items {
+                match item {
+                    TopLevel::Fun(f) => fns.push((f.name.clone(), name_list(&f.params), &f.body)),
+                    TopLevel::Type(t) => {
+                        let members = match &t.body {
+                            TypeBody::Record(members) => members,
+                            TypeBody::Sum(_) => continue,
+                        };
+                        for member in members {
+                            if let Member::Method(method) = member
+                                && let Some(body) = &method.body
+                            {
+                                fns.push((
+                                    method.name.clone(),
+                                    name_list(&method.params),
+                                    body,
+                                ));
+                            }
+                        }
+                    }
+                    TopLevel::Stmt(_) => {}
+                }
+            }
+        }
+        spawn_capture_summaries(&fns)
+    };
+
+    // Module globals written anywhere in the program: a spawned task touching
+    // one would race the writer with no binding to promote to a cown, so
+    // `pre_spawn_errors` rejects such captures (never-written globals are
+    // shareable and stay allowed).
+    let mutated_globals = {
+        use prepoly_jit_llvm::ownership::mutates;
+        use prepoly_parser::ast::{Pattern, Stmt};
+
+        fn pattern_names(pat: &Pattern, out: &mut HashSet<String>) {
+            match pat {
+                Pattern::Binding(name, _) => {
+                    out.insert(name.clone());
+                }
+                Pattern::Array(pats, _) => {
+                    for p in pats {
+                        pattern_names(p, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut globals: HashSet<String> = HashSet::new();
+        for m in modules.iter() {
+            for item in &m.ast.items {
+                if let TopLevel::Stmt(Stmt::Let { pat, .. }) = item {
+                    pattern_names(pat, &mut globals);
+                }
+            }
+        }
+        let mut bodies: Vec<Block> = Vec::new();
+        for m in modules.iter() {
+            let mut top = Vec::new();
+            for item in &m.ast.items {
+                match item {
+                    TopLevel::Fun(f) => bodies.push(f.body.clone()),
+                    TopLevel::Type(t) => {
+                        if let TypeBody::Record(members) = &t.body {
+                            for member in members {
+                                if let Member::Method(method) = member
+                                    && let Some(body) = &method.body
+                                {
+                                    bodies.push(body.clone());
+                                }
+                            }
+                        }
+                    }
+                    TopLevel::Stmt(s) => top.push(s.clone()),
+                }
+            }
+            bodies.push(Block {
+                stmts: top,
+                span: prepoly_lexer::Span::new(0, 0),
+            });
+        }
+        let mut mutated: HashSet<String> = HashSet::new();
+        for g in &globals {
+            if bodies.iter().any(|b| mutates(b, g)) {
+                mutated.insert(g.clone());
+            }
+        }
+        mutated
+    };
+
+    let mut errors: Vec<(String, Span)> = Vec::new();
+    let mut push_errors = |errs: Vec<prepoly_jit_llvm::ownership::SpawnError>| {
+        errors.extend(errs.into_iter().map(|e| (e.message, e.span)));
+    };
     for m in modules {
+        // Init code never runs through the ownership pass, so a module-top-level
+        // spawn would get no promotion or guarding at all: reject it.
+        let top_stmts: Vec<prepoly_parser::ast::Stmt> = m
+            .ast
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                TopLevel::Stmt(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        push_errors(
+            prepoly_jit_llvm::ownership::all_spawn_spans(&top_stmts)
+                .into_iter()
+                .map(|span| prepoly_jit_llvm::ownership::SpawnError {
+                    message: "`spawn` at module top level is not supported; spawn inside a \
+                              function"
+                        .to_string(),
+                    span,
+                })
+                .collect(),
+        );
         for item in &mut m.ast.items {
             match item {
                 TopLevel::Fun(f) => {
                     let params = names(&f.params);
-                    auto_acquire(&mut f.body.stmts, &params);
+                    push_errors(prepoly_jit_llvm::ownership::pre_spawn_errors(
+                        &f.body.stmts,
+                        &params,
+                        &mutated_globals,
+                    ));
+                    push_errors(auto_acquire(&mut f.body.stmts, &params, &summaries));
                 }
                 TopLevel::Type(t) => {
                     let members = match &mut t.body {
@@ -150,7 +271,12 @@ fn auto_acquire_modules(modules: &mut [LoadedModule]) {
                             && let Some(body) = &mut method.body
                         {
                             let params = names(&method.params);
-                            auto_acquire(&mut body.stmts, &params);
+                            push_errors(prepoly_jit_llvm::ownership::pre_spawn_errors(
+                                &body.stmts,
+                                &params,
+                                &mutated_globals,
+                            ));
+                            push_errors(auto_acquire(&mut body.stmts, &params, &summaries));
                         }
                     }
                 }
@@ -158,6 +284,7 @@ fn auto_acquire_modules(modules: &mut [LoadedModule]) {
             }
         }
     }
+    errors
 }
 
 /// Emit a warning for every `spawn` capture the compiler auto-cowns. The shared ownership analysis (`prepoly_jit_llvm::ownership`) decides
@@ -370,31 +497,76 @@ fn aggregate_result_types(
 /// inferred fields; the back end lays a constructed record out from every
 /// declared field, so the seeded type must carry them all to be the same nominal.
 fn complete_aggregate(ty: &prepoly_hir::Type, program: &Program) -> prepoly_hir::Type {
+    complete_aggregate_rec(ty, program, &mut Vec::new())
+}
+
+/// The recursion of [`complete_aggregate`]. `in_progress` holds the nominal ids
+/// currently being completed on this descent: a self-referential type (e.g.
+/// `type Node = { next: Node? }`) mentions itself in its own declared field
+/// types, so descending into that occurrence would rebuild the same fields
+/// forever. The inner occurrence is left as written -- the nominal id is what the
+/// back end keys on, and its own construction sites are seeded separately.
+fn complete_aggregate_rec(
+    ty: &prepoly_hir::Type,
+    program: &Program,
+    in_progress: &mut Vec<i32>,
+) -> prepoly_hir::Type {
     use prepoly_hir::{NominalType, Type, TypeKind};
     match ty {
-        Type::Slice(e) => Type::Slice(Box::new(complete_aggregate(e, program))),
-        Type::Array(e, n) => Type::Array(Box::new(complete_aggregate(e, program)), *n),
-        Type::Nullable(e) => Type::Nullable(Box::new(complete_aggregate(e, program))),
+        Type::Slice(e) => Type::Slice(Box::new(complete_aggregate_rec(e, program, in_progress))),
+        Type::Array(e, n) => Type::Array(
+            Box::new(complete_aggregate_rec(e, program, in_progress)),
+            *n,
+        ),
+        Type::Nullable(e) => {
+            Type::Nullable(Box::new(complete_aggregate_rec(e, program, in_progress)))
+        }
         Type::Record(n) => {
+            if in_progress.contains(&n.id) {
+                return ty.clone();
+            }
+            in_progress.push(n.id);
             let mut subst = prepoly_hir::Substitution::empty();
             if let Some(TypeKind::Record { fields, .. }) = program.type_by_id(n.id).map(|i| &i.kind)
             {
                 for f in fields {
-                    let value = n
-                        .substitution
-                        .get(&f.name)
-                        .cloned()
-                        .or_else(|| f.resolved_ty.clone());
+                    let seeded = n.substitution.get(&f.name).cloned();
+                    // A declared-nullable field keeps its declared type whatever
+                    // the constructor stored (the rule mono's `record_type` also
+                    // applies): a `null` seeds `never?` and a non-null value
+                    // seeds its raw type, but the slot is laid out -- and read
+                    // back -- as the declared nullable cell, so a seeded raw
+                    // type would make the destructor/readers reinterpret the
+                    // cell. A seeded proper nullable (a refined `infer?` slot)
+                    // stays.
+                    let value = match (&f.resolved_ty, seeded) {
+                        (Some(decl @ prepoly_hir::Type::Nullable(_)), seeded)
+                            if is_fully_known(decl)
+                                && !matches!(
+                                    &seeded,
+                                    Some(prepoly_hir::Type::Nullable(i))
+                                        if !matches!(**i, prepoly_hir::Type::Never)
+                                ) =>
+                        {
+                            Some(decl.clone())
+                        }
+                        (_, Some(s)) => Some(s),
+                        (decl, None) => decl.clone(),
+                    };
                     if let Some(v) = value {
-                        subst.insert(f.name.clone(), complete_aggregate(&v, program));
+                        subst.insert(
+                            f.name.clone(),
+                            complete_aggregate_rec(&v, program, in_progress),
+                        );
                     }
                 }
             } else {
                 // A structural record (no declaration): keep its own fields.
                 for (k, v) in n.substitution.iter() {
-                    subst.insert(k, complete_aggregate(v, program));
+                    subst.insert(k, complete_aggregate_rec(v, program, in_progress));
                 }
             }
+            in_progress.pop();
             Type::Record(NominalType::with_substitution(
                 n.id,
                 n.name().to_string(),
@@ -405,10 +577,15 @@ fn complete_aggregate(ty: &prepoly_hir::Type, program: &Program) -> prepoly_hir:
         // variant's fields. Recurse into the existing substitution values without
         // adding declared fields (which are variant-keyed), enough for the payloads.
         Type::Sum(n) => {
+            if in_progress.contains(&n.id) {
+                return ty.clone();
+            }
+            in_progress.push(n.id);
             let mut subst = prepoly_hir::Substitution::empty();
             for (k, v) in n.substitution.iter() {
-                subst.insert(k, complete_aggregate(v, program));
+                subst.insert(k, complete_aggregate_rec(v, program, in_progress));
             }
+            in_progress.pop();
             Type::Sum(NominalType::with_substitution(
                 n.id,
                 n.name().to_string(),
@@ -449,24 +626,7 @@ fn is_seedable_array(ty: &prepoly_hir::Type) -> bool {
     needs_pin && is_fully_known(ty)
 }
 
-/// Whether `ty` contains no inference variable, recursing through every
-/// component (array element, nominal substitution, function/tuple parts).
-fn is_fully_known(ty: &prepoly_hir::Type) -> bool {
-    use prepoly_hir::Type;
-    match ty {
-        Type::Unknown(_) => false,
-        Type::Array(inner, _)
-        | Type::Slice(inner)
-        | Type::Nullable(inner)
-        | Type::ConstOf(inner)
-        | Type::Mut(inner)
-        | Type::Ref(inner) => is_fully_known(inner),
-        Type::Fun(params, ret) => params.iter().all(is_fully_known) && is_fully_known(ret),
-        Type::Tuple(elems) => elems.iter().all(is_fully_known),
-        Type::Record(n) | Type::Sum(n) => n.substitution.iter().all(|(_, t)| is_fully_known(t)),
-        _ => true,
-    }
-}
+use prepoly_hir::is_fully_known;
 
 /// A program that passed every front-end check, ready to run.
 struct Checked {
@@ -523,39 +683,45 @@ fn drive(mode: Mode, file: &str) -> Result<(), u8> {
 /// Returns the checked program or the rendered diagnostics. Shared by file
 /// execution and the interactive REPL, so both report identical errors.
 fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec<String>> {
-    let mut sources = SourceMap::default();
+    let mut sources = prepoly_resolve::SourceMap::default();
     #[allow(unused_mut)]
-    let mut modules: Vec<LoadedModule> = Vec::new();
+    let mut modules: Vec<LoadedModule> =
+        prepoly_resolve::parse_stdlib(&mut sources).map_err(|m| vec![m])?;
 
-    for (name, src) in STDLIB {
-        let label = format!("<std/{name}>");
-        let base = sources.add(PathBuf::from(&label), (*src).to_string());
-        let ast = parse_module(src, &label, base).map_err(|m| vec![m])?;
-        // A `/` in the name nests the module: its segments extend the path under
-        // `std`, so `collections/hashmap` becomes `std.collections.hashmap`.
-        let mut path = vec!["std".to_string()];
-        path.extend(name.split('/').map(str::to_string));
-        modules.push(LoadedModule { path, ast });
-    }
-
-    let base = sources.add(PathBuf::from(main_label), main_src.to_string());
+    let base = sources.add(
+        Some(PathBuf::from(main_label)),
+        main_label.to_string(),
+        main_src.to_string(),
+    );
     let mut main_ast = parse_module(main_src, main_label, base).map_err(|m| vec![m])?;
 
     let mut visited = HashSet::new();
     let mut stack = HashSet::new();
     let mut deps = Vec::new();
+    let mut load_errors = Vec::new();
     // The main file's imports resolve relative to its own directory (`root`), so
     // its canonical base is empty.
-    for target in canonicalize_imports(&[], &mut main_ast.imports) {
-        load_module(
+    for (target, span) in prepoly_resolve::canonicalize_imports(&[], &mut main_ast.imports) {
+        prepoly_resolve::load_module(
             &target,
             root,
             &mut sources,
             &mut visited,
             &mut stack,
             &mut deps,
-        )
-        .map_err(|m| vec![m])?;
+            span,
+            &mut load_errors,
+        );
+    }
+    // A broken module graph aborts before lowering: analyzing a partial graph
+    // would drown the real problem in cascading unknown-name errors. Unlike the
+    // old first-error abort, every load problem is reported, with its location.
+    if !load_errors.is_empty() {
+        let rendered: Vec<(String, Span)> = load_errors
+            .into_iter()
+            .map(|e| (e.message, e.span))
+            .collect();
+        return Err(render_errors(&rendered, &sources));
     }
     modules.extend(deps);
     modules.push(LoadedModule {
@@ -565,19 +731,23 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
 
     // The spawn-ownership pass only matters for the JIT runtime (the REPL does not
     // execute concurrency); it lives in the LLVM crate, so it is feature-gated.
+    // The pass may reject a `spawn` it cannot analyze; those diagnostics join the
+    // front-end errors below.
     #[cfg(jit_backend)]
-    {
+    let spawn_errors: Vec<(String, Span)> = {
         report_spawn_ownership(&modules);
-        auto_acquire_modules(&mut modules);
-    }
+        auto_acquire_modules(&mut modules)
+    };
+    #[cfg(not(jit_backend))]
+    let spawn_errors: Vec<(String, Span)> = Vec::new();
 
     tracing::debug!(modules = modules.len(), "lowering module graph to HIR");
     let (program, lower_errors) = lower(&modules);
-    let mut errors: Vec<(String, Span)> = Vec::new();
+    let mut errors: Vec<(String, Span)> = spawn_errors;
     for e in lower_errors {
         errors.push((e.message, e.span));
     }
-    for e in prepoly_resolve::check_imports(&program, &modules) {
+    for e in prepoly_resolve::check_imports(&modules) {
         errors.push((e.message, e.span));
     }
     tracing::debug!(
@@ -604,143 +774,6 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
     })
 }
 
-/// Resolve an import path, written relative to the importing file, to the
-/// imported module's canonical (root-relative) path. Imports are relative to the
-/// importing file's own directory `base` (a root-relative path), so `import b`
-/// from `modules/a.pp` refers to `modules/b.pp`. A `std.*` path or a bare prelude
-/// module (`io`, `array`, ...) is global rather than file-relative and returns
-/// `None`, so the caller leaves it untouched and does not load it from disk.
-fn relativize(base: &[String], imp_path: &[String]) -> Option<Vec<String>> {
-    if imp_path.first().map(|s| s == "std").unwrap_or(false) || is_prelude_path(imp_path) {
-        return None;
-    }
-    let mut canonical = base.to_vec();
-    canonical.extend_from_slice(imp_path);
-    Some(canonical)
-}
-
-/// Rewrite each import's path from importer-relative to canonical (root-relative)
-/// form in place -- so the loaded modules and downstream name resolution share one
-/// path per file -- and return the canonical paths of the file modules to load.
-/// `base` is the importing file's canonical directory.
-fn canonicalize_imports(base: &[String], imports: &mut [ImportDecl]) -> Vec<Vec<String>> {
-    let mut targets = Vec::new();
-    for imp in imports.iter_mut() {
-        if let Some(canonical) = relativize(base, &imp.path) {
-            imp.path = canonical.clone();
-            targets.push(canonical);
-        }
-    }
-    targets
-}
-
-/// Load the module at canonical (root-relative) `path` and, transitively, every
-/// module it imports. Each module's own imports are resolved relative to its
-/// directory (`path` without its last segment); `canonicalize_imports` rewrites
-/// them to canonical form before they are loaded, so a file has one identity no
-/// matter how it is reached. `std`/prelude paths never arrive here (they are
-/// filtered out as non-file modules during canonicalization).
-fn load_module(
-    path: &[String],
-    root: &Path,
-    sources: &mut SourceMap,
-    visited: &mut HashSet<String>,
-    stack: &mut HashSet<String>,
-    out: &mut Vec<LoadedModule>,
-) -> Result<(), String> {
-    let key = path.join(".");
-    // A module file whose name begins with `_` is private and cannot be imported
-    // from another module.
-    if prepoly_resolve::is_private_module(path) {
-        return Err(format!("error: cannot import private module `{key}`"));
-    }
-    if visited.contains(&key) {
-        return Ok(());
-    }
-    if !stack.insert(key.clone()) {
-        return Err(format!("error: circular import involving `{key}`"));
-    }
-    let mut file = root.to_path_buf();
-    for seg in path {
-        file.push(seg);
-    }
-    file.set_extension("pp");
-    let src = match std::fs::read_to_string(&file) {
-        Ok(s) => s,
-        Err(_) => {
-            stack.remove(&key);
-            visited.insert(key.clone());
-            return Err(format!(
-                "error: cannot find module `{key}` (expected `{}`)",
-                file.display()
-            ));
-        }
-    };
-    let label = file.display().to_string();
-    let base = sources.add(file, src.clone());
-    let mut ast = parse_module(&src, &label, base)?;
-    // This module's imports resolve relative to its own directory.
-    let dir = &path[..path.len() - 1];
-    for target in canonicalize_imports(dir, &mut ast.imports) {
-        load_module(&target, root, sources, visited, stack, out)?;
-    }
-    stack.remove(&key);
-    visited.insert(key.clone());
-    out.push(LoadedModule {
-        path: path.to_vec(),
-        ast,
-    });
-    Ok(())
-}
-
-/// Whether an import path refers to a prelude module supplied as STDLIB rather
-/// than a file on disk.
-fn is_prelude_path(path: &[String]) -> bool {
-    matches!(path, [single] if STDLIB.iter().any(|(name, _)| name == single))
-}
-
-/// Each loaded source file with the disjoint byte-offset base its spans were
-/// parsed at, so a span's offset locates its file. Every file is lexed from
-/// offset zero, but `parse_with_base` shifts each file's spans by its base, so a
-/// span is globally unique and a diagnostic lands in the right file and line --
-/// where the previous `span.hi <= src.len()` guess could pick the wrong file
-/// non-deterministically, and never located standard-library spans at all.
-#[derive(Default)]
-struct SourceMap {
-    next_base: usize,
-    entries: Vec<SourceEntry>,
-}
-
-struct SourceEntry {
-    base: usize,
-    path: PathBuf,
-    src: String,
-}
-
-impl SourceMap {
-    /// Reserve a disjoint base for `src`, record it, and return the base to parse
-    /// at. The one-byte gap keeps an end-of-file span from colliding with the
-    /// next file's first byte.
-    fn add(&mut self, path: PathBuf, src: String) -> usize {
-        let base = self.next_base;
-        self.next_base = base + src.len() + 1;
-        self.entries.push(SourceEntry { base, path, src });
-        base
-    }
-
-    /// Locate the file containing global byte offset `off`: its path, source, and
-    /// the file-local offset.
-    fn locate(&self, off: usize) -> Option<(&PathBuf, &str, usize)> {
-        self.entries.iter().find_map(|e| {
-            (off >= e.base && off <= e.base + e.src.len()).then_some((
-                &e.path,
-                e.src.as_str(),
-                off - e.base,
-            ))
-        })
-    }
-}
-
 /// Parse `src` (labelled `name`) at byte-offset `base`, rendering a parse error
 /// with the file-local line/column.
 fn parse_module(src: &str, name: &str, base: usize) -> Result<Module, String> {
@@ -753,13 +786,13 @@ fn parse_module(src: &str, name: &str, base: usize) -> Result<Module, String> {
 /// Render each `(message, span)` diagnostic as `path:line:col: error: message`,
 /// locating the span's file by its globally-unique offset (or a bare `error:`
 /// line when no source contains it).
-fn render_errors(errors: &[(String, Span)], sources: &SourceMap) -> Vec<String> {
+fn render_errors(errors: &[(String, Span)], sources: &prepoly_resolve::SourceMap) -> Vec<String> {
     let mut out = Vec::with_capacity(errors.len());
     for (msg, span) in errors {
         match sources.locate(span.lo) {
-            Some((path, src, off)) => {
-                let (line, col) = line_col(src, off);
-                out.push(format!("{}:{line}:{col}: error: {msg}", path.display()));
+            Some(loc) => {
+                let (line, col) = line_col(loc.src, loc.local);
+                out.push(format!("{}:{line}:{col}: error: {msg}", loc.label));
             }
             None => out.push(format!("error: {msg}")),
         }

@@ -1,0 +1,1 @@
+spawned task accesses module global `g`, which is written elsewhere

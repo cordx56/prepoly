@@ -71,7 +71,7 @@ pub fn walk_expr(e: &Expr, v: &mut impl ExprVisitor) {
     v.visit(e);
     match e {
         Expr::Unary(_, a, _) | Expr::ErrorProp(a, _) | Expr::Field(a, _, _) => walk_expr(a, v),
-        Expr::Binary(_, a, b, _) | Expr::Index(a, b, _) => {
+        Expr::Binary(_, a, b, _) | Expr::Index(a, b, _) | Expr::Range(a, b, _) => {
             walk_expr(a, v);
             walk_expr(b, v);
         }

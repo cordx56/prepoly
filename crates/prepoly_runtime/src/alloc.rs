@@ -400,11 +400,16 @@ pub unsafe extern "C-unwind" fn pp_str_concat(a: *mut Header, b: *mut Header) ->
     }
 }
 
-/// Whether two strings have equal bytes.
+/// Whether two strings have equal bytes. Null-safe: a null operand (an absent
+/// `string?` the checker let flow into `==`) equals only another null, matching
+/// the interpreter's identity rule instead of faulting on the dereference.
 ///
 /// # Safety
-/// `a` and `b` must be string objects.
+/// `a` and `b` must be string objects or null.
 pub unsafe extern "C-unwind" fn pp_str_eq(a: *mut Header, b: *mut Header) -> bool {
+    if a.is_null() || b.is_null() {
+        return a.is_null() && b.is_null();
+    }
     unsafe {
         let (la, lb) = (pp_str_len(a) as usize, pp_str_len(b) as usize);
         la == lb
@@ -430,8 +435,11 @@ pub unsafe extern "C-unwind" fn pp_str_cmp(a: *mut Header, b: *mut Header) -> i3
     }
 }
 
-/// Substring `[start, end)` of a string (typed). Ranges come from typed string
-/// code that keeps them in bounds and on UTF-8 boundaries.
+/// Substring `[start, end)` of a string (typed). The range is clamped to the
+/// string's bounds and each endpoint snapped back to the nearest UTF-8 character
+/// boundary, matching the interpreter's `string_slice`: a mid-character byte
+/// range must not materialize invalid UTF-8 (later string primitives assume
+/// validity via `from_utf8_unchecked`).
 ///
 /// # Safety
 /// `s` must be a string object.
@@ -441,8 +449,19 @@ pub unsafe extern "C-unwind" fn pp_str_slice(s: *mut Header, start: i64, end: i6
         let st = start.clamp(0, len) as usize;
         let en = end.clamp(start.max(0), len) as usize;
         let bytes = std::slice::from_raw_parts(str_bytes_ptr(s), len as usize);
+        let st = snap_char_boundary(bytes, st);
+        let en = snap_char_boundary(bytes, en);
         pp_str_const(bytes[st..en].as_ptr(), (en - st) as i64)
     }
+}
+
+/// Move `i` back to the nearest UTF-8 character boundary at or before it
+/// (continuation bytes have the form `0b10xx_xxxx`).
+fn snap_char_boundary(bytes: &[u8], mut i: usize) -> usize {
+    while i > 0 && i < bytes.len() && (bytes[i] & 0xC0) == 0x80 {
+        i -= 1;
+    }
+    i
 }
 
 /// The byte index of `sub` in `s`, or null (typed `_string_find`): a nullable

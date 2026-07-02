@@ -317,4 +317,21 @@ impl Program {
         self.resolve_function(module, name)
             .map(|f| f.symbol.clone())
     }
+
+    /// Every sum type that defines a variant named `variant`, sorted by type
+    /// name (then symbol). Two sums may share a variant name; callers that must
+    /// pick one owner do so deterministically from this order -- the type table
+    /// is a `HashMap` whose iteration order must never decide accept/reject.
+    pub fn sums_containing_variant(&self, variant: &str) -> Vec<&TypeInfo> {
+        let mut sums: Vec<&TypeInfo> = self
+            .types
+            .values()
+            .filter(|info| match &info.kind {
+                TypeKind::Sum { variants } => variants.iter().any(|v| v.name == variant),
+                TypeKind::Record { .. } => false,
+            })
+            .collect();
+        sums.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.symbol.cmp(&b.symbol)));
+        sums
+    }
 }

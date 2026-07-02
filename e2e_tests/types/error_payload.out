@@ -1,0 +1,4 @@
+bad input -7
+Result.Ok {
+    value: 42,
+}

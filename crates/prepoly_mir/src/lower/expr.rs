@@ -85,7 +85,7 @@ impl<'a, 'p> FnLower<'a, 'p> {
             Expr::Closure(params, body, _) => self.lower_closure(params, body),
             Expr::Array(es, span) => self.lower_array(es, *span),
             Expr::Range(lo, hi, _) => self.lower_range(lo, hi),
-            Expr::TypeLit(name, fields, _) => self.lower_record(name, fields),
+            Expr::TypeLit(name, fields, span) => self.lower_record(name, fields, *span),
             Expr::VariantLit(ty, variant, fields, _) => self.lower_variant(ty, variant, fields),
             Expr::If(cond, then, els, _) => self.lower_if(cond, then, els.as_deref()),
             Expr::IfLet(pat, scrut, then, els, _) => {
@@ -116,7 +116,11 @@ impl<'a, 'p> FnLower<'a, 'p> {
             // could write by hand, and the back ends need no dedicated fn-value.
             None => match self.ctx.function_arity(&self.module, name) {
                 Some(arity) => self.lower_fn_value(name, arity),
-                None => self.b.emit(Rvalue::Global(name.to_string())),
+                // Global storage is keyed per defining module, so the read
+                // resolves the bare name to that module's key.
+                None => self
+                    .b
+                    .emit(Rvalue::Global(self.ctx.global_symbol(&self.module, name))),
             },
         }
     }
@@ -260,14 +264,18 @@ impl<'a, 'p> FnLower<'a, 'p> {
         let subj = self.b.make_local(subj);
         // A plain (non-variant) binding in `if let` is a *presence* test, not the
         // catch-all it is in `match`: `if let x = e` runs the then-arm only when `e`
-        // is present. Using the subject itself as the condition routes it through
-        // `CondBranch`'s truthiness -- a nullable tests non-null, while a
-        // non-nullable value folds to always-true (an irrefutable bind). This is
-        // what lets `if let p = T.from(v)` (whose result is `T?`) take the else arm
-        // when the conversion yields null. Other patterns test as usual.
+        // is present. The test is the `__present` builtin over the subject -- a
+        // nullable tests non-null, while ANY non-nullable value is an irrefutable
+        // bind that folds to always-then (including a `false` bool, which a plain
+        // truthiness condition would wrongly branch on). This is what lets
+        // `if let p = T.from(v)` (whose result is `T?`) take the else arm when the
+        // conversion yields null. Other patterns test as usual.
         let cond = match pat {
             prepoly_parser::ast::Pattern::Binding(name, _) if !self.is_variant_name(name) => {
-                Operand::Local(subj)
+                self.b.emit(Rvalue::Call(
+                    Callee::Builtin("__present".into()),
+                    vec![Operand::Local(subj)],
+                ))
             }
             _ => self.lower_pattern_cond(pat, subj),
         };
@@ -499,10 +507,20 @@ impl<'a, 'p> FnLower<'a, 'p> {
         Operand::Local(arr)
     }
 
-    fn lower_record(&mut self, name: &str, fields: &[(String, Expr)]) -> Operand {
+    fn lower_record(&mut self, name: &str, fields: &[(String, Expr)], span: Span) -> Operand {
         let ty = self.resolve_self_name(name);
         let fields = self.lower_named_fields(fields);
-        self.b.emit(Rvalue::Record { ty, fields })
+        let rv = Rvalue::Record { ty, fields };
+        // The checker-resolved instance type seeds the literal's result local
+        // exactly like a constructor call's: the substitution carries the
+        // per-instance types of inferred fields -- in particular the signature
+        // of an unannotated function-typed field, which the back end cannot
+        // derive from the closure operand alone (the closure takes its
+        // parameter types FROM that seed).
+        match self.ctx.expr_type(span) {
+            Some(t) if is_seedable_result(t) => self.b.emit_known(rv, t.clone()),
+            _ => self.b.emit(rv),
+        }
     }
 
     fn lower_variant(&mut self, ty: &str, variant: &str, fields: &[(String, Expr)]) -> Operand {
@@ -586,10 +604,28 @@ impl<'a, 'p> FnLower<'a, 'p> {
                     ops,
                 );
             }
+            // No trailing-nullable padding here: `method` names a *method*, whose
+            // arity the checker enforces in full. Looking the name up as a free
+            // function (as free calls below do) would pad from an unrelated
+            // same-named function's signature and corrupt the argument list.
             let recv = self.lower_expr(base);
+            // A name no type's method table (nor the primitive-method table)
+            // knows is a FIELD call: `a.func(4)` loads the function-typed field
+            // and calls it indirectly (the checker already resolved the name to
+            // a field). A field sharing its name with an unrelated type's
+            // method still routes as a method -- a limitation of this
+            // structural, type-free routing.
+            if !self.ctx.method_name_exists(method) {
+                let obj = self.b.make_local(recv);
+                let f = self.b.emit(Rvalue::Load(Place::projected(
+                    obj,
+                    vec![Projection::Field(method.clone())],
+                )));
+                let ops = self.lower_args(args);
+                return Rvalue::Call(Callee::Indirect(f), ops);
+            }
             let mut ops = vec![recv];
             ops.extend(self.lower_args(args));
-            self.pad_trailing_nullable(method, &mut ops);
             return Rvalue::Call(Callee::Method(method.clone()), ops);
         }
         if let Expr::Ident(name, _) = callee {
@@ -636,10 +672,10 @@ impl<'a, 'p> FnLower<'a, 'p> {
         ops
     }
 
-    /// Pad a call's argument list with `null` for each omitted trailing nullable
-    /// parameter of `name` (a free function or UFCS method), so a call may leave
-    /// them off. The type checker has already verified the omitted
-    /// parameters are nullable; padding stops at the first non-nullable one.
+    /// Pad a free-function call's argument list with `null` for each omitted
+    /// trailing nullable parameter of `name`, so a call may leave them off. The
+    /// type checker has already verified the omitted parameters are nullable;
+    /// padding stops at the first non-nullable one.
     fn pad_trailing_nullable(&self, name: &str, ops: &mut Vec<Operand>) {
         let Some(nullable) = self.ctx.fn_param_nullability(&self.module, name) else {
             return;
@@ -717,26 +753,19 @@ fn lower_closure_body(
     body: &Expr,
 ) -> MirClosure {
     let mut fl = FnLower::new(ctx, module.clone(), self_type);
-    // Cells in this closure: its own captured-and-mutated locals (for nested
-    // closures), plus the captures that are shared cells in the enclosing body --
-    // both are accessed through the cell array's element 0.
+    // Cell candidates local to this closure: its own captured-and-mutated
+    // bindings (for nested closures). As in `lower_callable`, each binder
+    // decides for its own binding, so a parameter binds plainly (shadowing any
+    // same-named captured cell) while a `let` of a candidate name is promoted.
     fl.cells = crate::analysis::cell_promotions(&closure_block(body));
-    for c in cell_captures {
-        fl.cells.insert(c.clone());
-    }
-    // Parameters are not cells (like `lower_callable`): a parameter has no binder
-    // that wraps it, and inside the closure its name shadows any same-named
-    // captured cell. Leaving a captured-and-mutated parameter in the set would
-    // bind it as a plain scalar that read/write/capture sites then index as a
-    // cell array.
-    for p in params {
-        fl.cells.remove(&p.name);
-    }
     let captures: Vec<_> = capture_names
         .iter()
         .map(|n| {
             let l = fl.b.fresh_local(Some(n.clone()));
-            fl.bind(n, l);
+            // A capture that is a shared cell in the enclosing body stays a
+            // cell binding here: its local holds the cell array, and the body
+            // reads/writes it through element 0.
+            fl.bind_as(n, l, cell_captures.contains(n));
             l
         })
         .collect();

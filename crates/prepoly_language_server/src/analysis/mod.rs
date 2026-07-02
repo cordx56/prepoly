@@ -162,7 +162,7 @@ fn run_pipeline(
     for e in lower_errors {
         diags.push((e.message, e.span));
     }
-    for e in prepoly_resolve::check_imports(&program, &modules) {
+    for e in prepoly_resolve::check_imports(&modules) {
         diags.push((e.message, e.span));
     }
     let analysis = prepoly_typeck::analyze(&program);

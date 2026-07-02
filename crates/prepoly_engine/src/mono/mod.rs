@@ -32,6 +32,29 @@ use prepoly_parser::ast::{BinOp, UnaryOp};
 
 use crate::mir_infer::{MirTypeError, Resolver, infer_body};
 
+mod boundary;
+mod fold;
+mod rules;
+mod symbols;
+
+pub use boundary::{
+    boundary_record_type, boundary_record_type_by_id, boundary_record_type_by_name,
+    boundary_record_type_from_fields, parse_structural_descriptor,
+};
+pub use fold::{cond_static_truthiness, reachable_blocks};
+pub use rules::binary_operand_type;
+pub(crate) use rules::unwrap_nullable;
+pub use symbols::{
+    SYNTH_SIGIL, closure_symbol, instance_symbol, method_symbol, prim_method_instance,
+    static_symbol,
+};
+
+use rules::{
+    binary_operand_common, check_bin, const_type, is_supported, merge_return_types,
+    resolve_nominal, variant_field_layoutable,
+};
+use symbols::is_return_polymorphic_result;
+
 /// A [`Resolver`] for the JIT-time verification pass: a call is typed by looking
 /// up the instance the monomorphizer already built for it, and fields/nominals/
 /// globals come from the program and the monomorphized global table.
@@ -177,17 +200,6 @@ fn is_result(ty: &Type) -> bool {
     matches!(ty, Type::Sum(n) if n.id == RESULT_TYPE_ID)
 }
 
-/// Strip one level of nullable: the inner type of a `T?`, else `ty` unchanged.
-/// Used to narrow a value proven non-null by a guard (`if a`) -- the MIR local
-/// still carries the declared nullable -- in arithmetic/comparison and as the
-/// receiver of an aggregate operation (field/element/`len`/`push`/...).
-pub(crate) fn unwrap_nullable(ty: &Type) -> &Type {
-    match ty {
-        Type::Nullable(inner) => inner,
-        other => other,
-    }
-}
-
 /// The constant non-negative index carried by a tuple-position projection operand
 /// (`t[0]`), or `None` when the index is not an integer constant. A tuple element
 /// type is only known at a statically-known position.
@@ -315,93 +327,6 @@ impl<'m> MonoProgram<'m> {
     }
 }
 
-/// Marks a compiler-synthesized instance symbol (a module init, method, static,
-/// or closure) so it occupies a namespace disjoint from user function symbols.
-/// `$` cannot appear in a source identifier, so a user `fun init0` (symbol
-/// `init0`) never collides with the first module init (`$init0`) in the instance
-/// map, and the back end maps the two to distinct LLVM names. Must match the
-/// prefix `prepoly_jit_llvm`'s `mangle_fn` recognizes.
-pub const SYNTH_SIGIL: char = '$';
-
-/// The canonical instance symbol for `base` specialized to `type_args`. Distinct
-/// type tuples yield distinct strings, so instances never collide.
-pub fn instance_symbol(base: &str, type_args: &[Type]) -> String {
-    if type_args.is_empty() {
-        base.to_string()
-    } else {
-        let args = type_args
-            .iter()
-            .map(|t| t.display())
-            .collect::<Vec<_>>()
-            .join("_");
-        format!("{base}__{args}")
-    }
-}
-
-/// Instance symbol of an instance-method call. `type_args[0]` is the receiver
-/// type, so the symbol is unique per receiver layout; the method name keeps
-/// distinct methods apart. Derivable from types alone (no HIR program), so the
-/// monomorphizer and the back end agree.
-pub fn method_symbol(method: &str, type_args: &[Type]) -> String {
-    instance_symbol(&format!("{SYNTH_SIGIL}m_{method}"), type_args)
-}
-
-/// Instance symbol of a static call `Type.method(args)`.
-///
-/// A *no-argument* static that returns an aggregate (record/sum/array) is
-/// return-polymorphic: a witness-free `HashMap.new()` whose element types are
-/// fixed only by the caller. Its arguments alone do not distinguish
-/// `HashMap<string,int32>` from `HashMap<int32,int32>`, so the result type is
-/// folded into the key for those, giving each a distinct instance. Statics with
-/// arguments are keyed by their arguments alone (the result is a function of
-/// them), so non-generic statics are unaffected. The monomorphizer passes the
-/// resolved result here; both back ends pass the call's destination type, which
-/// is the same value, so all three derive the identical symbol.
-pub fn static_symbol(ty: &str, method: &str, type_args: &[Type], result: Option<&Type>) -> String {
-    let mut key = type_args.to_vec();
-    if type_args.is_empty()
-        && let Some(r) = result
-        && is_return_polymorphic_result(r)
-    {
-        key.push(r.clone());
-    }
-    instance_symbol(&format!("{SYNTH_SIGIL}s_{ty}_{method}"), &key)
-}
-
-/// Whether a no-argument static's result type can vary by caller and so must be
-/// folded into its instance key: a record/sum built around inferred field types
-/// (a witness-free constructor). Scalars/strings/void/arrays are left out,
-/// keeping their symbols unchanged. Matches the seeding filter so the
-/// monomorphizer and both back ends key these constructors identically.
-fn is_return_polymorphic_result(ty: &Type) -> bool {
-    matches!(ty, Type::Record(_) | Type::Sum(_))
-}
-
-/// The monomorphized instance symbol for a `recv.name(args)` call that resolves
-/// to a stdlib primitive/array method, when such an instance exists in
-/// `program`. The receiver's class ([`Type::primitive_class`]) plus the method
-/// name reconstruct the body's class-qualified symbol (the same scheme HIR
-/// lowering used), which `instance_symbol` keys by argument types. Lets the back
-/// ends route the call without carrying the HIR `primitive_methods` table.
-pub fn prim_method_instance(
-    program: &MonoProgram,
-    name: &str,
-    arg_types: &[Type],
-) -> Option<String> {
-    let class = arg_types.first()?.primitive_class()?;
-    let sym = instance_symbol(&prepoly_hir::prim_method_symbol(class, name), arg_types);
-    program.lookup(&sym).map(|_| sym)
-}
-
-/// Instance symbol of a closure: distinct per closure id, captured types, and
-/// parameter types. Derivable from types alone so the monomorphizer and back end
-/// agree.
-pub fn closure_symbol(id: ClosureId, capture_types: &[Type], param_types: &[Type]) -> String {
-    let mut args = capture_types.to_vec();
-    args.extend_from_slice(param_types);
-    instance_symbol(&format!("{SYNTH_SIGIL}clo{}", id.index()), &args)
-}
-
 /// Monomorphize a MIR program against its HIR program. Returns one concrete
 /// instance per reachable (callable, type-tuple), or an error describing the
 /// first construct outside the typed subset.
@@ -450,115 +375,17 @@ pub fn monomorphize<'m>(mir: &'m MirProgram, program: &Program) -> Result<MonoPr
     // Roots: every zero-parameter function. Their bodies pull in the rest.
     for f in &mir.functions {
         if f.body.params.is_empty() {
-            let _ = mono.instantiate_fn(&f.symbol, Vec::new());
+            if let Err(e) = mono.instantiate_fn(&f.symbol, Vec::new()) {
+                // Best-effort (see above), but the reason a root was skipped is
+                // the first thing needed when a checked program is rejected as
+                // "outside the typed subset" -- surface it in the debug trace.
+                tracing::debug!(root = %f.symbol, error = %e, "skipping untypeable root");
+            }
             mono.in_progress.clear();
         }
     }
 
     Ok(mono.into_program(init_symbols))
-}
-
-/// Build the concrete `Type` of a declared record as it arrives at the runtime
-/// deserialize boundary: a nominal carrying every field's declared
-/// type in its substitution, exactly as a constructed record does -- so it
-/// satisfies the typed backend's support check and field reads resolve. Returns
-/// `None` if `name` is not a record type in `module`, or a field type is unknown.
-/// (A future structural deserializer builds the substitution from the data's
-/// shape; for a declared target this derives it from the field declarations.)
-pub fn boundary_record_type(program: &Program, module: &[String], name: &str) -> Option<Type> {
-    boundary_record_type_of(program.resolve_type(module, name)?)
-}
-
-/// Like [`boundary_record_type`] but keyed by the type's id -- the tag a boundary
-/// value carries at runtime. The dispatch trampoline rebuilds the consumer's
-/// argument type from a runtime value's tag with this.
-pub fn boundary_record_type_by_id(program: &Program, id: i32) -> Option<Type> {
-    boundary_record_type_of(program.type_by_id(id)?)
-}
-
-/// Like [`boundary_record_type`] but found by the type's source name across all
-/// modules (the deserialize boundary names its target type); the first match
-/// wins. Used by the dispatch trampoline.
-pub fn boundary_record_type_by_name(program: &Program, name: &str) -> Option<Type> {
-    program
-        .types
-        .values()
-        .find(|t| t.name == name)
-        .and_then(boundary_record_type_of)
-}
-
-/// The sentinel type id for a *structural* record built at the deserialize boundary
-/// from a value's shape rather than a declaration. No declared type
-/// uses this id, so `type_by_id` misses and the typed backend lays the record out
-/// from its substitution (sorted field order) instead of a declaration.
-pub const STRUCTURAL_RECORD_ID: i32 = i32::MIN;
-
-/// Build a `Type::Record` from a field list discovered at the deserialize
-/// boundary: the data structure -- not a declared type name -- drives the
-/// type. The resulting record has no declaration; its layout comes from the
-/// substitution (the typed backend orders structural fields by name). The consumer
-/// is then monomorphized against this type exactly like a declared one, and the
-/// boundary's structural-requirement check rejects a value missing a read field.
-pub fn boundary_record_type_from_fields(fields: &[(String, Type)]) -> Type {
-    let mut subst = Substitution::empty();
-    for (name, ty) in fields {
-        subst.insert(name.clone(), ty.clone());
-    }
-    Type::Record(NominalType::with_substitution(
-        STRUCTURAL_RECORD_ID,
-        "<structural>",
-        subst,
-    ))
-}
-
-/// Parse a structural record descriptor `"field:tag,field:tag"` (optionally brace-
-/// wrapped) into ordered `(field, Type)` pairs, the data-driven type description a
-/// `deserialize` boundary produces. Returns `None` on a malformed
-/// descriptor or an unknown field type tag.
-pub fn parse_structural_descriptor(desc: &str) -> Option<Vec<(String, Type)>> {
-    let body = desc
-        .trim()
-        .trim_start_matches('{')
-        .trim_end_matches('}')
-        .trim();
-    if body.is_empty() {
-        return None;
-    }
-    let mut out = Vec::new();
-    for field in body.split(',') {
-        let (name, tag) = field.split_once(':')?;
-        out.push((name.trim().to_string(), type_from_tag(tag.trim())?));
-    }
-    Some(out)
-}
-
-/// The `Type` named by a structural-descriptor field tag.
-fn type_from_tag(tag: &str) -> Option<Type> {
-    if let Some(k) = IntKind::from_name(tag) {
-        return Some(Type::Int(k));
-    }
-    Some(match tag {
-        "float32" => Type::Float(FloatKind::F32),
-        "float64" => Type::Float(FloatKind::F64),
-        "string" => Type::Str,
-        "bool" => Type::Bool,
-        _ => return None,
-    })
-}
-
-fn boundary_record_type_of(info: &prepoly_hir::TypeInfo) -> Option<Type> {
-    let TypeKind::Record { fields, .. } = &info.kind else {
-        return None;
-    };
-    let mut subst = Substitution::empty();
-    for f in fields {
-        subst.insert(f.name.clone(), f.resolved_ty.clone()?);
-    }
-    Some(Type::Record(NominalType::with_substitution(
-        info.id,
-        info.name.clone(),
-        subst,
-    )))
 }
 
 /// Monomorphize a single callable on demand for a concrete argument-type tuple,
@@ -743,11 +570,13 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             seed_returned_aggregate(body, &seed, &mut local_types);
         }
 
-        // Closure parameter sources: a direct in-body call, or being passed to a
-        // higher-order function (probed from the callee). Array pushes give the
+        // Closure parameter sources: a direct in-body call, being passed to a
+        // higher-order function (probed from the callee), or initializing a
+        // record field with a declared function type. Array pushes give the
         // element type of an empty `[]` literal.
         let indirect_args = collect_indirect_args(body);
         let closure_passes = collect_closure_passes(body);
+        let record_field_closures = collect_record_field_closures(body);
         let array_pushes = collect_array_pushes(body);
 
         // Fixpoint: resolve local and return types until stable. Calls are
@@ -763,6 +592,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                         module,
                         &indirect_args,
                         &closure_passes,
+                        &record_field_closures,
                         &array_pushes,
                         &mut local_types,
                         &ret,
@@ -972,6 +802,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn type_stmt(
         &mut self,
         stmt: &MirStmt,
@@ -979,6 +810,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         module: &[String],
         indirect_args: &HashMap<LocalId, Vec<Operand>>,
         closure_passes: &HashMap<LocalId, (String, Vec<Operand>, usize)>,
+        record_field_closures: &HashMap<LocalId, (LocalId, String, String)>,
         array_pushes: &HashMap<LocalId, Operand>,
         local_types: &mut [Option<Type>],
         cur_ret: &Option<Type>,
@@ -1010,8 +842,10 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                         *id,
                         captures,
                         *local,
+                        module,
                         indirect_args,
                         closure_passes,
+                        record_field_closures,
                         local_types,
                     )?
                 {
@@ -1176,6 +1010,10 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                     Some(op) => self.operand_type(op, local_types),
                     None => Ok(Some(Type::Void)),
                 },
+                // `__present(x)` is the `if let x = e` presence test: false for a
+                // null, true for anything else. Non-nullable subjects fold
+                // statically (see `cond_static_truthiness`).
+                "__present" => Ok(Some(Type::Bool)),
                 // `__nonnull(x)` narrows a nullable to its inner type (the if-let
                 // binding of a nullable, proven non-null); a non-nullable is itself.
                 "__nonnull" => match args.first() {
@@ -1254,6 +1092,18 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                         None => Ok(None),
                     },
                     None => Err("`with` expects (cown, closure)".into()),
+                },
+                // `_with_all(f, c0, ...)` yields the guarded body closure's result.
+                "_with_all" => match args.first() {
+                    Some(op) => match self.operand_type(op, local_types)? {
+                        Some(Type::Fun(_, ret)) => Ok(Some(*ret)),
+                        Some(other) => Err(format!(
+                            "`_with_all` expects a closure, found `{}`",
+                            other.display()
+                        )),
+                        None => Ok(None),
+                    },
+                    None => Err("`_with_all` expects (closure, cowns...)".into()),
                 },
                 other => Err(format!(
                     "builtin `{other}` is unsupported on the typed backend"
@@ -1571,26 +1421,11 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         let tb = self.operand_type(b, local_types)?;
         let a_local = matches!(a, Operand::Local(_));
         let b_local = matches!(b, Operand::Local(_));
-        // Mixed numeric operands yield their common type (int width/signedness, and
-        // int-with-float), except that an integer literal adapts to a variable's
-        // int type (one operand a variable, the other a literal).
+        // Both operand types known: the shared operand rule (also used by the
+        // back ends for comparison operands) decides, so the typer and codegen
+        // can never disagree on literal adaptation or the common numeric type.
         if let (Some(ta), Some(tb)) = (&ta, &tb) {
-            let (na, nb) = (unwrap_nullable(ta), unwrap_nullable(tb));
-            // A literal adapts to the variable's type only when it fits: a
-            // magnitude-typed int64 literal (e.g. INT64_MAX) mixed with an int32
-            // variable takes the common (wider) type instead of truncating.
-            let lit_kind = if a_local { nb } else { na };
-            let var_kind = if a_local { na } else { nb };
-            let lit_fits = match (lit_kind, var_kind) {
-                (Type::Int(lk), Type::Int(vk)) => lk.bits() <= vk.bits(),
-                _ => true,
-            };
-            let int_literal_adapt = matches!((na, nb), (Type::Int(_), Type::Int(_)))
-                && (a_local != b_local)
-                && lit_fits;
-            if !int_literal_adapt && let Some(common) = prepoly_hir::common_numeric_type(na, nb) {
-                return Ok(Some(common));
-            }
+            return Ok(Some(binary_operand_common(ta, tb, a_local, b_local)));
         }
         let pick = if a_local && ta.is_some() {
             ta
@@ -1642,13 +1477,20 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                 .find(|(n, _)| *n == fdecl.name)
                 .ok_or_else(|| format!("missing field `{}` of `{ty}`", fdecl.name))?;
             let t = match self.operand_type(&value.1, local_types)? {
-                // A field initialized to `null` carries the bare `Nullable(Never)`;
-                // recover the field's declared nullable type so `next: Node?` stays
-                // `Node?` (not `Never?`) -- the null value coerces to it. Essential
-                // for self-referential records (the field links back to the type).
-                Some(Type::Nullable(inner))
-                    if matches!(*inner, Type::Never)
-                        && matches!(fdecl.resolved_ty, Some(Type::Nullable(_))) =>
+                // A declared-nullable field keeps its declared type whatever
+                // initializes it: a `null` carries the bare `Nullable(Never)` and
+                // coerces to it, and a NON-null value is wrapped into the
+                // nullable cell at the store -- recording the raw value type
+                // (`Node { next: head }` recording `next=Node`) would make every
+                // reader reinterpret the cell as the bare value and crash.
+                // Essential for self-referential records. A declared type that
+                // is not fully concrete (an `infer?` slot) still takes its type
+                // from the constructed value.
+                Some(got)
+                    if matches!(&fdecl.resolved_ty,
+                        Some(decl @ Type::Nullable(_)) if prepoly_hir::is_fully_known(decl))
+                        && !matches!(&got,
+                            Type::Nullable(inner) if !matches!(**inner, Type::Never)) =>
                 {
                     fdecl.resolved_ty.clone().unwrap()
                 }
@@ -1750,6 +1592,70 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
     /// is annotated. This types an *escaping* closure (returned, so neither called
     /// in-body nor passed to a function) -- e.g. `make_accumulator`'s returned
     /// `(amount: int32) -> ...`. `None` if any parameter is unannotated.
+    /// The declared parameter types of record `ty`'s field `field` when the
+    /// field is annotated with a concrete function type -- the typing source for
+    /// a closure stored into that field.
+    fn record_field_fun_params(&self, module: &[String], ty: &str, field: &str) -> Option<Vec<Type>> {
+        let info = self.program.resolve_type(module, ty)?;
+        let TypeKind::Record { fields, .. } = &info.kind else {
+            return None;
+        };
+        let f = fields.iter().find(|f| f.name == field)?;
+        match f.resolved_ty.as_ref() {
+            Some(Type::Fun(params, _)) if params.iter().all(prepoly_hir::is_fully_known) => {
+                Some(params.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Derive an unannotated closure's parameter types from its OWN body: seed
+    /// the capture locals with their (already resolved) types, lightly infer the
+    /// body, and read what each parameter is CALLED with. An indirect call
+    /// through a typed capture (`(x) -> func(g(x))` where `g: (int32) -> int32`
+    /// is captured) pins `x` even though nothing outside the closure calls it.
+    /// `None` when any parameter stays unpinned.
+    fn closure_params_from_body(
+        &self,
+        id: ClosureId,
+        capture_types: &[Type],
+    ) -> Option<Vec<Type>> {
+        let clo = self.by_closure.get(&id)?;
+        let body = &clo.body;
+        let mut seeded: Vec<Option<Type>> = vec![None; body.locals.len()];
+        for (cap, t) in clo.captures.iter().zip(capture_types) {
+            seeded[cap.index()] = Some(t.clone());
+        }
+        for p in &body.params {
+            if let Some(t) = body.locals[p.index()].ty.as_known() {
+                seeded[p.index()] = Some(t.clone());
+            }
+        }
+        let lt = self.probe_local_types(body, seeded);
+        let mut out: Vec<Option<Type>> = body.params.iter().map(|p| lt[p.index()].clone()).collect();
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                let (MirStmt::Assign(_, rv) | MirStmt::Eval(rv)) = stmt else {
+                    continue;
+                };
+                if let Rvalue::Call(Callee::Indirect(Operand::Local(g)), args) = rv
+                    && let Some(Type::Fun(ps, _)) = lt[g.index()].as_ref()
+                {
+                    for (a, pty) in args.iter().zip(ps) {
+                        if let Operand::Local(al) = a
+                            && let Some(slot) = body.params.iter().position(|p| p == al)
+                            && out[slot].is_none()
+                            && prepoly_hir::is_fully_known(pty)
+                        {
+                            out[slot] = Some(pty.clone());
+                        }
+                    }
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
     fn closure_annotated_params(&self, id: ClosureId) -> Option<Vec<Type>> {
         let clo = self.by_closure.get(&id)?;
         clo.params
@@ -1759,19 +1665,22 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
     }
 
     /// Type a closure local: its captures come from the creation site and its
-    /// parameter types from how it is used -- either an in-body call (direct-call
-    /// closures), when it is passed to a higher-order function (the callee's use of
-    /// that parameter, recovered by probing), or, for an escaping closure, its own
-    /// parameter annotations. Also instantiates the closure body. `None` while any
-    /// operand type is still unresolved.
+    /// parameter types from how it is used -- an in-body call (direct-call
+    /// closures), being passed to a higher-order function (the callee's use of
+    /// that parameter, recovered by probing), initializing a record field with a
+    /// declared function type (the field's signature), or, for an escaping
+    /// closure, its own parameter annotations. Also instantiates the closure
+    /// body. `None` while any operand type is still unresolved.
     #[allow(clippy::too_many_arguments)]
     fn closure_local_type(
         &mut self,
         id: ClosureId,
         captures: &[Operand],
         local: LocalId,
+        module: &[String],
         indirect_args: &HashMap<LocalId, Vec<Operand>>,
         closure_passes: &HashMap<LocalId, (String, Vec<Operand>, usize)>,
+        record_field_closures: &HashMap<LocalId, (LocalId, String, String)>,
         local_types: &[Option<Type>],
     ) -> Result<Option<Type>, String> {
         let mut capture_types = Vec::with_capacity(captures.len());
@@ -1795,12 +1704,46 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         } else if let Some((base, pass_args, idx)) = closure_passes.get(&local) {
             match self.probe_callee_param_types(base, pass_args, *idx, local_types)? {
                 Some(pt) => pt,
-                None => return Ok(None),
+                // The probe cannot answer (the receiver is still untyped, or
+                // the callee never calls the parameter directly -- e.g. it only
+                // re-captures it into another closure). A fully annotated
+                // closure falls back to its own signature, which the checker
+                // has already verified against every use; an unannotated one
+                // waits for a later pass.
+                None => match self.closure_annotated_params(id) {
+                    Some(annotated) => annotated,
+                    None => return Ok(None),
+                },
             }
+        } else if let Some(pt) = record_field_closures.get(&local).and_then(|(dest, ty, field)| {
+            // The closure initializes a record field: the call contract is the
+            // field's declared function signature, or -- for an unannotated
+            // field -- the constructed instance's substitution entry when the
+            // checker seeded the destination local (`Iter { trans: (x) -> .. }`
+            // takes `trans`'s per-instance type from the seed).
+            self.record_field_fun_params(module, ty, field).or_else(|| {
+                match local_types[dest.index()].as_ref() {
+                    Some(Type::Record(n)) => match n.substitution.get(field) {
+                        Some(Type::Fun(params, _))
+                            if params.iter().all(prepoly_hir::is_fully_known) =>
+                        {
+                            Some(params.clone())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            })
+        }) {
+            pt
         } else if let Some(annotated) = self.closure_annotated_params(id) {
             // An escaping closure (returned): type it from its own parameter
             // annotations rather than a call/pass site.
             annotated
+        } else if let Some(pt) = self.closure_params_from_body(id, &capture_types) {
+            // Derived from the closure's OWN body: an indirect call through a
+            // typed capture pins the parameter it is called with.
+            pt
         } else {
             return Err(format!(
                 "closure _{} is neither called nor passed to a function nor fully \
@@ -1824,27 +1767,41 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         caller_local_types: &[Option<Type>],
     ) -> Result<Option<Vec<Type>>, String> {
         // `base` is the callee name. For a stdlib primitive/array method passed a
-        // closure (`arr.map(f)`), its body lives under the class-qualified symbol,
-        // not the bare name; recover it from the receiver argument's class.
-        let func = match self.by_fn.get(base) {
-            Some(f) => *f,
+        // closure (`arr.map(f)`), its body lives under the class-qualified symbol;
+        // for a user METHOD (`iter.map_lazy(f)`) it lives in the method table
+        // keyed by the receiver's type symbol. Both are recovered from the
+        // receiver argument (the first call operand).
+        let body = match self.by_fn.get(base) {
+            Some(f) => &f.body,
             None => {
-                let recv_class = pass_args
+                let recv_ty = pass_args
                     .first()
-                    .and_then(|a| self.operand_type(a, caller_local_types).ok().flatten())
-                    .and_then(|t| t.primitive_class());
-                let sym = recv_class.and_then(|class| {
-                    self.program
-                        .primitive_methods
-                        .get(&(class.to_string(), base.to_string()))
-                });
-                match sym.and_then(|s| self.by_fn.get(s.as_str())) {
-                    Some(f) => *f,
+                    .and_then(|a| self.operand_type(a, caller_local_types).ok().flatten());
+                let prim = recv_ty
+                    .as_ref()
+                    .and_then(|t| t.primitive_class())
+                    .and_then(|class| {
+                        self.program
+                            .primitive_methods
+                            .get(&(class.to_string(), base.to_string()))
+                    })
+                    .and_then(|s| self.by_fn.get(s.as_str()))
+                    .map(|f| &f.body);
+                let user = recv_ty
+                    .as_ref()
+                    .map(unwrap_nullable)
+                    .and_then(|t| match t {
+                        Type::Record(n) | Type::Sum(n) => self.program.type_by_id(n.id),
+                        _ => None,
+                    })
+                    .and_then(|info| self.by_method.get(&(info.symbol.as_str(), base)))
+                    .map(|m| &m.body);
+                match prim.or(user) {
+                    Some(b) => b,
                     None => return Ok(None),
                 }
             }
         };
-        let body = &func.body;
         let mut seeded: Vec<Option<Type>> = vec![None; body.locals.len()];
         for (i, p) in body.params.iter().enumerate() {
             if i == idx {
@@ -2146,149 +2103,6 @@ fn method_ret_annotation(program: &Program, type_symbol: &str, method: &str) -> 
         .filter(is_supported)
 }
 
-/// The default concrete type of a constant literal (integers default to int32,
-/// floats to float64). Errors on non-scalar constants.
-fn const_type(lit: &prepoly_mir::Literal) -> Result<Type, String> {
-    use prepoly_mir::Literal;
-    match lit {
-        // An integer literal defaults by magnitude: int32 when it fits, int64
-        // otherwise (a 64-bit constant like INT64_MAX must not truncate).
-        Literal::Int(v) => Ok(Type::Int(int_literal_kind(*v))),
-        Literal::Float(_) => Ok(Type::Float(FloatKind::F64)),
-        Literal::Bool(_) => Ok(Type::Bool),
-        Literal::Void => Ok(Type::Void),
-        Literal::Str(_) => Ok(Type::Str),
-        // The null literal: a nullable whose element type is unconstrained here
-        // (it unifies with the contextual `T?` it is coerced to).
-        Literal::Null => Ok(Type::Nullable(Box::new(Type::Never))),
-    }
-}
-
-/// Whether a type is in the typed back end's scope: scalars, and records whose
-/// fields are all supported (a fully-resolved field-type substitution).
-fn is_supported(ty: &Type) -> bool {
-    is_supported_rec(ty, &mut HashSet::new())
-}
-
-/// `is_supported` with a guard against self-referential record types (e.g.
-/// `type Node = { next: Node? }`): a nominal already on the visiting path is assumed
-/// supported, so the check terminates. A recursive field is a heap pointer, so the
-/// layout is finite even though the type definition is cyclic.
-/// Fill a record's field-type substitution from its HIR declaration when it is a
-/// bare reference (empty substitution -- a sum variant field's declared type once
-/// bound, or a nested declared field). The resolved record is self-describing, so
-/// `is_supported` and field-access inference treat it like a constructed value
-/// without relaxing the support check for genuinely-unresolved types. Recurses into
-/// field and wrapper types; a record already being resolved (a cycle such as
-/// `Node { next: Node? }`) is left bare and handled by `is_supported_rec`'s visiting
-/// guard. A sum carries no value substitution (its layout comes from the HIR), so it
-/// is already self-describing and left as is.
-fn resolve_nominal(program: &Program, ty: &Type) -> Type {
-    fn go(program: &Program, ty: &Type, stack: &mut HashSet<i32>) -> Type {
-        match ty {
-            Type::Record(n) if n.substitution.is_empty() && !n.is_name("File") => {
-                let Some(info) = program.type_by_id(n.id) else {
-                    return ty.clone();
-                };
-                let TypeKind::Record { fields, .. } = &info.kind else {
-                    return ty.clone();
-                };
-                if !stack.insert(n.id) {
-                    return ty.clone(); // already resolving this type: a cycle
-                }
-                let mut subst = Substitution::empty();
-                for f in fields {
-                    if let Some(t) = &f.resolved_ty {
-                        subst.insert(f.name.clone(), go(program, t, stack));
-                    }
-                }
-                stack.remove(&n.id);
-                Type::Record(NominalType::with_substitution(n.id, n.name.clone(), subst))
-            }
-            Type::Nullable(inner) => Type::Nullable(Box::new(go(program, inner, stack))),
-            Type::Slice(inner) => Type::Slice(Box::new(go(program, inner, stack))),
-            Type::Array(inner, k) => Type::Array(Box::new(go(program, inner, stack)), *k),
-            _ => ty.clone(),
-        }
-    }
-    go(program, ty, &mut HashSet::new())
-}
-
-/// Whether a sum variant's field can be laid out by the typed back end. An
-/// unannotated field with no inferred type (`None`/`Unknown`) is allowed as long
-/// as it is never accessed: it occupies an opaque, pointer-sized slot. Any other
-/// field type must be concretely supported once its nominal references are resolved
-/// (a record/sum field is a heap pointer whose own layout is monomorphized
-/// independently).
-fn variant_field_layoutable(program: &Program, ty: &Option<Type>) -> bool {
-    match ty {
-        None | Some(Type::Unknown(_)) => true,
-        Some(t) => is_supported(&resolve_nominal(program, t)),
-    }
-}
-
-fn is_supported_rec(ty: &Type, visiting: &mut HashSet<i32>) -> bool {
-    match ty {
-        Type::Bool | Type::Int(_) | Type::Float(_) | Type::Void | Type::Str => true,
-        // `Never` only types values on a statically-unreachable path -- e.g. the
-        // truthy arm of `if x` for a bare `null` (`never?`), where narrowing
-        // yields `never`. The arm is type-checked (so payloads still infer) but
-        // the back end skips emitting it, so an opaque placeholder slot suffices.
-        Type::Never => true,
-        // `File` is a builtin opaque handle (a runtime file descriptor object), not
-        // a user record with fields, so it is supported despite an empty field set.
-        Type::Record(n) if n.is_name("File") => true,
-        Type::Record(n) => {
-            if !visiting.insert(n.id) {
-                return true; // already on the path: a self-reference, finite layout
-            }
-            // A bare reference (empty substitution -- a field's declared nominal
-            // type, or a sum variant binding) is a supported heap pointer; its own
-            // field concreteness is validated when the record is monomorphized as a
-            // value. A substituted (constructed/generic) record additionally
-            // requires every field type to be supported. This mirrors how a `Sum`
-            // is trusted as a pointer below.
-            let ok = !n.substitution.is_empty()
-                && n.substitution
-                    .iter()
-                    .all(|(_, t)| is_supported_rec(t, visiting));
-            visiting.remove(&n.id);
-            ok
-        }
-        // A bare sum reference (empty substitution) is a supported heap pointer
-        // whose per-variant field concreteness is checked at construction
-        // (`variant_type`). A substituted sum -- a constructed `Result<T, E>` --
-        // additionally requires its payload types to be supported, so an open `T!`
-        // error payload (an unresolved `Unknown`) is rejected here. That makes a
-        // `-> T!` signature's annotation unsupported, so `instantiate_fn` drops it
-        // and the engine infers the concrete `Result` from the body instead.
-        Type::Sum(n) => {
-            if !visiting.insert(n.id) {
-                return true; // already on the path: a self-reference, finite layout
-            }
-            let ok = n.substitution.is_empty()
-                || n.substitution
-                    .iter()
-                    .all(|(_, t)| is_supported_rec(t, visiting));
-            visiting.remove(&n.id);
-            ok
-        }
-        Type::Slice(elem) | Type::Array(elem, _) => is_supported_rec(elem, visiting),
-        // A tuple is a fixed heterogeneous aggregate; supported when every element is.
-        Type::Tuple(elems) => elems.iter().all(|t| is_supported_rec(t, visiting)),
-        // A closure value (a typed environment + function pointer).
-        Type::Fun(params, ret) => {
-            params.iter().all(|p| is_supported_rec(p, visiting)) && is_supported_rec(ret, visiting)
-        }
-        // A nullable value (a heap cell pointer, null = null pointer). `Never` is
-        // the element type of the bare `null` literal until it is coerced.
-        Type::Nullable(inner) => {
-            matches!(**inner, Type::Never) || is_supported_rec(inner, visiting)
-        }
-        _ => false,
-    }
-}
-
 pub fn is_comparison(op: BinOp) -> bool {
     matches!(
         op,
@@ -2301,94 +2115,6 @@ pub fn operand_type_of(op: &Operand, local_types: &[Type]) -> Type {
     match op {
         Operand::Local(id) => local_types[id.index()].clone(),
         Operand::Const(lit) => const_type(lit).unwrap_or(Type::Void),
-    }
-}
-
-/// The blocks reachable from the entry once statically-known `if` conditions are
-/// folded: a `never?` condition (a bare `null`, always null) is taken as false
-/// and a non-nullable / non-bool condition (always truthy) as true, so the dead
-/// arm is never visited. The typed back end uses this to skip emitting an arm
-/// that cannot run -- and the unwrapped `never` values it would otherwise
-/// contain (e.g. `a * 2` where `a` is a bare `null`) -- while monomorphization
-/// still types both arms so a fallible callable's `Result` payloads infer from
-/// whichever arm supplies each.
-pub fn reachable_blocks(body: &MirBody, local_types: &[Type], ret: &Type) -> Vec<bool> {
-    let mut reached = vec![false; body.blocks.len()];
-    let mut stack = vec![body.entry];
-    while let Some(id) = stack.pop() {
-        if std::mem::replace(&mut reached[id.index()], true) {
-            continue;
-        }
-        match &body.block(id).term {
-            Terminator::Goto(b) => stack.push(*b),
-            Terminator::CondBranch { cond, then, els } => {
-                match cond_static_truthiness(body, local_types, ret, cond, *then) {
-                    Some(true) => stack.push(*then),
-                    Some(false) => stack.push(*els),
-                    None => {
-                        stack.push(*then);
-                        stack.push(*els);
-                    }
-                }
-            }
-            Terminator::Return(_) | Terminator::Unreachable => {}
-        }
-    }
-    reached
-}
-
-/// The effective static truthiness of an `if` condition, used to fold a branch.
-/// Beyond the operand's own static truthiness, a *structural* `if` folds to false
-/// when its then-branch cannot type for this concrete value: its reachable return
-/// is a clear primitive-kind mismatch against the function's return type (a
-/// structural field that is absent -- already `never?` -- or present at the wrong
-/// type). The front end prunes the same dead arm; here the back end skips emitting
-/// it so a generic function applied to a non-fitting structure degrades gracefully
-/// (the guarded use is dead) rather than miscompiling.
-pub fn cond_static_truthiness(
-    body: &MirBody,
-    local_types: &[Type],
-    ret: &Type,
-    cond: &Operand,
-    then: BlockId,
-) -> Option<bool> {
-    if then_return_conflicts(body, local_types, ret, then) {
-        return Some(false);
-    }
-    operand_type_of(cond, local_types).static_truthiness()
-}
-
-/// Whether the then-branch reached unconditionally from `then` ends in a `return`
-/// whose value's primitive kind clearly differs from `ret` (no coercion bridges
-/// `string` vs `int`, etc.). A nested branch in the then-arm is not folded.
-fn then_return_conflicts(body: &MirBody, local_types: &[Type], ret: &Type, then: BlockId) -> bool {
-    // In a fallible callable a bare `return v` is the `Ok` payload, so compare the
-    // returned value against the Ok payload type, not the whole `Result`.
-    let target = match ret {
-        Type::Sum(n) if n.id == RESULT_TYPE_ID => {
-            n.result_payloads().map(|(ok, _)| ok).unwrap_or(ret)
-        }
-        _ => ret,
-    };
-    let mut id = then;
-    let mut seen = HashSet::new();
-    loop {
-        if !seen.insert(id.index()) {
-            return false;
-        }
-        match &body.block(id).term {
-            Terminator::Return(op) => {
-                let op_ty = operand_type_of(op, local_types);
-                // A returned `Result` flows whole; only a bare value is the Ok
-                // payload, so only it is compared against the Ok type.
-                if matches!(&op_ty, Type::Sum(n) if n.id == RESULT_TYPE_ID) {
-                    return false;
-                }
-                return primitive_kind_conflict(&op_ty, target);
-            }
-            Terminator::Goto(b) => id = *b,
-            _ => return false,
-        }
     }
 }
 
@@ -2453,170 +2179,6 @@ fn body_has_error_source(body: &MirBody) -> bool {
     })
 }
 
-/// Whether `a` and `b` are concrete primitives of different kinds (string/bool/
-/// int/float), a mismatch no numeric conversion bridges. Non-primitive types are
-/// treated as non-conflicting (conservative -- the fold only targets clear cases).
-fn primitive_kind_conflict(a: &Type, b: &Type) -> bool {
-    fn kind(t: &Type) -> Option<u8> {
-        match t {
-            Type::Str => Some(0),
-            Type::Bool => Some(1),
-            Type::Int(_) => Some(2),
-            Type::Float(_) => Some(3),
-            _ => None,
-        }
-    }
-    matches!((kind(a), kind(b)), (Some(x), Some(y)) if x != y)
-}
-
-/// Check that a binary operator's operands have compatible, in-scope types.
-fn check_bin(op: BinOp, a: &Type, b: &Type) -> Result<(), String> {
-    // `x == null` / `x != null` (or comparing nullables) is a null/identity test.
-    if matches!(op, BinOp::Eq | BinOp::Ne)
-        && (matches!(a, Type::Nullable(_)) || matches!(b, Type::Nullable(_)))
-    {
-        return Ok(());
-    }
-    // A nullable operand in an arithmetic/comparison context is narrowed to its
-    // element type (valid programs guard for null first); the back end unwraps it.
-    let a = unwrap_nullable(a);
-    let b = unwrap_nullable(b);
-    // `never` is the bottom type: it only reaches here on a statically-dead path
-    // (a bare `null` narrowed in an always-false `if` arm), which the back end
-    // never emits, so any operator over it is vacuously well-typed.
-    if matches!(a, Type::Never) || matches!(b, Type::Never) {
-        return Ok(());
-    }
-    let same = a == b;
-    let integer = |t: &Type| matches!(t, Type::Int(_));
-    let both_int = integer(a) && integer(b);
-    match op {
-        // `+` is numeric addition or string concatenation. Two integers may
-        // differ in width (a literal adapts to the other's type; the back end
-        // coerces both to the operand type).
-        // Numeric operands of differing types implicitly convert to their common
-        // type (mixed width, signedness, and int-with-float); `+` also concatenates
-        // two strings.
-        BinOp::Add => {
-            if prepoly_hir::common_numeric_type(a, b).is_some() || (same && matches!(a, Type::Str))
-            {
-                Ok(())
-            } else {
-                Err(format!(
-                    "`Add` needs two numeric/string operands, got {} and {}",
-                    a.display(),
-                    b.display()
-                ))
-            }
-        }
-        BinOp::Sub | BinOp::Mul | BinOp::Div => {
-            if prepoly_hir::common_numeric_type(a, b).is_some() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "`{op:?}` needs two numeric operands, got {} and {}",
-                    a.display(),
-                    b.display()
-                ))
-            }
-        }
-        // Remainder is integer-only but the widths may differ (coerced to the
-        // common int); the bitwise/shift operators need two equal integers.
-        BinOp::Rem => {
-            if both_int {
-                Ok(())
-            } else {
-                Err(format!(
-                    "`Rem` needs two integer operands, got {} and {}",
-                    a.display(),
-                    b.display()
-                ))
-            }
-        }
-        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
-            if same && integer(a) {
-                Ok(())
-            } else {
-                Err(format!(
-                    "`{op:?}` needs two equal integer operands, got {} and {}",
-                    a.display(),
-                    b.display()
-                ))
-            }
-        }
-        // A numeric comparison converts mixed operands to a common type; equality
-        // also applies to two bools or two strings.
-        BinOp::Eq | BinOp::Ne => {
-            if prepoly_hir::common_numeric_type(a, b).is_some()
-                || (same && matches!(a, Type::Bool | Type::Str))
-            {
-                Ok(())
-            } else {
-                Err(format!(
-                    "`{op:?}` needs two comparable operands, got {} and {}",
-                    a.display(),
-                    b.display()
-                ))
-            }
-        }
-        BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-            if prepoly_hir::common_numeric_type(a, b).is_some() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "`{op:?}` needs two comparable numeric operands, got {} and {}",
-                    a.display(),
-                    b.display()
-                ))
-            }
-        }
-        BinOp::And | BinOp::Or => Err(format!("`{op:?}` is unsupported on the typed backend")),
-    }
-}
-
-/// Shared operand-type rule used by both the typer and the typed dispatch to
-/// pick a binary op's operand type: for two integers of different widths, the
-/// wider (so a narrower operand is coerced up); otherwise a `Local` operand's
-/// type, preferring a non-constant.
-pub fn binary_operand_type(a: &Operand, b: &Operand, local_types: &[Type]) -> Type {
-    let ra = operand_type_of(a, local_types);
-    let rb = operand_type_of(b, local_types);
-    // A comparison against the null literal keeps the nullable type (the back end
-    // compares pointers); other nullables narrow to their element type.
-    let null_lit = |t: &Type| matches!(t, Type::Nullable(inner) if matches!(**inner, Type::Never));
-    if null_lit(&ra) {
-        return rb;
-    }
-    if null_lit(&rb) {
-        return ra;
-    }
-    let ta = unwrap_nullable(&ra).clone();
-    let tb = unwrap_nullable(&rb).clone();
-    let a_local = matches!(a, Operand::Local(_));
-    let b_local = matches!(b, Operand::Local(_));
-    // An integer literal adapts to a variable's int type (e.g. `byte - 32` stays
-    // uint8) rather than forcing a common type.
-    if let (Type::Int(_), Type::Int(_)) = (&ta, &tb) {
-        match (a_local, b_local) {
-            (true, false) => return ta,
-            (false, true) => return tb,
-            _ => {}
-        }
-    }
-    // Otherwise mixed numeric operands implicitly convert to their common type
-    // (wider width, signedness, and int-with-float).
-    if let Some(common) = prepoly_hir::common_numeric_type(&ta, &tb) {
-        return common;
-    }
-    if a_local {
-        ta
-    } else if b_local {
-        tb
-    } else {
-        ta
-    }
-}
-
 /// Scan a body for indirect (closure) calls, mapping each *defining* closure
 /// local to the argument operands of its call site. Used to type direct-call
 /// closures, whose parameter types come from the call rather than the
@@ -2652,7 +2214,41 @@ fn collect_indirect_args(body: &MirBody) -> HashMap<LocalId, Vec<Operand>> {
                                 .or_insert_with(|| vec![obj.clone()]);
                         }
                     }
+                    // `_with_all(f, c0, ...)` invokes a zero-argument `f` (the
+                    // guarded body references the cowns as captures, not params).
+                    "_with_all" => {
+                        if let Some(Operand::Local(c)) = args.first() {
+                            out.entry(resolve_alias(&alias, *c)).or_default();
+                        }
+                    }
                     _ => {}
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Scan a body for locals stored as record-literal field values, mapping each
+/// (alias-resolved) defining local to `(destination local, record type name,
+/// field name)`. Used to type a closure that initializes a function-typed
+/// field: it is neither called in the body nor passed to a function, so its
+/// parameter types come from the field's declared signature, or -- for an
+/// unannotated field -- from the constructed instance's checker-seeded
+/// substitution on the destination local. Non-closure locals also land in the
+/// map; only closure typing consults it, so the extra entries are inert.
+fn collect_record_field_closures(body: &MirBody) -> HashMap<LocalId, (LocalId, String, String)> {
+    let alias = use_aliases(body);
+    let mut out: HashMap<LocalId, (LocalId, String, String)> = HashMap::new();
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            let MirStmt::Assign(dest, Rvalue::Record { ty, fields }) = stmt else {
+                continue;
+            };
+            for (fname, op) in fields {
+                if let Operand::Local(l) = op {
+                    out.entry(resolve_alias(&alias, *l))
+                        .or_insert_with(|| (*dest, ty.clone(), fname.clone()));
                 }
             }
         }
@@ -2689,41 +2285,6 @@ fn collect_closure_passes(body: &MirBody) -> HashMap<LocalId, (String, Vec<Opera
         }
     }
     out
-}
-
-/// Scan a body for `arr.push(elem)` calls, mapping each array local (resolved
-/// through `Use` aliases) to a pushed element operand. Used to infer the element
-/// Join two return-operand types of an unannotated non-fallible callable. The
-/// front end has already checked the returns are mutually consistent, so this only
-/// reconciles the nullable/never lattice: a `return null` path (`never?`) combined
-/// with a value-returning path yields that value's nullable type, and an
-/// unreachable `Never` arm is absorbed by the other. Without this join the inferred
-/// return type would be whichever return block the fixpoint typed first, so a `get`
-/// returning `value` or `null` could freeze to the bare `value` type and then have
-/// its `null` path rejected as "returns a null value where `T` is required".
-fn merge_return_types(a: &Type, b: &Type) -> Type {
-    fn nullable_of(t: Type) -> Type {
-        match t {
-            Type::Nullable(_) => t,
-            other => Type::Nullable(Box::new(other)),
-        }
-    }
-    match (a, b) {
-        _ if a == b => a.clone(),
-        // `Never` types only a statically-unreachable path; the other arm wins.
-        (Type::Never, _) => b.clone(),
-        (_, Type::Never) => a.clone(),
-        (Type::Nullable(x), Type::Nullable(y)) => {
-            Type::Nullable(Box::new(merge_return_types(x, y)))
-        }
-        // One nullable and one bare value (commonly `never?` from `null` vs a real
-        // value): the result is nullable over the joined element type.
-        (Type::Nullable(x), y) => nullable_of(merge_return_types(x, y)),
-        (x, Type::Nullable(y)) => nullable_of(merge_return_types(x, y)),
-        // Two distinct non-null types should not occur in a checked program; keep
-        // the first so inference stays deterministic rather than panicking.
-        _ => a.clone(),
-    }
 }
 
 /// type of an empty array literal `[]` from how it is later filled.

@@ -36,13 +36,14 @@ struct MirSlot<'ctx> {
 /// `rc_managed`): a destructor releases such a contained field/element. Releasing a
 /// closure field frees its block (its captures are released by their own owners).
 /// Peel the front-end wrappers that do not change a value's runtime shape
-/// (mutability, reference-ness, const-ness, and a narrowing nullable cell) to
-/// reach the underlying type a deep copy dispatches on.
+/// (mutability, reference-ness, const-ness) to reach the underlying type a
+/// deep copy dispatches on. A nullable is deliberately *not* peeled: at runtime
+/// it is a heap cell `{ header16 | value@16 }` around the value (null = null
+/// pointer), so a deep copy must rebuild the cell rather than reinterpret the
+/// cell pointer as the inner value.
 fn unwrap_copy_wrappers(ty: &Type) -> &Type {
     match ty {
-        Type::Mut(inner) | Type::Ref(inner) | Type::ConstOf(inner) | Type::Nullable(inner) => {
-            unwrap_copy_wrappers(inner)
-        }
+        Type::Mut(inner) | Type::Ref(inner) | Type::ConstOf(inner) => unwrap_copy_wrappers(inner),
         _ => ty,
     }
 }
@@ -64,6 +65,11 @@ fn is_managed_heap(ty: &Type) -> bool {
 /// managed object, or a nullable cell (itself a heap object holding a value). This
 /// is broader than `is_managed_heap` because a cycle is typically bootstrapped
 /// through a nullable field (`next: Node?`).
+///
+/// This is also the *release* predicate for a destructor's contained
+/// fields/elements/captures, and must stay extensionally equal to the engine's
+/// `rc_managed`: every store the engine retains (which includes nullable cells)
+/// must be released on drop, or the cell -- and whatever it owns -- leaks.
 fn is_traced(ty: &Type) -> bool {
     is_managed_heap(ty) || matches!(ty, Type::Nullable(_))
 }
@@ -546,7 +552,9 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
                 if let Some((tag, fields)) = self.variant_layout(n, &name) {
                     let heap: Vec<(Type, BasicTypeEnum<'ctx>, u64)> = fields
                         .into_iter()
-                        .filter(|(_, fty, _)| is_managed_heap(fty))
+                        // `is_traced`, not `is_managed_heap`: a nullable payload
+                        // field is a retained heap cell and must be released too.
+                        .filter(|(_, fty, _)| is_traced(fty))
                         .map(|(_, fty, off)| {
                             let ll = self.abi.typed_basic(&fty);
                             (fty, ll, off)
@@ -560,6 +568,13 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
         }
 
         let saved = self.builder.get_insert_block();
+        // Field/capture releases may append their own control flow to the
+        // CURRENT function (`release_closure` null-guards through `cur_fn`), so
+        // the destructor must be the current function while its body is emitted
+        // -- otherwise those blocks land in whatever function triggered the
+        // emission and the module fails verification.
+        let saved_fn = self.cur_fn;
+        self.cur_fn = Some(f);
         let entry = self.ctx.append_basic_block(f, "entry");
         let live = self.ctx.append_basic_block(f, "live");
         let drop_bb = self.ctx.append_basic_block(f, "drop");
@@ -608,7 +623,9 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
                 .build_load(self.abi.ptr(), self.field_ptr(obj, 32), "data")
                 .unwrap()
                 .into_pointer_value();
-            if is_managed_heap(&elem) {
+            // `is_traced`, not `is_managed_heap`: a `T?[]` element is a retained
+            // nullable heap cell, so skipping it leaked every element cell.
+            if is_traced(&elem) {
                 let len = self
                     .builder
                     .build_load(i64t, self.field_ptr(obj, 16), "len")
@@ -690,6 +707,7 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
         self.builder.position_at_end(done_bb);
         self.builder.build_return(None).unwrap();
 
+        self.cur_fn = saved_fn;
         if let Some(b) = saved {
             self.builder.position_at_end(b);
         }
@@ -721,14 +739,23 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
         self.destructors.insert(key, f);
 
         // Collect managed captures (type, llvm type, offset) before emitting.
+        // `is_traced`, not `is_managed_heap`: a captured nullable is a retained
+        // heap cell the environment owns, so it must be released as well.
         let managed: Vec<(Type, BasicTypeEnum<'ctx>, u64)> = capture_types
             .iter()
             .zip(offsets)
-            .filter(|(t, _)| is_managed_heap(t))
+            .filter(|(t, _)| is_traced(t))
             .map(|(t, off)| (t.clone(), self.abi.typed_basic(t), off))
             .collect();
 
         let saved = self.builder.get_insert_block();
+        // Field/capture releases may append their own control flow to the
+        // CURRENT function (`release_closure` null-guards through `cur_fn`), so
+        // the destructor must be the current function while its body is emitted
+        // -- otherwise those blocks land in whatever function triggered the
+        // emission and the module fails verification.
+        let saved_fn = self.cur_fn;
+        self.cur_fn = Some(f);
         let entry = self.ctx.append_basic_block(f, "entry");
         let live = self.ctx.append_basic_block(f, "live");
         let drop_bb = self.ctx.append_basic_block(f, "drop");
@@ -764,6 +791,7 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
         self.builder.build_unconditional_branch(done_bb).unwrap();
         self.builder.position_at_end(done_bb);
         self.builder.build_return(None).unwrap();
+        self.cur_fn = saved_fn;
         if let Some(b) = saved {
             self.builder.position_at_end(b);
         }
@@ -851,6 +879,39 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
             None => tmp.position_at_end(entry),
         }
         tmp.build_alloca(ty, name).unwrap()
+    }
+
+    /// Call a `void(ptr, i64)` runtime group-lock entry (`pp_lock_span` /
+    /// `pp_unlock_span`) on a stack span holding `objs`. The span buffer is an
+    /// entry-block alloca (not a positional one), so a group wrap inside a loop
+    /// reuses one slot instead of growing the stack every iteration.
+    fn cown_span_call(&mut self, entry: &str, objs: &[BasicValueEnum<'ctx>]) {
+        let ptr_ty = self.abi.ptr();
+        let arr_ty = ptr_ty.array_type(objs.len() as u32);
+        let slot = self.typed_alloca(arr_ty.into(), "cown_span");
+        let i32t = self.ctx.i32_type();
+        for (i, o) in objs.iter().enumerate() {
+            let gep = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        arr_ty,
+                        slot,
+                        &[i32t.const_zero(), i32t.const_int(i as u64, false)],
+                        "cown_slot",
+                    )
+                    .unwrap()
+            };
+            self.builder.build_store(gep, *o).unwrap();
+        }
+        let ty = self
+            .ctx
+            .void_type()
+            .fn_type(&[ptr_ty.into(), self.abi.i64t().into()], false);
+        let f = self.abi.runtime_fn(&self.module, entry, ty);
+        let n = self.abi.i64t().const_int(objs.len() as u64, false);
+        self.builder
+            .build_call(f, &[slot.into(), n.into()], "")
+            .unwrap();
     }
 
     /// The unit/void placeholder value (an `i1 0`); never observed.
@@ -1012,7 +1073,9 @@ fn int_predicate(op: BinOp, signed: bool) -> IntPredicate {
 fn float_predicate(op: BinOp) -> FloatPredicate {
     match op {
         BinOp::Eq => FloatPredicate::OEQ,
-        BinOp::Ne => FloatPredicate::ONE,
+        // `!=` is *unordered* not-equal so `NaN != NaN` is true, matching IEEE 754
+        // (and Rust/the interpreter); ordered ONE made it false.
+        BinOp::Ne => FloatPredicate::UNE,
         BinOp::Lt => FloatPredicate::OLT,
         BinOp::Gt => FloatPredicate::OGT,
         BinOp::Le => FloatPredicate::OLE,
@@ -1221,6 +1284,26 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
     /// Wrap a value into a nullable's heap cell `{ header16 | value@16 }`,
     /// returning the (non-null) pointer.
     fn nullable_wrap(&mut self, v: BasicValueEnum<'ctx>, inner: &Type) -> BasicValueEnum<'ctx> {
+        let base = self.nullable_cell_owning(v, inner);
+        // The cell now holds a reference to its value; retain it (the cell's
+        // destructor releases it) so the value lives as long as the cell. This also
+        // makes a `next: Node?` self-cycle a real cycle (the node's count stays above
+        // zero), which the cycle collector -- not reference counting -- reclaims.
+        if is_traced(inner) {
+            self.retain(v);
+        }
+        base
+    }
+
+    /// Allocate a nullable cell around `v` *without* retaining it: the cell takes
+    /// over the caller's reference (used where `v` is a fresh value nothing else
+    /// drops, e.g. a deep copy). [`nullable_wrap`] adds the retain for the aliased
+    /// case.
+    fn nullable_cell_owning(
+        &mut self,
+        v: BasicValueEnum<'ctx>,
+        inner: &Type,
+    ) -> BasicValueEnum<'ctx> {
         let (size, _) = type_size_align(inner);
         let cell = align_up(16 + size, 8);
         let alloc_ty = self.abi.ptr().fn_type(&[self.abi.i64t().into()], false);
@@ -1236,24 +1319,45 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
             .into_pointer_value();
         let p = self.field_ptr(base, 16);
         self.builder.build_store(p, v).unwrap();
-        // The cell now holds a reference to its value; retain it (the cell's
-        // destructor releases it) so the value lives as long as the cell. This also
-        // makes a `next: Node?` self-cycle a real cycle (the node's count stays above
-        // zero), which the cycle collector -- not reference counting -- reclaims.
-        if is_traced(inner) {
-            self.retain(v);
-        }
         // A nullable cell wrapping a heap reference can be a cycle link (e.g. a
         // `next: Node?` field), so register it with the cycle collector.
         self.register_for_gc(base.into(), &Type::Nullable(Box::new(inner.clone())));
         base.into()
     }
 
-    /// Read the value out of a non-null nullable cell (narrowing).
-    fn nullable_unwrap(&self, v: BasicValueEnum<'ctx>, to: &Type) -> BasicValueEnum<'ctx> {
+    /// Read the value out of a nullable cell (narrowing). The cell is null-checked
+    /// first: a null cell yields the target type's zero value (a null pointer for a
+    /// managed target, 0 for a scalar) instead of dereferencing null. A checked
+    /// narrowing is always guarded by an explicit null test, but this coercion is
+    /// also emitted where a possibly-null value flows into a non-nullable position
+    /// (e.g. a `string?` operand of string `==`); the zero value keeps that path
+    /// defined, matching the interpreter (which treats the value as absent rather
+    /// than crashing).
+    fn nullable_unwrap(&mut self, v: BasicValueEnum<'ctx>, to: &Type) -> BasicValueEnum<'ctx> {
         let llty = self.abi.typed_basic(to);
-        let p = self.field_ptr(v.into_pointer_value(), 16);
-        self.builder.build_load(llty, p, "nv").unwrap()
+        let f = self.cur_fn.unwrap();
+        let cell = v.into_pointer_value();
+        let entry = self.builder.get_insert_block().unwrap();
+        let load_bb = self.ctx.append_basic_block(f, "nv_load");
+        let done_bb = self.ctx.append_basic_block(f, "nv_done");
+        let is_null = self.builder.build_is_null(cell, "nv_isnull").unwrap();
+        self.builder
+            .build_conditional_branch(is_null, done_bb, load_bb)
+            .unwrap();
+        self.builder.position_at_end(load_bb);
+        let p = self.field_ptr(cell, 16);
+        let loaded = self.builder.build_load(llty, p, "nv").unwrap();
+        self.builder.build_unconditional_branch(done_bb).unwrap();
+        self.builder.position_at_end(done_bb);
+        let phi = self.builder.build_phi(llty, "nv_phi").unwrap();
+        // `typed_basic` only produces int/float/pointer representations.
+        let zero: BasicValueEnum<'ctx> = match llty {
+            BasicTypeEnum::IntType(t) => t.const_zero().into(),
+            BasicTypeEnum::FloatType(t) => t.const_zero().into(),
+            _ => llty.into_pointer_type().const_null().into(),
+        };
+        phi.add_incoming(&[(&zero, entry), (&loaded, load_bb)]);
+        phi.as_basic_value()
     }
 
     /// The concrete type of a sum variant's field: a `Result`-style generic sum
@@ -1572,6 +1676,34 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
                 self.make_tuple(elems, &copied)
             }
             Type::Sum(n) => self.deep_copy_sum(f, ty, n, obj),
+            // A nullable cell: null copies to null; a present cell is rebuilt
+            // around a deep copy of its value, so a `T?` field / `T?[]` element
+            // copy shares no mutable storage with the original (sharing the cell
+            // would let the copy see later reassignments through it).
+            Type::Nullable(inner) => {
+                let slot = self.builder.build_alloca(ptrt, "ncopy").unwrap();
+                self.builder.build_store(slot, ptrt.const_null()).unwrap();
+                let live = self.ctx.append_basic_block(f, "nn");
+                let done = self.ctx.append_basic_block(f, "nn_done");
+                let is_null = self.builder.build_is_null(obj, "isnull").unwrap();
+                self.builder
+                    .build_conditional_branch(is_null, done, live)
+                    .unwrap();
+                self.builder.position_at_end(live);
+                let llty = self.abi.typed_basic(inner);
+                let v = self
+                    .builder
+                    .build_load(llty, self.field_ptr(obj, 16), "nv")
+                    .unwrap();
+                let copied = self.deep_copy(v, inner);
+                // The fresh cell takes over the copy's reference (nothing else
+                // drops it), so no retain -- the cell's destructor releases it.
+                let cell = self.nullable_cell_owning(copied, inner);
+                self.builder.build_store(slot, cell).unwrap();
+                self.builder.build_unconditional_branch(done).unwrap();
+                self.builder.position_at_end(done);
+                self.builder.build_load(ptrt, slot, "ncopy").unwrap()
+            }
             Type::Slice(_) | Type::Array(..) => {
                 let elem = prepoly_engine::element_type(ty);
                 let (esize, _) = type_size_align(&elem);
@@ -1976,6 +2108,10 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
     }
 
     fn execute(&mut self) -> Result<(), String> {
+        // Debugging aid: dump the finalized LLVM module when requested.
+        if std::env::var("PREPOLY_DUMP_IR").is_ok() {
+            self.module.print_to_stderr();
+        }
         let inits = self.mir.init_symbols.clone();
         let frozen = self.mir.frozen_globals.clone();
         let engine = self
@@ -2702,15 +2838,74 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
                     BinOp::Add => b_.build_int_add(x, y, "add").unwrap(),
                     BinOp::Sub => b_.build_int_sub(x, y, "sub").unwrap(),
                     BinOp::Mul => b_.build_int_mul(x, y, "mul").unwrap(),
-                    BinOp::Div if signed => b_.build_int_signed_div(x, y, "div").unwrap(),
+                    // Signed division/remainder wrap on overflow like the
+                    // interpreter (`wrapping_div`/`wrapping_rem`): raw sdiv/srem
+                    // is UB for `MIN / -1`, so the overflowing pair's divisor is
+                    // replaced by 1, yielding exactly the wrapped results (MIN
+                    // and 0). Division by zero already trapped above.
+                    BinOp::Div | BinOp::Rem if signed => {
+                        let w = x.get_type();
+                        let min = w.const_int(1u64 << (w.get_bit_width() - 1), false);
+                        let is_min = b_
+                            .build_int_compare(inkwell::IntPredicate::EQ, x, min, "ovx")
+                            .unwrap();
+                        let is_m1 = b_
+                            .build_int_compare(
+                                inkwell::IntPredicate::EQ,
+                                y,
+                                w.const_all_ones(),
+                                "ovy",
+                            )
+                            .unwrap();
+                        let ov = b_.build_and(is_min, is_m1, "ov").unwrap();
+                        let safe_y = b_
+                            .build_select(ov, w.const_int(1, false), y, "safey")
+                            .unwrap()
+                            .into_int_value();
+                        if matches!(op, BinOp::Div) {
+                            b_.build_int_signed_div(x, safe_y, "div").unwrap()
+                        } else {
+                            b_.build_int_signed_rem(x, safe_y, "rem").unwrap()
+                        }
+                    }
                     BinOp::Div => b_.build_int_unsigned_div(x, y, "div").unwrap(),
-                    BinOp::Rem if signed => b_.build_int_signed_rem(x, y, "rem").unwrap(),
                     BinOp::Rem => b_.build_int_unsigned_rem(x, y, "rem").unwrap(),
                     BinOp::BitAnd => b_.build_and(x, y, "and").unwrap(),
                     BinOp::BitOr => b_.build_or(x, y, "or").unwrap(),
                     BinOp::BitXor => b_.build_xor(x, y, "xor").unwrap(),
-                    BinOp::Shl => b_.build_left_shift(x, y, "shl").unwrap(),
-                    BinOp::Shr => b_.build_right_shift(x, y, signed, "shr").unwrap(),
+                    // Shifts follow the interpreter exactly: it computes every
+                    // shift at 64 bits with Rust's wrapping semantics (amount
+                    // masked to 0..63), then truncates to the operand width. A
+                    // raw LLVM shift is poison for amounts >= the bit width, and
+                    // masking to width-1 would still diverge for narrow types
+                    // (`1i32 << 40` is 0 under the interpreter, not 256).
+                    BinOp::Shl | BinOp::Shr => {
+                        let i64t = self.abi.i64t();
+                        let w = x.get_type().get_bit_width();
+                        let xe = match (w < 64, signed) {
+                            (false, _) => x,
+                            (true, true) => b_.build_int_s_extend(x, i64t, "xe").unwrap(),
+                            (true, false) => b_.build_int_z_extend(x, i64t, "xe").unwrap(),
+                        };
+                        // Only the low 6 bits of the amount matter; any extension
+                        // preserves them.
+                        let ye = if y.get_type().get_bit_width() < 64 {
+                            b_.build_int_z_extend(y, i64t, "ye").unwrap()
+                        } else {
+                            y
+                        };
+                        let amt = b_.build_and(ye, i64t.const_int(63, false), "amt").unwrap();
+                        let shifted = if matches!(op, BinOp::Shl) {
+                            b_.build_left_shift(xe, amt, "shl").unwrap()
+                        } else {
+                            b_.build_right_shift(xe, amt, signed, "shr").unwrap()
+                        };
+                        if w < 64 {
+                            b_.build_int_truncate(shifted, x.get_type(), "sht").unwrap()
+                        } else {
+                            shifted
+                        }
+                    }
                     _ => return self.typed_unit(),
                 };
                 r.into()
@@ -2741,8 +2936,17 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
             }
             // String: `+` is concatenation, `==`/`!=` are byte equality.
             Type::Str => self.str_bin_op(op, a, b),
-            // Nullable `==`/`!=`: a pointer (presence/identity) comparison.
-            Type::Nullable(_) => {
+            // Nullable `==`/`!=`: a pointer (presence/identity) comparison. Other
+            // managed heap values take the same path: only a null comparison
+            // reaches them (the checker rejects aggregate equality), and mono can
+            // type such a comparison at the *narrowed* non-nullable record/sum
+            // type (`node != null` after the argument's concrete type replaced a
+            // `Node?` parameter type). Without this arm the comparison read the
+            // unit placeholder -- false for `==` and `!=` alike.
+            Type::Nullable(_) | Type::Record(..) | Type::Sum(..) | Type::Slice(..)
+            | Type::Array(..) | Type::Fun(..) | Type::Tuple(..)
+                if matches!(op, BinOp::Eq | BinOp::Ne) =>
+            {
                 let pa = self
                     .builder
                     .build_ptr_to_int(a.into_pointer_value(), self.abi.i64t(), "pa")
@@ -3087,6 +3291,14 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
         self.call_rt_void("pp_unlock_all", arr);
     }
 
+    fn cown_lock_many(&mut self, objs: &[BasicValueEnum<'ctx>]) {
+        self.cown_span_call("pp_lock_span", objs);
+    }
+
+    fn cown_unlock_many(&mut self, objs: &[BasicValueEnum<'ctx>]) {
+        self.cown_span_call("pp_unlock_span", objs);
+    }
+
     fn region_open(&mut self, bridge: BasicValueEnum<'ctx>) -> BasicValueEnum<'ctx> {
         let i64t = self.abi.i64t();
         let ty = i64t.fn_type(&[self.abi.ptr().into()], false);
@@ -3261,6 +3473,16 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
         let (esize, _) = type_size_align(elem_ty);
         let llty = self.abi.typed_basic(elem_ty);
         let idx64 = self.sext_to_i64(idx);
+        // An out-of-range index traps like the interpreter (which halts with this
+        // message); the runtime's `pp_arr_remove` would silently return 0 bytes,
+        // letting the program continue on a garbage element. The unsigned compare
+        // rejects a negative index as well.
+        let len = self.array_len(arr).into_int_value();
+        let oob = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::UGE, idx64, len, "oob")
+            .unwrap();
+        self.trap_if(oob, "array remove index out of bounds");
         // The runtime returns the removed element's bytes zero-extended in an i64;
         // store them and reload at the element type to reinterpret.
         let ity = self.ctx.i64_type().fn_type(
@@ -3531,6 +3753,19 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
             .unwrap_basic()
             .into_int_value();
 
+        // A failed resolution returns 0; calling it would jump through a null
+        // function pointer. Trap with a runtime error instead (unreachable from
+        // checked source today, but the guard keeps a resolver failure defined).
+        let failed = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                addr,
+                self.abi.i64t().const_zero(),
+                "noaddr",
+            )
+            .unwrap();
+        self.trap_if(failed, "deferred dispatch resolution failed");
         // Indirect-call the resolved consumer `(ptr) -> i32` on the value.
         let fp = self
             .builder

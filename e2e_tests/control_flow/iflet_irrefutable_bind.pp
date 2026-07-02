@@ -1,0 +1,34 @@
+// Pins `if let x = <non-nullable>` as an irrefutable bind: ANY non-nullable
+// subject -- including a false bool and a zero int -- always takes the
+// then-arm (presence test, not truthiness). Only a nullable subject branches
+// at runtime, on non-null. A bool subject used to fall through static
+// truthiness and branch on its value, taking the else arm for `false`.
+fun main() {
+    let f = false
+    if let x = f {
+        println("bool: {x}")
+    } else {
+        println("bool: else")
+    }
+
+    let z = 0
+    if let x = z {
+        println("int: {x}")
+    } else {
+        println("int: else")
+    }
+
+    let n: int32? = null
+    if let x = n {
+        println("null: {x}")
+    } else {
+        println("null: else")
+    }
+
+    let p: int32? = 5
+    if let x = p {
+        println("present: {x}")
+    } else {
+        println("present: else")
+    }
+}

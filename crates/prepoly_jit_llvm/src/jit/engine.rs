@@ -23,6 +23,11 @@ pub fn run(
     expr_types: &std::collections::HashMap<prepoly_hir::Span, prepoly_hir::Type>,
 ) -> Result<(), String> {
     let mir = prepoly_mir::lower_program_with_types(program, expr_types);
+    // Debugging aid: dump each function's MIR when requested (the first thing
+    // needed when monomorphization rejects a checked program).
+    if std::env::var("PREPOLY_DUMP_MIR").is_ok() {
+        eprintln!("{}", prepoly_mir::program_to_string(&mir));
+    }
     let mono = prepoly_engine::monomorphize(&mir, program)
         .map_err(|e| format!("typed lowering failed: {e}"))?;
     // No Value fallback: a program outside the typed subset is rejected.

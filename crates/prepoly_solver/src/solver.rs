@@ -39,15 +39,6 @@ pub enum InferenceVarKind {
     Invalid,
 }
 
-/// Deferred constraints accumulated during checking. Equalities are applied
-/// eagerly through `Solver::unify`; the other buckets reserve space for the
-/// structural/numeric/result constraints the checker records elsewhere today and
-/// that future migration will route here.
-#[derive(Default)]
-pub struct ConstraintSet {
-    pub equalities: Vec<(Type, Type)>,
-}
-
 /// A polymorphic type scheme `forall vars. ty` -- the HM let-generalized type of
 /// a binding. The quantified `vars` are instantiated to fresh variables at each
 /// use, which is what lets `let id = (x) -> x` be applied at many argument types

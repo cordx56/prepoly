@@ -10,9 +10,10 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crate::rt::{Header, OWNER_COWN};
 
@@ -113,12 +114,62 @@ unsafe fn lock_byte<'a>(obj: *mut Header) -> &'a AtomicU8 {
     unsafe { &*((obj as *mut u8).add(11) as *const AtomicU8) }
 }
 
+/// The suspected-deadlock stall budget in seconds, plus one (0 = uninitialized,
+/// read from `PREPOLY_LOCK_STALL_SECS` on first use; the +1 encoding lets a user
+/// value of 0 -- "disable the diagnostic" -- be distinguished from uninitialized).
+static STALL_SECS_PLUS_ONE: AtomicU64 = AtomicU64::new(0);
+
+/// Default stall budget: generous enough that a legitimately long critical
+/// section never trips it, short enough that a genuinely deadlocked program
+/// fails in bounded time instead of hanging forever.
+const DEFAULT_STALL_SECS: u64 = 30;
+
+/// How long a contended `pp_lock` may wait before it is declared a suspected
+/// deadlock. `Duration::ZERO` disables the diagnostic (spin indefinitely).
+fn stall_budget() -> Duration {
+    let enc = STALL_SECS_PLUS_ONE.load(Ordering::Relaxed);
+    if enc != 0 {
+        return Duration::from_secs(enc - 1);
+    }
+    let secs = std::env::var("PREPOLY_LOCK_STALL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_STALL_SECS);
+    STALL_SECS_PLUS_ONE.store(secs + 1, Ordering::Relaxed);
+    Duration::from_secs(secs)
+}
+
+/// Fail loudly on a suspected deadlock: a cown lock stayed contended past the
+/// stall budget, which in a correct program only happens when two threads hold
+/// locks the other needs (e.g. hand-written nested `with` scopes acquiring the
+/// same two cowns in opposite orders). Hanging forever would hide the bug; a
+/// clear runtime error surfaces it. Under unit tests this panics (unwinds) so
+/// the diagnostic is observable in-process; in a real program it exits through
+/// the runtime error path.
+fn stall_fail(obj: *mut Header) -> ! {
+    let msg = format!(
+        "suspected deadlock: the lock of cown {obj:p} was not acquired within the stall \
+         budget; nested `with` scopes probably acquire the same cowns in opposite orders \
+         (acquire them together with `with([a, b], ...)`, or set PREPOLY_LOCK_STALL_SECS \
+         to raise the budget / 0 to disable this check)"
+    );
+    #[cfg(test)]
+    panic!("{msg}");
+    #[cfg(not(test))]
+    crate::builtins::pp_panic_str(&msg)
+}
+
 /// Acquire a cown's lock, spinning until it is free. The lock is *reentrant per
 /// thread*: a thread that already holds `obj` re-enters without spinning (only the
 /// recursion depth grows), so nested `with` scopes on the same cown within one
 /// thread do not deadlock against the non-recursive spinlock byte. Short critical
 /// sections make a spinlock the efficient choice; an uncontended first acquire is
 /// a single successful compare-exchange.
+///
+/// A contended acquire yields periodically (so a deadlocked or oversubscribed
+/// program does not burn CPU pointlessly) and, after a generous wall-clock
+/// budget, aborts with a suspected-deadlock error (see [`stall_fail`]) rather
+/// than hanging forever. The uncontended fast path pays for none of this.
 ///
 /// # Safety
 /// `obj` must be a valid object header (or null).
@@ -132,10 +183,29 @@ pub unsafe extern "C-unwind" fn pp_lock(obj: *mut Header) {
         return;
     }
     let lock = unsafe { lock_byte(obj) };
+    let mut spins: u64 = 0;
+    let mut deadline: Option<Instant> = None;
     while lock
         .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
         .is_err()
     {
+        spins += 1;
+        // Yield now and then so a holder that lost the CPU can run; pure spinning
+        // starves it on an oversubscribed machine.
+        if spins & 0x3FF == 0 {
+            std::thread::yield_now();
+        }
+        // Check the wall clock only rarely: the check (and the one-time env read
+        // behind `stall_budget`) must not slow ordinary contention.
+        if spins & 0x3F_FFFF == 0 {
+            let budget = stall_budget();
+            if !budget.is_zero() {
+                let dl = *deadline.get_or_insert_with(|| Instant::now() + budget);
+                if Instant::now() >= dl {
+                    stall_fail(obj);
+                }
+            }
+        }
         std::hint::spin_loop();
     }
     push_lock_depth(obj);
@@ -199,6 +269,46 @@ pub unsafe extern "C-unwind" fn pp_unlock_all(arr: *mut Header) {
     }
 }
 
+/// The cown pointers in a raw `(ptr, n)` span, address-sorted and de-duplicated
+/// -- the same global lock order [`array_cowns`] gives an array, for callers
+/// (the auto-acquire pass's group wrap) that have the cowns as individual typed
+/// values on the stack rather than in a heap array.
+unsafe fn span_cowns(ptrs: *const *mut Header, n: i64) -> Vec<*mut Header> {
+    if ptrs.is_null() || n <= 0 {
+        return Vec::new();
+    }
+    let mut v: Vec<*mut Header> = (0..n).map(|i| unsafe { *ptrs.offset(i as isize) }).collect();
+    v.sort_unstable_by_key(|p| *p as usize);
+    v.dedup();
+    v
+}
+
+/// Acquire every cown in a raw pointer span, in address order, so any two group
+/// acquisitions of overlapping cown sets use one global lock order and cannot
+/// deadlock -- regardless of the textual order the compiler emitted the span in.
+///
+/// # Safety
+/// `ptrs` must point to `n` readable object-header pointers (each valid or null).
+pub unsafe extern "C-unwind" fn pp_lock_span(ptrs: *const *mut Header, n: i64) {
+    unsafe {
+        for p in span_cowns(ptrs, n) {
+            pp_lock(p);
+        }
+    }
+}
+
+/// Release every cown in a raw pointer span (reverse acquisition order).
+///
+/// # Safety
+/// `ptrs` must point to `n` readable object-header pointers (each valid or null).
+pub unsafe extern "C-unwind" fn pp_unlock_span(ptrs: *const *mut Header, n: i64) {
+    unsafe {
+        for p in span_cowns(ptrs, n).into_iter().rev() {
+            pp_unlock(p);
+        }
+    }
+}
+
 /// Spawn a closure on a new OS thread. The closure is the
 /// `{ header | fn-ptr@16 | captures... }` object the typed back end builds; a
 /// zero-argument closure's compiled signature is `void(env)`, so the thread calls
@@ -237,17 +347,29 @@ pub extern "C-unwind" fn pp_spawn(closure: *mut Header) {
 /// thread is again the sole mutator, so it runs a collection to reclaim any cycle
 /// garbage whose collection was deferred while spawned threads ran.
 pub extern "C-unwind" fn pp_join_all() {
+    // A spawned task may itself call `sync()`, and the global registry then
+    // contains the *calling thread's own* handle. Joining it would be a self-join
+    // -- pthread_join(self) fails with EDEADLK and the std join panics, aborting
+    // the program -- so the caller's handle is set aside and handed back to the
+    // registry for an enclosing join (ultimately main's epilogue) to drain.
+    let me = std::thread::current().id();
     // A spawned thread may itself spawn (a nested/late spawn), pushing a new handle
-    // after this drain started. Loop until the registry stays empty: each round
-    // joins the threads taken so far, during which any of them may have pushed more.
-    // Without this, a nested spawn is never joined -- its work is lost and it runs
-    // into process teardown, a use-after-free of runtime state.
+    // after this drain started. Loop until the registry holds nothing but the
+    // caller's own handle: each round joins the threads taken so far, during which
+    // any of them may have pushed more. Without this, a nested spawn is never
+    // joined -- its work is lost and it runs into process teardown, a
+    // use-after-free of runtime state.
     loop {
-        let handles: Vec<_> = std::mem::take(&mut *threads().lock().unwrap());
-        if handles.is_empty() {
+        let taken: Vec<_> = std::mem::take(&mut *threads().lock().unwrap());
+        let (own, others): (Vec<_>, Vec<_>) =
+            taken.into_iter().partition(|h| h.thread().id() == me);
+        if !own.is_empty() {
+            threads().lock().unwrap().extend(own);
+        }
+        if others.is_empty() {
             break;
         }
-        for h in handles {
+        for h in others {
             let _ = h.join();
         }
     }
@@ -515,6 +637,127 @@ mod tests {
         pp_join_all();
 
         // Both threads ran to completion (no deadlock) and every increment landed.
+        assert_eq!(unsafe { *field(a) }, 2 * PER_THREAD);
+        assert_eq!(unsafe { *field(b) }, 2 * PER_THREAD);
+    }
+
+    #[test]
+    fn join_all_from_a_spawned_task_skips_its_own_handle() {
+        // A spawned task that calls `sync()` (pp_join_all) finds its *own* handle
+        // in the global registry. It must be skipped, not joined: a self-join
+        // fails with EDEADLK and the std join panics, which aborted the whole
+        // program. After the fix the task's sync returns (joining only siblings)
+        // and main's outer join still reaps the task itself.
+        let _serial = serial_spawn();
+        static RAN: AtomicI64 = AtomicI64::new(0);
+        RAN.store(0, Ordering::SeqCst);
+
+        extern "C" fn sibling(_env: *mut Header) {
+            RAN.fetch_add(1, Ordering::SeqCst);
+        }
+        extern "C" fn syncer(_env: *mut Header) {
+            // Spawn a sibling and join it from inside this spawned thread; the
+            // registry also holds this thread's own handle at this point.
+            let clo = unsafe { pp_obj_alloc(32) as *mut Header };
+            unsafe { *((clo as *mut u8).add(16) as *mut usize) = sibling as *const () as usize };
+            pp_spawn(clo);
+            pp_join_all();
+            // The sibling's effect is visible after the inner join.
+            assert_eq!(RAN.load(Ordering::SeqCst), 1);
+            RAN.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let clo = unsafe { pp_obj_alloc(32) as *mut Header };
+        unsafe { *((clo as *mut u8).add(16) as *mut usize) = syncer as *const () as usize };
+        pp_spawn(clo);
+        pp_join_all();
+        assert_eq!(
+            RAN.load(Ordering::SeqCst),
+            2,
+            "both the sibling and the syncing task ran to completion"
+        );
+    }
+
+    #[test]
+    fn contended_lock_past_stall_budget_fails_loudly() {
+        // A lock held forever by one thread must not make a contender hang
+        // silently: after the stall budget the contender fails with the
+        // suspected-deadlock diagnostic (a panic under test builds). This pins
+        // the loud-failure path for genuine lock-order-inversion deadlocks.
+        let _serial = serial_spawn();
+        let obj = alloc_counter();
+        unsafe { pp_lock(obj) };
+        // Shrink the budget to 1s so the test is quick; restore afterwards.
+        STALL_SECS_PLUS_ONE.store(2, Ordering::Relaxed);
+        let addr = obj as usize;
+        let contender = std::thread::spawn(move || {
+            unsafe { pp_lock(addr as *mut Header) };
+        });
+        let result = contender.join();
+        STALL_SECS_PLUS_ONE.store(0, Ordering::Relaxed);
+        unsafe { pp_unlock(obj) };
+        assert!(
+            result.is_err(),
+            "the contender must fail loudly instead of spinning forever"
+        );
+    }
+
+    #[test]
+    fn lock_span_orders_and_dedups() {
+        // The span form used by the compiler's group wrap must behave like the
+        // array form: lock every distinct cown (duplicates once) and release them
+        // all, regardless of the textual order in the span.
+        let _serial = serial_spawn();
+        let a = alloc_counter();
+        let b = alloc_counter();
+        let span = [b, a, b];
+        unsafe { pp_lock_span(span.as_ptr(), 3) };
+        assert_eq!(unsafe { lock_byte(a) }.load(Ordering::Relaxed), 1);
+        assert_eq!(unsafe { lock_byte(b) }.load(Ordering::Relaxed), 1);
+        unsafe { pp_unlock_span(span.as_ptr(), 3) };
+        assert_eq!(unsafe { lock_byte(a) }.load(Ordering::Relaxed), 0);
+        assert_eq!(unsafe { lock_byte(b) }.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn lock_span_is_deadlock_free_across_orders() {
+        // Two threads group-acquire the same two cowns via spans in opposite
+        // orders. Address-sorted acquisition gives one global order, so both
+        // finish and no increment is lost (the whole point of replacing the
+        // name-ordered nested `with` wrap).
+        let _serial = serial_spawn();
+        let a = alloc_counter();
+        let b = alloc_counter();
+        unsafe {
+            *field(a) = 0;
+            *field(b) = 0;
+        }
+        const PER_THREAD: i64 = 4000;
+        // Closure env: `{ header | fn@16 | dtor@24 (zero) | a@32 | b@40 }`; the
+        // worker group-locks (a, b) in its captured order each iteration.
+        extern "C" fn work(env: *mut Header) {
+            let x = unsafe { *((env as *mut u8).add(32) as *mut *mut Header) };
+            let y = unsafe { *((env as *mut u8).add(40) as *mut *mut Header) };
+            let span = [x, y];
+            for _ in 0..PER_THREAD {
+                unsafe { pp_lock_span(span.as_ptr(), 2) };
+                unsafe {
+                    *field(x) += 1;
+                    *field(y) += 1;
+                }
+                unsafe { pp_unlock_span(span.as_ptr(), 2) };
+            }
+        }
+        for (x, y) in [(a, b), (b, a)] {
+            let clo = unsafe { pp_obj_alloc(48) as *mut Header };
+            unsafe {
+                *((clo as *mut u8).add(16) as *mut usize) = work as *const () as usize;
+                *((clo as *mut u8).add(32) as *mut *mut Header) = x;
+                *((clo as *mut u8).add(40) as *mut *mut Header) = y;
+            }
+            pp_spawn(clo);
+        }
+        pp_join_all();
         assert_eq!(unsafe { *field(a) }, 2 * PER_THREAD);
         assert_eq!(unsafe { *field(b) }, 2 * PER_THREAD);
     }

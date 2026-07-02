@@ -628,6 +628,58 @@ pub fn index_element(ty: &Type) -> Option<Type> {
     }
 }
 
+/// Whether two types belong to clearly different primitive value kinds (string
+/// vs int, bool vs float, ...) that no coercion bridges. This is the shared
+/// rule behind structural `if` folding: the back end skips emitting a then-arm
+/// whose reachable `return` value kind-conflicts with the function's return
+/// type, and the checker may fold (and tolerate) exactly the same arms -- both
+/// sides must prune identically or a checker-tolerated arm would execute.
+pub fn primitive_kind_conflict(a: &Type, b: &Type) -> bool {
+    fn kind(t: &Type) -> Option<u8> {
+        match t {
+            Type::Str => Some(0),
+            Type::Bool => Some(1),
+            Type::Int(_) => Some(2),
+            Type::Float(_) => Some(3),
+            _ => None,
+        }
+    }
+    matches!((kind(a), kind(b)), (Some(x), Some(y)) if x != y)
+}
+
+/// Whether `ty` contains no inference variable, recursing through every
+/// component (array elements, nominal substitutions, function and tuple parts).
+/// A bare nominal reference (empty substitution) is fully known: the name and id
+/// are all the layout needs.
+pub fn is_fully_known(ty: &Type) -> bool {
+    match ty {
+        Type::Unknown(_) => false,
+        Type::Array(inner, _)
+        | Type::Slice(inner)
+        | Type::Nullable(inner)
+        | Type::ConstOf(inner)
+        | Type::Mut(inner)
+        | Type::Ref(inner) => is_fully_known(inner),
+        Type::Fun(params, ret) => params.iter().all(is_fully_known) && is_fully_known(ret),
+        Type::Tuple(elems) => elems.iter().all(is_fully_known),
+        Type::Record(n) | Type::Sum(n) => n.substitution.iter().all(|(_, t)| is_fully_known(t)),
+        _ => true,
+    }
+}
+
+/// The value type behind parameter-passing mode wrappers: `ref(T)`, `mut(T)` and
+/// `const` views expose the underlying value's fields, elements and methods, so
+/// member access and member type checks must look through them. Without this a
+/// `ref(mut(Point))` base would silently skip field type checking (the match on
+/// `Record`/`Sum` sees the wrapper, not the record) and ill-typed stores would
+/// reach the unboxed back end.
+pub fn peel_modes(ty: &Type) -> &Type {
+    match ty {
+        Type::Ref(t) | Type::Mut(t) | Type::ConstOf(t) => peel_modes(t),
+        _ => ty,
+    }
+}
+
 /// Replace every `infer` placeholder ([`INFER_VAR`]) in a resolved type with a
 /// distinct fresh type from `fresh`, recursing into composite types and into a
 /// `Result`'s payload substitution. So each `infer` (and each `T!` error payload)

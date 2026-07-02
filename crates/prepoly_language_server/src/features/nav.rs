@@ -37,11 +37,11 @@ pub fn smallest_typed_at(full: &FullAnalysis, global_off: usize) -> Option<&Type
 /// the analysis source map. Returns `None` for a span in the embedded prelude
 /// (it has no file to open).
 pub fn locate(full: &FullAnalysis, span: Span) -> Option<Location> {
-    let (path, src, lo_local) = full.sources.locate(span.lo)?;
-    let path = path?;
-    let hi_local = lo_local + span.hi.saturating_sub(span.lo);
-    let index = LineIndex::new(src);
-    let range = index.range_of(src, lo_local, hi_local);
+    let loc = full.sources.locate(span.lo)?;
+    let path = loc.path?;
+    let hi_local = loc.local + span.hi.saturating_sub(span.lo);
+    let index = LineIndex::new(loc.src);
+    let range = index.range_of(loc.src, loc.local, hi_local);
     let uri = Uri::from_file_path(path)?;
     Some(Location { uri, range })
 }

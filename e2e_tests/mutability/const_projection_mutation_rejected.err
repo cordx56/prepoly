@@ -1,0 +1,3 @@
+error: cannot call mutating method `bump` on const value `c`
+error: cannot assign to const value `a`
+error: cannot call mutating method `bump` on const value `arr`

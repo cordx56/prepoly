@@ -1,0 +1,2 @@
+task sum ok = true
+main sum ok = true value = 42

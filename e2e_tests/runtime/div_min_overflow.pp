@@ -1,0 +1,13 @@
+// Pins the one overflowing signed division pair, MIN / -1 (and MIN % -1):
+// both back ends wrap like Rust's wrapping_div/wrapping_rem (MIN and 0)
+// instead of the raw sdiv/srem UB (a SIGFPE on x86). Checked at 64 and 8 bits.
+fun main() {
+    let mn: int64 = -9223372036854775807 - 1
+    let m1: int64 = -1
+    println(mn / m1)
+    println(mn % m1)
+    let mn8: int8 = -128
+    let m18: int8 = -1
+    println(mn8 / m18)
+    println(mn8 % m18)
+}

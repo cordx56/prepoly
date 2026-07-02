@@ -1,0 +1,29 @@
+// Pins: `spawn(task)` where `task` is a VARIABLE bound to a closure literal must
+// be analyzed exactly like a literal spawn -- the capture is promoted to a cown
+// (atomic reference count) and both the task body and the spawner's own accesses
+// are lock-guarded. Before the fix this shape got no promotion at all: two
+// threads raced the non-atomic reference count (double free) and lost updates.
+type Counter = {
+    value: int64
+}
+
+fun Counter.add(self, n: int64) { self.value = self.value + n }
+
+fun main() {
+    let counter = Counter { value: 0 }
+    let task = () -> {
+        let i = 0
+        while i < 100000 {
+            counter.add(1)
+            i = i + 1
+        }
+    }
+    spawn(task)
+    let j = 0
+    while j < 100000 {
+        counter.add(1)
+        j = j + 1
+    }
+    sync()
+    println("value = {counter.value}")
+}

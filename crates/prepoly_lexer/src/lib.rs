@@ -113,7 +113,8 @@ mod tests {
             TokenKind::Str(parts) => {
                 assert_eq!(parts.len(), 3);
                 assert_eq!(parts[0], StrPart::Lit("value = ".into()));
-                assert_eq!(parts[1], StrPart::Interp("x + 1".into()));
+                // The fragment starts just past the `{` at byte 9.
+                assert_eq!(parts[1], StrPart::Interp("x + 1".into(), 10));
                 assert_eq!(parts[2], StrPart::Lit("!".into()));
             }
             other => panic!("expected string, got {other:?}"),
@@ -128,7 +129,7 @@ mod tests {
         match &k[0] {
             TokenKind::Str(parts) => {
                 assert_eq!(parts.len(), 1);
-                assert_eq!(parts[0], StrPart::Interp(" f(\"a}b\") ".into()));
+                assert_eq!(parts[0], StrPart::Interp(" f(\"a}b\") ".into(), 2));
             }
             other => panic!("expected string, got {other:?}"),
         }

@@ -1,0 +1,70 @@
+// Pins that mutation of an unannotated parameter is detected in EVERY
+// expression position, so the parameter is inferred as a private deep copy and
+// the caller's value is never drained/changed. Each helper hides the mutation
+// in a position a partial traversal used to miss: a while condition, an
+// assignment's right-hand side, a binary subexpression, an if condition, and a
+// nested for loop writing back through its own loop variable.
+
+// Mutation inside a while condition.
+fun drain(a) {
+    while a.pop() != null {
+    }
+}
+
+// Mutation inside an assignment's right-hand side value.
+fun take_assign(a) -> int32 {
+    let x = 0
+    x = a.remove(0)
+    return x
+}
+
+// Mutation inside a binary subexpression of a let initializer.
+fun take_binary(a) -> int32 {
+    let x = a.remove(0) + 1
+    return x
+}
+
+// Mutation inside an if condition.
+fun check(a) -> bool {
+    if a.pop() != null {
+        return true
+    }
+    return false
+}
+
+// Mutation through the inner loop variable of a nested for, which is derived
+// from the outer loop variable and so writes back into the parameter.
+fun zero(m) {
+    for row in m {
+        for e in row {
+            e = 0
+        }
+    }
+}
+
+fun main() {
+    let xs: int32[] = [1, 2, 3]
+    drain(xs)
+    println(xs.len())
+
+    let ys: int32[] = [10, 20, 30]
+    println(take_assign(ys))
+    println(ys.len())
+
+    let zs: int32[] = [10, 20, 30]
+    println(take_binary(zs))
+    println(zs.len())
+
+    let ws: int32[] = [1, 2, 3]
+    println(check(ws))
+    println(ws.len())
+
+    let m: int32[][] = [[1, 2], [3, 4]]
+    zero(m)
+    println(m)
+
+    // A const argument is fine too: the callee mutates only its private copy.
+    const cs: int32[] = [1, 2, 3]
+    drain(cs)
+    println(cs.len())
+}

@@ -14,16 +14,24 @@ use std::collections::HashMap;
 use inkwell::values::FunctionValue;
 use prepoly_hir::{FloatKind, IntKind, Type};
 
+/// Injective LLVM-name encoding of an engine symbol: ASCII alphanumerics pass
+/// through; every other character (including `_` itself) becomes `_{hex}_`, its
+/// code point framed by underscores. Every `_` in the output therefore belongs
+/// to an escape, so decoding is unambiguous and two distinct engine symbols
+/// (e.g. `probe__int32?[]` vs `probe__int32[]?` under the old fold-to-`_`
+/// scheme) can never map to the same LLVM function name.
 fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else {
+            out.push('_');
+            out.push_str(&format!("{:x}", c as u32));
+            out.push('_');
+        }
+    }
+    out
 }
 
 pub fn mangle_fn(name: &str) -> String {

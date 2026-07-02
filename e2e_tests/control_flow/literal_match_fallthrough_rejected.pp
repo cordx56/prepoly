@@ -1,0 +1,12 @@
+// Pins that a match over a non-sum scrutinee (integer literals) with no
+// catch-all arm does NOT count as diverging: control can fall through every
+// arm at runtime (x = 3 matches nothing), so a non-void function relying on it
+// must be rejected instead of returning garbage.
+fun pick(x: int32) -> int32 {
+    match x {
+        1 => { return 10 },
+        2 => { return 20 },
+    }
+}
+
+println(pick(3))

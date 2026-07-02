@@ -1,0 +1,31 @@
+// Pins: a handle to the cown's interior taken BEFORE the spawn (`let h =
+// o.inner`) reaches the same object graph the task mutates. The alias-root map
+// must guard h's accesses under o's lock (the root cown), not h's own header,
+// or the spawner mutates off-lock.
+type Inner = {
+    value: int64
+}
+type Outer = {
+    inner: Inner
+}
+
+fun Inner.add(self, n: int64) { self.value = self.value + n }
+
+fun main() {
+    let o = Outer { inner: Inner { value: 0 } }
+    let h = o.inner
+    spawn(() -> {
+        let i = 0
+        while i < 100000 {
+            o.inner.add(1)
+            i = i + 1
+        }
+    })
+    let j = 0
+    while j < 100000 {
+        h.add(1)
+        j = j + 1
+    }
+    sync()
+    println("value = {o.inner.value}")
+}

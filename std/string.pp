@@ -14,41 +14,59 @@ fun string.split(self, sep: string) -> string[] {
         result.push(self)
         return result
     }
+    // One field per separator boundary: the piece before each match, then the
+    // tail after the last one -- so "a,,b" keeps its interior empty field AND a
+    // trailing separator yields a trailing empty field ("a," is [a, ""],
+    // consistent with the interior behavior). Reaching exactly len(self) means
+    // the previous field ended with a separator (or the subject is empty), so
+    // the empty tail is still a field; a no-match tail jumps past it.
     let start: int64 = 0
-    while start < len(self) {
-        let rest = _string_slice(self, start, len(self))
-        let pos = _string_find(rest, sep)
-        if pos != null {
-            result.push(_string_slice(self, start, start + pos))
-            start = start + pos + len(sep)
+    while start <= len(self) {
+        if start == len(self) {
+            result.push("")
+            start = start + 1
         } else {
-            result.push(_string_slice(self, start, len(self)))
-            start = len(self)
+            let rest = _string_slice(self, start, len(self))
+            let pos = _string_find(rest, sep)
+            if pos != null {
+                result.push(_string_slice(self, start, start + pos))
+                start = start + pos + len(sep)
+            } else {
+                result.push(_string_slice(self, start, len(self)))
+                start = len(self) + 1
+            }
         }
-    }
-    if len(self) == 0 {
-        result.push("")
     }
     return result
 }
 
-// Strip leading and trailing ASCII whitespace.
+// Strip leading and trailing ASCII whitespace. Multibyte-safe: whitespace is
+// always a single byte, so the probes advance/retreat one byte at a time, and a
+// probe that lands mid-character (`_string_char_at` returns null there) means a
+// multibyte character -- never whitespace -- so the scan stops. The null probe is
+// handled with `if let`, never compared as a string.
 fun string.trim(self) -> string {
     let one: int64 = 1
     let start: int64 = 0
     let end = len(self)
     while start < end {
-        let c = _string_char_at(self, start)
-        if c == " " || c == "\t" || c == "\n" || c == "\r" {
-            start += one
+        if let c = _string_char_at(self, start) {
+            if c == " " || c == "\t" || c == "\n" || c == "\r" {
+                start += one
+            } else {
+                break
+            }
         } else {
             break
         }
     }
     while end > start {
-        let c = _string_char_at(self, end - one)
-        if c == " " || c == "\t" || c == "\n" || c == "\r" {
-            end -= one
+        if let c = _string_char_at(self, end - one) {
+            if c == " " || c == "\t" || c == "\n" || c == "\r" {
+                end -= one
+            } else {
+                break
+            }
         } else {
             break
         }

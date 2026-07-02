@@ -47,6 +47,13 @@ pub(crate) struct ProgramCtx<'p> {
     /// would otherwise be unable to infer (a witness-free constructor). Empty
     /// when lowering without a checked program (tests, deferred re-lowering).
     expr_types: &'p HashMap<Span, Type>,
+    /// Names each module's init binds as module-level globals (top-level
+    /// `let`s), used to key global storage per defining module.
+    module_globals: HashMap<Vec<String>, std::collections::HashSet<String>>,
+    /// Defining module of each standard-library global (the implicit prelude:
+    /// `INT64_MAX` etc. are visible everywhere without an import). First
+    /// definition in sorted module order wins, deterministically.
+    prelude_globals: HashMap<String, Vec<String>>,
     closures: RefCell<Vec<MirClosure>>,
     next_closure: Cell<u32>,
 }
@@ -61,13 +68,70 @@ impl<'p> ProgramCtx<'p> {
                 }
             }
         }
+        let mut module_globals: HashMap<Vec<String>, std::collections::HashSet<String>> =
+            HashMap::new();
+        for init in &program.inits {
+            let names = module_globals.entry(init.path.clone()).or_default();
+            for s in &init.stmts {
+                if let prepoly_parser::ast::Stmt::Let { pat, .. } = s {
+                    collect_global_names(pat, names);
+                }
+            }
+        }
+        let mut prelude_globals: HashMap<String, Vec<String>> = HashMap::new();
+        let mut std_paths: Vec<&Vec<String>> = module_globals
+            .keys()
+            .filter(|p| p.first().is_some_and(|seg| seg == "std"))
+            .collect();
+        std_paths.sort();
+        for path in std_paths {
+            for name in &module_globals[path] {
+                prelude_globals
+                    .entry(name.clone())
+                    .or_insert_with(|| path.clone());
+            }
+        }
         ProgramCtx {
             program,
             variant_names,
             expr_types,
+            module_globals,
+            prelude_globals,
             closures: RefCell::new(Vec::new()),
             next_closure: Cell::new(0),
         }
+    }
+
+    /// The storage key of module-level global `name` as referenced from
+    /// `module`. Globals are keyed per *defining* module (`name@a/b`, like
+    /// function storage symbols), so two modules' same-named top-level `let`s
+    /// never share a slot. A name the referencing module does not define itself
+    /// resolves through its import origin, then through the stdlib prelude
+    /// (`INT64_MAX` and friends are visible without an import); an unresolved
+    /// name keys under the referencing module (the checker rejects genuinely
+    /// unknown names).
+    fn global_symbol(&self, module: &[String], name: &str) -> String {
+        let defines = |m: &[String]| {
+            self.module_globals
+                .get(m)
+                .is_some_and(|names| names.contains(name))
+        };
+        if defines(module) {
+            return prepoly_hir::qualify(name, module);
+        }
+        if let Some(origin) = self
+            .program
+            .import_origins
+            .get(module)
+            .and_then(|o| o.get(name))
+            && defines(origin)
+        {
+            return prepoly_hir::qualify(name, origin);
+        }
+        if let Some(owner) = self.prelude_globals.get(name) {
+            return prepoly_hir::qualify(name, owner);
+        }
+        prepoly_hir::qualify(name, module)
     }
 
     /// The checker-resolved type recorded for the expression at `span`, if any.
@@ -91,6 +155,29 @@ impl<'p> ProgramCtx<'p> {
             || name == "File"
             || prepoly_hir::IntKind::from_name(name).is_some()
             || matches!(name, "float32" | "float64" | "string" | "bool")
+    }
+
+    /// Whether ANY type in the program (or the primitive-method table, or the
+    /// built-in slice mutators) declares a method named `name`. `recv.name(..)`
+    /// routes as a method call only then; otherwise the name is a record FIELD
+    /// holding a function value, loaded and called indirectly.
+    fn method_name_exists(&self, name: &str) -> bool {
+        // Built-in slice mutators plus the runtime `File` instance methods,
+        // which have no user-level declaration to find in the type table.
+        if matches!(
+            name,
+            "push" | "insert" | "remove" | "pop" | "len" | "read" | "write" | "size" | "close"
+                | "seek"
+        ) {
+            return true;
+        }
+        if self.program.primitive_methods.keys().any(|(_, m)| m == name) {
+            return true;
+        }
+        self.program.types.values().any(|info| match &info.kind {
+            TypeKind::Record { methods, .. } => methods.contains_key(name),
+            TypeKind::Sum { variants } => variants.iter().any(|v| v.methods.contains_key(name)),
+        })
     }
 
     /// The declared field names of record type `ty` (as seen from `module`), in
@@ -145,29 +232,25 @@ impl<'p> ProgramCtx<'p> {
 
     /// Whether an annotated parameter type is passed by deep copy: a non-reference
     /// heap aggregate (array/slice, tuple, anonymous structure, named record/sum,
-    /// or `infer`). A `ref(...)`/`ref(mut(..))` parameter borrows. The copy is
-    /// applied on entry to the callee (see [`FnLower::entry_param_copies`]).
+    /// nullable/fallible of one, or `infer`). A `ref(...)`/`ref(mut(..))`
+    /// parameter borrows. The copy is applied on entry to the callee (see
+    /// [`FnLower::entry_param_copies`]). Delegates to the shared predicate in
+    /// `prepoly_hir` so the runtime copy decision and the const checker's
+    /// write-through analysis never disagree.
     fn type_needs_copy(&self, module: &[String], t: &prepoly_parser::ast::TypeExpr) -> bool {
-        use prepoly_parser::ast::TypeExpr;
-        match t {
-            // A reference borrows; a `mut(T)` is a mutable place whose copy-ness is
-            // that of `T`. Any non-reference heap aggregate -- array/slice, tuple,
-            // anonymous structure, or a named record/sum -- is passed by deep copy.
-            TypeExpr::Ref(..) => false,
-            TypeExpr::Mut(inner, _) => self.type_needs_copy(module, inner),
-            TypeExpr::Array(..) | TypeExpr::Tuple(..) | TypeExpr::Anonymous(..) => true,
-            // `infer` is resolved per call site and may be any heap value, so it is
-            // deep-copied too -- the back end's `__deep_copy` is type-directed, so a
-            // primitive instantiation is a no-op. A named record/sum is also copied.
-            TypeExpr::Named(n, _) => {
-                n == "infer"
-                    || self.program.resolve_type(module, n).is_some_and(|info| {
-                        matches!(info.kind, TypeKind::Record { .. } | TypeKind::Sum { .. })
-                    })
-            }
-            _ => false,
-        }
+        prepoly_hir::annotated_type_passes_by_copy(self.program, module, t)
     }
+}
+
+/// One active loop: the `continue`/`break` jump targets, plus the `for`-loop
+/// element write-back (if any) that every edge leaving the iteration must emit.
+pub(crate) struct LoopFrame {
+    pub(crate) cont: BlockId,
+    pub(crate) brk: BlockId,
+    /// `Some((arr, idx, var))` when the body reassigns the `for` variable `var`:
+    /// its current value is stored back to `arr[idx]` before the iteration ends
+    /// (fall-through, `continue`, or `break` -- not just the fall-through tail).
+    pub(crate) writeback: Option<(LocalId, LocalId, String)>,
 }
 
 /// Per-body lowering state.
@@ -176,14 +259,27 @@ pub(crate) struct FnLower<'a, 'p> {
     pub(crate) ctx: &'a ProgramCtx<'p>,
     pub(crate) module: Vec<String>,
     pub(crate) self_type: Option<String>,
-    /// Lexical scopes mapping source names to local slots; innermost last.
-    scopes: Vec<HashMap<String, LocalId>>,
-    /// Active loop targets as (continue, break) block pairs; innermost last.
-    pub(crate) loops: Vec<(BlockId, BlockId)>,
-    /// Names heap-promoted to a shared cell (a one-element array): a captured and
-    /// mutated local. Reads/writes of such a name go through the
-    /// cell's element 0; the closure captures the shared cell pointer.
+    /// Lexical scopes mapping source names to bindings; innermost last.
+    scopes: Vec<HashMap<String, ScopeBinding>>,
+    /// Active loops; innermost last.
+    pub(crate) loops: Vec<LoopFrame>,
+    /// Candidate names for heap promotion to a shared cell (a one-element
+    /// array): a captured and mutated local. Whether a given *binding* of such
+    /// a name is actually a cell is decided at its binder and recorded on the
+    /// [`ScopeBinding`] (a parameter binds plainly even when a shadowing `let`
+    /// of the same name is promoted). Reads/writes of a cell binding go through
+    /// the cell's element 0; the closure captures the shared cell pointer.
     pub(crate) cells: std::collections::HashSet<String>,
+}
+
+/// A name bound in a lexical scope: its local slot, plus whether this
+/// particular binding is a heap-promoted shared cell. Cell-ness is per
+/// binding, not per name -- a `let` shadowing a non-cell parameter of the same
+/// name may itself be a cell.
+#[derive(Clone, Copy)]
+struct ScopeBinding {
+    local: LocalId,
+    cell: bool,
 }
 
 impl<'a, 'p> FnLower<'a, 'p> {
@@ -199,9 +295,15 @@ impl<'a, 'p> FnLower<'a, 'p> {
         }
     }
 
-    /// Whether `name` is heap-promoted to a shared cell in this body.
+    /// Whether the binding `name` currently resolves to is a heap-promoted
+    /// shared cell. A name with no local binding may still be a
+    /// captured-and-mutated module global, which is in the candidate set but is
+    /// accessed through global storage rather than a cell local.
     pub(crate) fn is_cell(&self, name: &str) -> bool {
-        self.cells.contains(name)
+        match self.lookup_binding(name) {
+            Some(b) => b.cell,
+            None => self.cells.contains(name),
+        }
     }
 
     // ----- scopes -----
@@ -215,13 +317,23 @@ impl<'a, 'p> FnLower<'a, 'p> {
     }
 
     pub(crate) fn bind(&mut self, name: &str, local: LocalId) {
+        self.bind_as(name, local, false);
+    }
+
+    /// Bind `name` to `local` in the innermost scope, recording whether this
+    /// binding is a shared cell (`local` then holds the one-element cell array).
+    pub(crate) fn bind_as(&mut self, name: &str, local: LocalId, cell: bool) {
         self.scopes
             .last_mut()
             .expect("a scope is always open")
-            .insert(name.to_string(), local);
+            .insert(name.to_string(), ScopeBinding { local, cell });
     }
 
     pub(crate) fn lookup(&self, name: &str) -> Option<LocalId> {
+        self.lookup_binding(name).map(|b| b.local)
+    }
+
+    fn lookup_binding(&self, name: &str) -> Option<ScopeBinding> {
         self.scopes.iter().rev().find_map(|s| s.get(name).copied())
     }
 
@@ -237,9 +349,13 @@ impl<'a, 'p> FnLower<'a, 'p> {
     /// instead of being stored as a scalar that read/write/capture sites then
     /// wrongly index as an array.
     pub(crate) fn bind_value(&mut self, name: &str, op: crate::value::Operand) {
-        let local = if self.is_cell(name) {
-            let cell = self.b.emit(crate::value::Rvalue::Array(vec![op]));
-            self.b.make_local(cell)
+        // Cell-ness is decided here, per binder, from the body-wide candidate
+        // set: this fresh binding is the one closures capture, regardless of
+        // whether an outer binding (e.g. a non-cell parameter) shares its name.
+        let cell = self.cells.contains(name);
+        let local = if cell {
+            let cell_arr = self.b.emit(crate::value::Rvalue::Array(vec![op]));
+            self.b.make_local(cell_arr)
         } else {
             let local = self.b.fresh_local(Some(name.to_string()));
             self.b.push(crate::cfg::MirStmt::Assign(
@@ -248,7 +364,7 @@ impl<'a, 'p> FnLower<'a, 'p> {
             ));
             local
         };
-        self.bind(name, local);
+        self.bind_as(name, local, cell);
     }
 
     /// Resolve a possibly-`Self` type word to the concrete type name in scope.
@@ -265,12 +381,11 @@ impl<'a, 'p> FnLower<'a, 'p> {
     /// Lower a function/method body: bind parameters, run the statement
     /// sequence, and close any open tail with `return void`.
     fn lower_callable(&mut self, params: &[Param], body: &Block) -> Vec<LocalId> {
-        // Heap-promote captured-and-mutated locals to shared cells.
-        // Parameters are excluded -- they have no `let` to wrap.
+        // Candidate names for heap promotion to shared cells. Each binder
+        // decides for its own binding: a parameter has no `let` to wrap, so it
+        // binds plainly (via `bind`, never a cell) -- but a `let` that shadows a
+        // parameter's name is a different binding and is still promoted.
         self.cells = crate::analysis::cell_promotions(body);
-        for p in params {
-            self.cells.remove(&p.name);
-        }
         let copies = self.entry_param_copies(params, body);
         let param_locals = self.bind_params(params, &copies);
         self.lower_body_stmts(&body.stmts);
@@ -350,6 +465,24 @@ impl<'a, 'p> FnLower<'a, 'p> {
             self.b
                 .terminate(crate::cfg::Terminator::Return(crate::value::Operand::void()));
         }
+    }
+}
+
+/// Collect the global names a top-level `let` pattern binds, mirroring the
+/// binding forms `store_global_pattern` writes (a bare name, or an array
+/// pattern destructured element-wise).
+fn collect_global_names(pat: &prepoly_parser::ast::Pattern, out: &mut std::collections::HashSet<String>) {
+    use prepoly_parser::ast::Pattern;
+    match pat {
+        Pattern::Binding(name, _) => {
+            out.insert(name.clone());
+        }
+        Pattern::Array(pats, _) => {
+            for p in pats {
+                collect_global_names(p, out);
+            }
+        }
+        Pattern::Record(..) | Pattern::Wildcard(_) | Pattern::Literal(..) => {}
     }
 }
 
@@ -556,8 +689,23 @@ fn lower_init(
             break;
         }
         match s {
-            Stmt::Let { pat, value, .. } => {
+            Stmt::Let { pat, ty, value, .. } => {
                 let v = fl.lower_expr(value);
+                // A resolvable annotation fixes the global's type exactly as it
+                // fixes a function-local slot: routing the value through a typed
+                // local makes the store coerce (nullable wrap, numeric flow) and
+                // monomorphization record the annotated type -- otherwise
+                // `let g: int32? = 5` records a bare int32 global whose reads
+                // then mismatch the nullable representation the checker assumed.
+                let v = match ty.as_ref().and_then(crate::lower::stmt::resolve_simple_type) {
+                    Some(t) => {
+                        use crate::value::Rvalue;
+                        let local = fl.b.fresh_local_typed(None, t);
+                        fl.b.push(crate::cfg::MirStmt::Assign(local, Rvalue::Use(v)));
+                        crate::value::Operand::Local(local)
+                    }
+                    None => v,
+                };
                 fl.store_global_pattern(pat, v);
             }
             _ => fl.lower_stmt(s),
@@ -582,7 +730,8 @@ impl<'a, 'p> FnLower<'a, 'p> {
         use prepoly_parser::ast::Pattern;
         match pat {
             Pattern::Binding(name, _) => {
-                self.b.push(MirStmt::SetGlobal(name.clone(), v));
+                let key = self.ctx.global_symbol(&self.module, name);
+                self.b.push(MirStmt::SetGlobal(key, v));
             }
             Pattern::Array(pats, _) => {
                 let subj = self.b.make_local(v);

@@ -1,0 +1,13 @@
+// The math prelude: abs/min/max are polymorphic over numeric types; sqrt,
+// floor, ceil, pow wrap the float runtime primitives.
+fun main() {
+    println(abs(-5))
+    println(abs(2.5 - 4.0))
+    println(min(3, 7))
+    println(max(3, 7))
+    println(min(1.5, -2.5))
+    println(sqrt(81.0))
+    println(floor(2.9))
+    println(ceil(2.1))
+    println(pow(2.0, 10.0))
+}

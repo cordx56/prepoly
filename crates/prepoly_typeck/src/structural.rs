@@ -297,10 +297,23 @@ fn record_fields(program: &Program, nt: &NominalType) -> Vec<NormField> {
     match program.types.get(nt.name()).map(|info| &info.kind) {
         Some(TypeKind::Record { fields, .. }) => fields
             .iter()
-            .map(|f| NormField {
-                name: f.name.clone(),
-                annotated: f.ty.is_some(),
-                ty: f.resolved_ty.clone(),
+            .map(|f| {
+                // An unannotated declared field is flexible only until the
+                // value's instantiation pins it: constructing `A { x: "s" }`
+                // records `x=string` in the instance substitution (the
+                // declaration's `resolved_ty` is only a shared inference
+                // variable), and that concrete type -- not the missing
+                // annotation -- is what a structural position must compare
+                // against. Treating the field as annotation-free here would let
+                // `A { x: "s" }` satisfy a required `{ x: int32 }` and corrupt
+                // the unboxed layout.
+                let instance = nt.substitution.get(&f.name).cloned();
+                let annotated = f.ty.is_some() || instance.is_some();
+                NormField {
+                    name: f.name.clone(),
+                    annotated,
+                    ty: instance.or_else(|| f.resolved_ty.clone()),
+                }
             })
             .collect(),
         _ => Vec::new(),

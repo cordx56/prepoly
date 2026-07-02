@@ -28,7 +28,7 @@ use prepoly_mir::{Callee, Literal, MirStmt, Operand, Place, Projection, Rvalue, 
 use prepoly_parser::ast::{BinOp, UnaryOp};
 
 use crate::format::{float_str, format_value};
-use crate::value::{ClosureObj, Value, VariantObj};
+use crate::value::{ClosureObj, MAX_VALUE_DEPTH, Value, VariantObj};
 
 /// Guard against unbounded native recursion: a runaway recursive Prepoly program
 /// would otherwise overflow the host stack and abort the process. Deep enough for
@@ -591,7 +591,15 @@ impl<'p, 'm> Interp<'p, 'm> {
             "__deep_copy" => {
                 let ty = operand_type_of(&args[0], &f.local_types);
                 let v = self.eval_operand(f, frame, &args[0], &ty)?;
-                Ok(deep_copy_value(&v))
+                deep_copy_value(&v)
+            }
+            // `__present(x)`: the `if let x = e` presence test -- false only for a
+            // null subject. Non-nullable subjects fold statically in
+            // `cond_static_truthiness` and never reach here.
+            "__present" => {
+                let ty = operand_type_of(&args[0], &f.local_types);
+                let v = self.eval_operand(f, frame, &args[0], &ty)?;
+                Ok(Value::Bool(!v.is_null()))
             }
             // `__nonnull(x)`: narrow a nullable to its inner value. A non-null
             // nullable is represented transparently (the value itself), so this is
@@ -623,10 +631,10 @@ impl<'p, 'm> Interp<'p, 'm> {
                 let ty = operand_type_of(&args[0], &f.local_types);
                 let v = self.eval_operand(f, frame, &args[0], &ty)?;
                 let hir = self.hir;
-                Ok(Value::str(format_value(hir, &v, &ty)))
+                Ok(Value::str(format_value(hir, &v, &ty)?))
             }
             "print" | "println" => self.eval_io(f, frame, name, args),
-            "spawn" | "sync" | "with" => Err(
+            "spawn" | "sync" | "with" | "_with_all" => Err(
                 "concurrency (`spawn`/`sync`/`with`) is not supported by the REPL runtime".into(),
             ),
             // Ownership promotions inserted by the spawn auto-acquire pass. The
@@ -718,7 +726,7 @@ impl<'p, 'm> Interp<'p, 'm> {
                 let aty = operand_type_of(&args[0], &f.local_types);
                 let v = self.eval_operand(f, frame, &args[0], &aty)?;
                 let hir = self.hir;
-                Ok(Value::str(format_value(hir, &v, &aty)))
+                Ok(Value::str(format_value(hir, &v, &aty)?))
             }
             "_int_parse" | "_float_parse" => {
                 let s = self.eval_operand(f, frame, &args[0], &Type::Str)?;
@@ -781,7 +789,7 @@ impl<'p, 'm> Interp<'p, 'm> {
         let v = self.eval_operand(f, frame, &args[0], &arg_ty)?;
         if ty == "string" {
             let hir = self.hir;
-            return Ok(Value::str(format_value(hir, &v, &arg_ty)));
+            return Ok(Value::str(format_value(hir, &v, &arg_ty)?));
         }
         let target = if let Some(k) = IntKind::from_name(ty) {
             Type::Int(k)
@@ -812,7 +820,7 @@ impl<'p, 'm> Interp<'p, 'm> {
                     v.as_str().to_string()
                 } else {
                     let hir = self.hir;
-                    format_value(hir, &v, &ty)
+                    format_value(hir, &v, &ty)?
                 }
             }
         };
@@ -845,17 +853,28 @@ fn truthy(v: &Value, ty: &Type) -> bool {
 /// rebuilt with new mutable cells and recursively-copied children, so the copy
 /// shares no mutable storage with the original. Scalars and immutable/shared
 /// handles (string, closure) are returned as-is -- they are never mutated, so the
-/// `Rc` share is sound.
-fn deep_copy_value(v: &Value) -> Value {
-    match v {
+/// `Rc` share is sound. Errs past [`MAX_VALUE_DEPTH`]: a self-referential record
+/// type can build a reference cycle, which has no finite copy.
+fn deep_copy_value(v: &Value) -> Result<Value, String> {
+    deep_copy_value_at(v, 0)
+}
+
+fn deep_copy_value_at(v: &Value, depth: usize) -> Result<Value, String> {
+    if depth > MAX_VALUE_DEPTH {
+        return Err("value depth exceeded while copying (cyclic value?)".into());
+    }
+    Ok(match v {
         Value::Array(a) => Value::Array(Rc::new(RefCell::new(
-            a.borrow().iter().map(deep_copy_value).collect(),
+            a.borrow()
+                .iter()
+                .map(|e| deep_copy_value_at(e, depth + 1))
+                .collect::<Result<_, _>>()?,
         ))),
         Value::Record(r) => Value::Record(Rc::new(RefCell::new(
             r.borrow()
                 .iter()
-                .map(|(k, val)| (k.clone(), deep_copy_value(val)))
-                .collect(),
+                .map(|(k, val)| Ok((k.clone(), deep_copy_value_at(val, depth + 1)?)))
+                .collect::<Result<_, String>>()?,
         ))),
         Value::Variant(var) => Value::Variant(Rc::new(VariantObj {
             variant: var.variant.clone(),
@@ -863,12 +882,12 @@ fn deep_copy_value(v: &Value) -> Value {
                 var.fields
                     .borrow()
                     .iter()
-                    .map(|(k, val)| (k.clone(), deep_copy_value(val)))
-                    .collect(),
+                    .map(|(k, val)| Ok((k.clone(), deep_copy_value_at(val, depth + 1)?)))
+                    .collect::<Result<_, String>>()?,
             ),
         })),
         other => other.clone(),
-    }
+    })
 }
 
 fn matches_variant(v: &Value, variant: &str) -> bool {

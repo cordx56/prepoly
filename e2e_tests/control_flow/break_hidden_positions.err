@@ -1,0 +1,3 @@
+error: function `f` may finish without returning a value of type `int32`
+error: function `g` may finish without returning a value of type `int32`
+error: `break` outside of a loop

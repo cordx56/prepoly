@@ -1,0 +1,1 @@
+error: `Student` does not satisfy `Person`: missing field `last_name`

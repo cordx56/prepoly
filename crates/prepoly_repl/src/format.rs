@@ -17,11 +17,26 @@
 use prepoly_hir::types::{RESULT_ERR_ERROR, RESULT_OK_VALUE};
 use prepoly_hir::{IntKind, NominalType, Program, Type, TypeKind};
 
-use crate::value::{Value, VariantObj};
+use crate::value::{MAX_VALUE_DEPTH, Value, VariantObj};
 
-/// Render `v`, whose concrete type is `ty`, as the typed back end would.
-pub fn format_value(program: &Program, v: &Value, ty: &Type) -> String {
-    match ty {
+/// Render `v`, whose concrete type is `ty`, as the typed back end would. Errs
+/// when the value nests deeper than [`MAX_VALUE_DEPTH`] -- with self-referential
+/// record types a value can hold a reference cycle, which would otherwise recurse
+/// forever.
+pub fn format_value(program: &Program, v: &Value, ty: &Type) -> Result<String, String> {
+    format_value_at(program, v, ty, 0)
+}
+
+fn format_value_at(
+    program: &Program,
+    v: &Value,
+    ty: &Type,
+    depth: usize,
+) -> Result<String, String> {
+    if depth > MAX_VALUE_DEPTH {
+        return Err("value depth exceeded while rendering (cyclic value?)".into());
+    }
+    Ok(match ty {
         Type::Str => v.as_str().to_string(),
         Type::Bool => bool_str(v.as_bool()),
         Type::Int(k) => int_str(v.as_int(), *k),
@@ -31,25 +46,25 @@ pub fn format_value(program: &Program, v: &Value, ty: &Type) -> String {
             if v.is_null() {
                 "null".to_string()
             } else {
-                format_value(program, v, inner)
+                format_value_at(program, v, inner, depth + 1)?
             }
         }
         Type::Slice(elem) | Type::Array(elem, _) => {
             let Value::Array(items) = v else {
-                return "[]".to_string();
+                return Ok("[]".to_string());
             };
             let rendered: Vec<String> = items
                 .borrow()
                 .iter()
-                .map(|e| format_value(program, e, elem))
-                .collect();
+                .map(|e| format_value_at(program, e, elem, depth + 1))
+                .collect::<Result<_, _>>()?;
             format!("[{}]", rendered.join(", "))
         }
         // A tuple holds its (heterogeneous) elements in the array value; each is
         // rendered with its own element type.
         Type::Tuple(elems) => {
             let Value::Array(items) = v else {
-                return "[]".to_string();
+                return Ok("[]".to_string());
             };
             let items = items.borrow();
             let rendered: Vec<String> = elems
@@ -57,24 +72,24 @@ pub fn format_value(program: &Program, v: &Value, ty: &Type) -> String {
                 .enumerate()
                 .map(|(i, ety)| {
                     let e = items.get(i).cloned().unwrap_or(Value::Void);
-                    format_value(program, &e, ety)
+                    format_value_at(program, &e, ety, depth + 1)
                 })
-                .collect();
+                .collect::<Result<_, _>>()?;
             format!("[{}]", rendered.join(", "))
         }
         Type::Record(n) => match v {
             Value::Record(fields) => {
                 let layout = record_field_layout(program, n);
-                render_named_fields(program, record_header(n), &layout, &fields.borrow())
+                render_named_fields(program, record_header(n), &layout, &fields.borrow(), depth)?
             }
             _ => n.name.clone(),
         },
         Type::Sum(n) => match v {
-            Value::Variant(var) => render_sum(program, n, var),
+            Value::Variant(var) => render_sum(program, n, var, depth)?,
             _ => n.name.clone(),
         },
         other => other.display(),
-    }
+    })
 }
 
 /// `true`/`false`.
@@ -124,28 +139,34 @@ fn render_named_fields(
     header: &str,
     fields: &[(String, Type)],
     values: &std::collections::HashMap<String, Value>,
-) -> String {
+    depth: usize,
+) -> Result<String, String> {
     if fields.is_empty() {
-        return format!("{header} {{}}");
+        return Ok(format!("{header} {{}}"));
     }
     let mut out = format!("{header} {{\n");
     for (fname, fty) in fields {
         let fv = values.get(fname).cloned().unwrap_or(Value::Void);
-        let rendered = format_value(program, &fv, fty).replace('\n', "\n    ");
+        let rendered = format_value_at(program, &fv, fty, depth + 1)?.replace('\n', "\n    ");
         out.push_str(&format!("    {fname}: {rendered},\n"));
     }
     out.push('}');
-    out
+    Ok(out)
 }
 
 /// Render a sum value as `T.Variant { ... }` (bare `T.Variant` when field-less).
-fn render_sum(program: &Program, n: &NominalType, var: &VariantObj) -> String {
+fn render_sum(
+    program: &Program,
+    n: &NominalType,
+    var: &VariantObj,
+    depth: usize,
+) -> Result<String, String> {
     let header = format!("{}.{}", n.name, var.variant);
     let fields = variant_field_layout(program, n, &var.variant);
     if fields.is_empty() {
-        header
+        Ok(header)
     } else {
-        render_named_fields(program, &header, &fields, &var.fields.borrow())
+        render_named_fields(program, &header, &fields, &var.fields.borrow(), depth)
     }
 }
 

@@ -71,17 +71,24 @@ pub fn lower(modules: &[LoadedModule]) -> (Program, Vec<LowerError>) {
             match item {
                 TopLevel::Type(td) => {
                     let symbol = qualified_symbol(&td.name, &m.path, &type_name_modules);
+                    // `Result` is built in (fallible returns construct it); a
+                    // user definition would silently vanish behind the builtin,
+                    // so redefining it is an error rather than a skip.
+                    if td.name == "Result" {
+                        errors.push(LowerError {
+                            message: "`Result` is built in and cannot be redefined".to_string(),
+                            span: td.span,
+                        });
+                        continue;
+                    }
                     // Same symbol => same name twice in one module (a genuine
-                    // duplicate, or a clash with the builtin `Result`). A
-                    // different module yields a different symbol, so cross-module
-                    // same-named types coexist.
+                    // duplicate). A different module yields a different symbol,
+                    // so cross-module same-named types coexist.
                     if types.contains_key(&symbol) {
-                        if td.name != "Result" {
-                            errors.push(LowerError {
-                                message: format!("duplicate type `{}`", td.name),
-                                span: td.span,
-                            });
-                        }
+                        errors.push(LowerError {
+                            message: format!("duplicate type `{}`", td.name),
+                            span: td.span,
+                        });
                         continue;
                     }
                     let info = type_info(td, next_id, &m.path, symbol.clone(), &mut errors);

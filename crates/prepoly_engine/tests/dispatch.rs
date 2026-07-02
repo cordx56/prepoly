@@ -298,6 +298,12 @@ impl Codegen for TextBackend {
     fn cown_unlock_all(&mut self, arr: usize) {
         self.line(format!("unlock_all v{arr}"));
     }
+    fn cown_lock_many(&mut self, objs: &[usize]) {
+        self.line(format!("lock_many {objs:?}"));
+    }
+    fn cown_unlock_many(&mut self, objs: &[usize]) {
+        self.line(format!("unlock_many {objs:?}"));
+    }
     fn region_open(&mut self, bridge: usize) -> usize {
         self.val(format!("region_open v{bridge}"))
     }
@@ -349,15 +355,17 @@ fn dispatch_monomorphizes_and_types_a_recursive_program() {
         "fun fact(n) {\n  if n < 2 {\n    return 1\n  }\n  return n * fact(n - 1)\n}\n\
          fun answer() {\n  return fact(5) + 10\n}\n",
     );
-    // The int32 instance of `fact` is named and typed.
-    assert!(out.contains("fn fact__int32(int32) -> int32"), "{out}");
+    // The int32 instance of `fact` is named and typed (the instance symbol is
+    // derived, not hard-coded, so the mangling scheme stays free to change).
+    let fact_i32 = prepoly_engine::instance_symbol("fact", &[Type::Int(prepoly_hir::IntKind::I32)]);
+    assert!(out.contains(&format!("fn {fact_i32}(int32) -> int32")), "{out}");
     // `answer` is a zero-arg instance returning int32.
     assert!(out.contains("fn answer() -> int32"), "{out}");
     // Operations carry their concrete operand type.
     assert!(out.contains("Lt:int32"), "{out}");
     assert!(out.contains("Mul:int32"), "{out}");
     // The call targets the int32 instance.
-    assert!(out.contains("call fact__int32"), "{out}");
+    assert!(out.contains(&format!("call {fact_i32}")), "{out}");
     // Constants are typed at their contextual type, not boxed.
     assert!(out.contains("5:int32") || out.contains("10:int32"), "{out}");
 }
@@ -370,10 +378,16 @@ fn dispatch_specializes_one_function_for_two_types() {
          fun use_int() {\n  return id(1)\n}\n\
          fun use_flt() {\n  return id(2.0)\n}\n",
     );
-    assert!(out.contains("fn id__int32(int32) -> int32"), "{out}");
-    assert!(out.contains("fn id__float64(float64) -> float64"), "{out}");
-    assert!(out.contains("call id__int32"), "{out}");
-    assert!(out.contains("call id__float64"), "{out}");
+    let id_i32 = prepoly_engine::instance_symbol("id", &[Type::Int(prepoly_hir::IntKind::I32)]);
+    let id_f64 =
+        prepoly_engine::instance_symbol("id", &[Type::Float(prepoly_hir::FloatKind::F64)]);
+    assert!(out.contains(&format!("fn {id_i32}(int32) -> int32")), "{out}");
+    assert!(
+        out.contains(&format!("fn {id_f64}(float64) -> float64")),
+        "{out}"
+    );
+    assert!(out.contains(&format!("call {id_i32}")), "{out}");
+    assert!(out.contains(&format!("call {id_f64}")), "{out}");
 }
 
 #[test]
@@ -428,8 +442,11 @@ fn monomorphize_types_module_globals() {
     let (program, _errors) = prepoly_hir::lower(&modules);
     let mir = lower_program(&program);
     let mono = monomorphize(&mir, &program).expect("monomorphize");
+    // Globals are keyed per defining module (`name@module`), so two modules'
+    // same-named top-level `let`s never share a slot.
     assert_eq!(
-        mono.global_type("counter").map(|t| t.display()),
+        mono.global_type(&prepoly_hir::qualify("counter", &["main".into()]))
+            .map(|t| t.display()),
         Some("int32".to_string())
     );
     assert!(mono.lookup("get").is_some());
@@ -490,11 +507,12 @@ fn narrowed_nullable_array_ops_type_and_keep_the_init() {
             "init dropped for narrowed nullable `{label}`"
         );
         // The instance still carries the declared nullable parameter; the back end
-        // strips it at each use.
+        // strips it at each use. The instance is any specialization of `f` (its
+        // symbol extends the base name; the exact mangle is the engine's business).
         let f = mono
             .functions
             .iter()
-            .find(|f| f.symbol.starts_with("f__"))
+            .find(|f| f.symbol.starts_with("f") && f.symbol != "f")
             .unwrap_or_else(|| panic!("no `f` instance for `{label}`"));
         assert!(
             matches!(f.local_types.first(), Some(prepoly_hir::Type::Nullable(_))),

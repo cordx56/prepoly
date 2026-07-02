@@ -148,7 +148,10 @@ fn binds_alias(rv: &Rvalue, local_types: &[Type]) -> bool {
 /// program emits no barriers and pays no barrier cost.
 pub fn program_uses_with(program: &MonoProgram) -> bool {
     fn rv_with(rv: &Rvalue) -> bool {
-        matches!(rv, Rvalue::Call(Callee::Builtin(n), _) if n == "with")
+        // `_with_all` is the auto-acquire pass's group form of `with`; a program
+        // whose only guards are group wraps still shares cowns across threads, so
+        // it needs the same barriers.
+        matches!(rv, Rvalue::Call(Callee::Builtin(n), _) if n == "with" || n == "_with_all")
     }
     program.functions.iter().any(|f| {
         f.body.blocks.iter().any(|b| {
@@ -378,6 +381,12 @@ pub trait Codegen {
     /// Acquire / release every cown in an array, for `with([c1, c2], f)`.
     fn cown_lock_all(&mut self, arr: Self::Value);
     fn cown_unlock_all(&mut self, arr: Self::Value);
+    /// Acquire / release a group of individually typed cown values, for the
+    /// compiler-inserted `_with_all(f, c0, c1, ...)` wrap. The runtime acquires
+    /// them in address order, so overlapping groups emitted in any textual order
+    /// share one global lock order and cannot deadlock each other.
+    fn cown_lock_many(&mut self, objs: &[Self::Value]);
+    fn cown_unlock_many(&mut self, objs: &[Self::Value]);
 
     /// Open a region with `bridge` as its entry object; returns
     /// the region id, which `region_close` consumes.
@@ -648,6 +657,24 @@ pub trait Codegen {
     fn codegen_terminator(&mut self, program: &MonoProgram, f: &MonoFunction, t: &Terminator) {
         match t {
             Terminator::Return(op) => {
+                // A non-void function's synthesized fall-through return (the MIR
+                // builder terminates an unterminated final block with
+                // `Return(void)`): unreachable when the checker accepted the body
+                // -- every real return sits inside a loop that never exits (e.g.
+                // `while true`). Emitting it would return a unit placeholder at
+                // the wrong machine type (an LLVM verifier error); terminate the
+                // path with a trap instead, defined if a checker hole ever
+                // reaches it. A *fallible* body is exempt: its return type is
+                // `Result<void, ..>`-like while the body's fall-through is a bare
+                // `void` that the wrapping below turns into a real `Ok` value.
+                if !f.fallible
+                    && !matches!(f.ret, Type::Void)
+                    && matches!(op, Operand::Const(Literal::Void))
+                {
+                    self.emit_panic("missing return");
+                    self.emit_unreachable();
+                    return;
+                }
                 let returned = op.as_local();
                 // A returned parameter is borrowed from the caller, so hand the
                 // caller a counted reference; a returned non-parameter local is
@@ -762,8 +789,12 @@ pub trait Codegen {
                 let mut managed: Vec<Self::Value> = Vec::new();
                 for (name, op) in fields {
                     let fty = record_field_type(dest_ty, name);
+                    let op_ty = operand_type_of(op, &f.local_types);
                     let v = self.codegen_operand(program, f, op, &fty);
-                    if rc_managed(&fty) && operand_is_alias(op) {
+                    // Same ownership rule as `MirStmt::Store`: a nullable wrap is a
+                    // fresh cell that already owns its content, so retaining it too
+                    // would over-count the cell (it is never separately dropped).
+                    if rc_managed(&fty) && operand_is_alias(op) && !is_nullable_wrap(&fty, &op_ty) {
                         managed.push(v);
                     }
                     named.push((name.as_str(), v));
@@ -862,9 +893,16 @@ pub trait Codegen {
                     }
                     let tup = self.make_tuple(elem_types, &vals);
                     // The tuple references each managed element (its destructor
-                    // releases them), so a managed element's count must rise.
-                    for (v, ety) in vals.iter().zip(elem_types) {
-                        if rc_managed(ety) {
+                    // releases them). Same ownership rule as `MirStmt::Store`: only
+                    // an *aliased* element's count rises -- a fresh constant and a
+                    // nullable-wrap cell are already owned at 1 and transfer that
+                    // ownership to the tuple (retaining them too would leak).
+                    for ((op, v), ety) in es.iter().zip(&vals).zip(elem_types) {
+                        let op_ty = operand_type_of(op, &f.local_types);
+                        if rc_managed(ety)
+                            && operand_is_alias(op)
+                            && !is_nullable_wrap(ety, &op_ty)
+                        {
                             self.retain(*v);
                         }
                     }
@@ -876,9 +914,15 @@ pub trait Codegen {
                         vals.push(self.codegen_operand(program, f, op, &elem_ty));
                     }
                     let arr = self.make_array(&elem_ty, &vals);
+                    // Same ownership rule as `MirStmt::Store` (see the tuple arm
+                    // above): retaining a fresh constant or wrap cell leaked one
+                    // reference per element.
                     if rc_managed(&elem_ty) {
-                        for v in &vals {
-                            self.retain(*v);
+                        for (op, v) in es.iter().zip(&vals) {
+                            let op_ty = operand_type_of(op, &f.local_types);
+                            if operand_is_alias(op) && !is_nullable_wrap(&elem_ty, &op_ty) {
+                                self.retain(*v);
+                            }
                         }
                     }
                     arr
@@ -946,9 +990,15 @@ pub trait Codegen {
                 let arr = self.codegen_operand(program, f, &args[0], aty);
                 let v = self.codegen_operand(program, f, &args[1], &elem);
                 self.push(arr, &elem, v);
-                // The array now holds a reference to a managed element, so its count
-                // must rise (the array's destructor releases it).
-                if rc_managed(&elem) {
+                // The array now holds a reference to a managed element. Same
+                // ownership rule as `MirStmt::Store`: only an aliased element's
+                // count rises -- a fresh constant and a nullable-wrap cell already
+                // own their single reference and hand it to the array (retaining
+                // them too leaked one reference per push).
+                if rc_managed(&elem)
+                    && operand_is_alias(&args[1])
+                    && !is_nullable_wrap(&elem, &operand_type_of(&args[1], &f.local_types))
+                {
                     self.retain(v);
                 }
                 return self.unit();
@@ -965,8 +1015,11 @@ pub trait Codegen {
                 let v = self.codegen_operand(program, f, &args[2], &elem);
                 self.insert(arr, &elem, idx, v);
                 // The array now holds a reference to a managed element (its
-                // destructor releases it), so its count must rise.
-                if rc_managed(&elem) {
+                // destructor releases it). Aliased elements only -- see `push`.
+                if rc_managed(&elem)
+                    && operand_is_alias(&args[2])
+                    && !is_nullable_wrap(&elem, &operand_type_of(&args[2], &f.local_types))
+                {
                     self.retain(v);
                 }
                 return self.unit();
@@ -1135,6 +1188,15 @@ pub trait Codegen {
                 let v = self.codegen_operand(program, f, &args[0], &ty);
                 self.deep_copy(v, &ty)
             }
+            // `__present(x)`: the `if let x = e` presence test. Only a genuinely
+            // nullable subject reaches runtime (non-nullable subjects fold in
+            // `cond_static_truthiness`), where truthiness of a nullable is the
+            // non-null test.
+            "__present" => {
+                let ty = operand_type_of(&args[0], &f.local_types);
+                let v = self.codegen_operand(program, f, &args[0], &ty);
+                self.truthy(v, &ty)
+            }
             // `__nonnull(x)`: narrow a nullable to its inner value -- the binding of
             // an `if let p = <nullable>` on the (proven non-null) then-arm, so `p`
             // has the value type, not the nullable. A non-nullable argument passes
@@ -1266,6 +1328,34 @@ pub trait Codegen {
                 } else {
                     self.cown_unlock(obj);
                 }
+                result
+            }
+            // `_with_all(f, c0, c1, ...)` -- inserted by the spawn auto-acquire pass
+            // when one guarded body touches several cowns -- acquires every heap
+            // cown in the group through the runtime's address-ordered group lock,
+            // runs the zero-argument closure `f`, releases, and yields `f`'s
+            // result. Address ordering (not the emission order) is what makes two
+            // groups over the same cowns deadlock-free regardless of capture
+            // names. A primitive in the group has no heap object to lock -- it is
+            // copied, not shared -- so it is skipped, exactly as single `with`
+            // skips a primitive.
+            "_with_all" => {
+                let cty = operand_type_of(&args[0], &f.local_types);
+                let clo = self.codegen_operand(program, f, &args[0], &cty);
+                let cowns: Vec<Self::Value> = args[1..]
+                    .iter()
+                    .filter(|a| rc_managed(unwrap_nullable(&operand_type_of(a, &f.local_types))))
+                    .map(|a| {
+                        let ty = operand_type_of(a, &f.local_types);
+                        self.codegen_operand(program, f, a, &ty)
+                    })
+                    .collect();
+                if cowns.is_empty() {
+                    return self.call_indirect(clo, &cty, &[]);
+                }
+                self.cown_lock_many(&cowns);
+                let result = self.call_indirect(clo, &cty, &[]);
+                self.cown_unlock_many(&cowns);
                 result
             }
             "_float_sqrt" | "_float_floor" | "_float_ceil" | "_float_pow" => {
@@ -1586,7 +1676,16 @@ pub trait Codegen {
             && !matches!(lit, Literal::Null)
         {
             let v = self.codegen_const(lit, inner);
-            return self.coerce(v, inner, expected_ty);
+            let cell = self.coerce(v, inner, expected_ty);
+            // The wrap retained `v` (the cell's destructor releases it), but a
+            // fresh managed constant's own reference has no other owner: unlike a
+            // local, no binding ever drops it. Release it here so the cell holds
+            // the constant's only reference -- otherwise every `"x"` wrapped into
+            // a `string?` slot leaked the string.
+            if rc_managed(inner) {
+                self.emit_release(v, inner);
+            }
+            return cell;
         }
         match lit {
             // An integer literal in a float context (e.g. `e * 2` where `e` is a
@@ -1685,6 +1784,11 @@ fn builtin_result_type(name: &str, args: &[Operand], local_types: &[Type]) -> Op
         "panic" | "_panic" | "print" | "println" | "spawn" | "sync" | "_freeze" | "_cown" => {
             Some(Type::Void)
         }
+        // The group-acquire wrap yields its closure's result, like `with`.
+        "_with_all" => match args.first().map(|op| operand_type_of(op, local_types)) {
+            Some(Type::Fun(_, ret)) => Some(*ret),
+            _ => None,
+        },
         "len" | "array_len" => Some(Type::Int(prepoly_hir::IntKind::I64)),
         "to_string" => Some(Type::Str),
         "_float_sqrt" | "_float_floor" | "_float_ceil" | "_float_pow" => {

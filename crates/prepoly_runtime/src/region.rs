@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use crate::rt::{Header, OWNER_BRIDGE, OWNER_CONTAINED, OWNER_LOCAL, is_shared};
+use crate::rt::{Header, OWNER_BRIDGE, OWNER_CONTAINED, OWNER_IMMUTABLE, OWNER_LOCAL, is_shared};
 
 /// Per-region metadata. `lrc` includes the bridge's own external owner, so it
 /// starts at 1 and a region is closed at `lrc == 1` (no other reference in).
@@ -229,15 +229,38 @@ pub unsafe extern "C-unwind" fn pp_write_barrier(
     }
 }
 
+/// Reject a store into a deeply frozen object. Freezing promises every thread
+/// that the object graph will never change again -- readers access it without any
+/// lock -- so a write through a frozen handle is a data race by construction.
+/// Failing loudly here turns a silent race into a defined error. Under unit tests
+/// this panics (unwinds) so the rejection is observable in-process; in a real
+/// program it exits through the runtime error path.
+fn reject_frozen_write() -> ! {
+    let msg = "cannot write to a frozen (immutable) object: it is shared lock-free \
+               across threads";
+    #[cfg(test)]
+    panic!("{msg}");
+    #[cfg(not(test))]
+    crate::builtins::pp_panic_str(msg)
+}
+
 /// Reduced write barrier retained for the typed back end's current field-store
 /// path: same as [`pp_add_reference`] but also performs the local-value
 /// transfer used when no `src` owner is known. `src` is the container, `value` the
 /// stored value; equivalent to `pp_add_reference` with the container as `src`.
 ///
+/// A store whose container is *frozen* (deeply immutable, shared lock-free across
+/// threads) is rejected loudly: see [`reject_frozen_write`]. A cown container is
+/// legal here -- the back end emits this barrier for stores it performs under the
+/// cown's lock (a group-acquired `with` leaves the owner tag as `Cown`).
+///
 /// # Safety
 /// `container`/`value` must be valid object headers (or null).
 pub unsafe extern "C-unwind" fn pp_region_write(container: *mut Header, value: *mut Header) {
     unsafe {
+        if !container.is_null() && (*container).owner == OWNER_IMMUTABLE {
+            reject_frozen_write();
+        }
         pp_add_reference(container, value);
     }
 }
@@ -384,6 +407,23 @@ mod tests {
             // `inner`: the borrow is released and the region closes.
             pp_write_barrier(container, inner, std::ptr::null_mut());
             assert!(region_is_closed(id), "old reference removed -> closed");
+        }
+    }
+
+    /// A store whose container is frozen (deeply immutable) is rejected loudly:
+    /// frozen objects are read lock-free from any thread, so a write is a data
+    /// race by construction and must not proceed silently.
+    #[test]
+    fn store_into_a_frozen_container_is_rejected() {
+        let _serial = serial_region();
+        unsafe {
+            let container = pp_typed_alloc(24);
+            let value = pp_typed_alloc(16);
+            (*container).owner = crate::rt::OWNER_FROZEN;
+            let result = std::panic::catch_unwind(|| {
+                pp_region_write(container, value);
+            });
+            assert!(result.is_err(), "frozen write must fail loudly");
         }
     }
 

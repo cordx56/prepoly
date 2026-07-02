@@ -1,0 +1,1 @@
+error: function `pick` may finish without returning a value of type `int32`

@@ -1,0 +1,2 @@
+error: float literal used where `int32` is required
+error: cannot use `float64` where `int32` is required

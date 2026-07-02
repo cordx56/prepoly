@@ -35,8 +35,12 @@ impl Span {
 pub enum StrPart {
     /// Literal text with escapes already resolved.
     Lit(String),
-    /// Raw source text of an interpolated expression (between `{` and `}`).
-    Interp(String),
+    /// Raw source text of an interpolated expression (between `{` and `}`),
+    /// with the fragment's byte offset in the lexed source. The parser re-lexes
+    /// the fragment from offset zero and shifts its spans by this offset (plus
+    /// the file base), so diagnostics inside an interpolation point at the real
+    /// location instead of the first file in the source map.
+    Interp(String, usize),
 }
 
 #[derive(Clone, Debug, PartialEq)]

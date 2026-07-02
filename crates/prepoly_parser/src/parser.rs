@@ -41,13 +41,19 @@ pub fn parse_with_base(src: &str, base: usize) -> Result<Module, ParseError> {
     for t in &mut tokens {
         t.span = Span::new(t.span.lo + base, t.span.hi + base);
     }
-    let mut p = Parser::new(tokens);
+    let mut p = Parser::new(tokens, base);
     p.parse_module()
 }
 
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// The file's span base (multi-file offset). Interpolation fragments are
+    /// re-lexed from offset zero, so their sub-parser shifts spans by this base
+    /// plus the fragment's in-file offset to stay file-attributable.
+    base: usize,
+    /// Current expression nesting depth; bounded by [`MAX_EXPR_DEPTH`].
+    expr_depth: usize,
     /// Bracket nesting depth; when > 0 newlines are skipped automatically.
     depth: usize,
     /// When true, a bare `Ident {` is NOT a type literal (used inside `if`,
@@ -59,11 +65,20 @@ struct Parser {
 
 type PResult<T> = Result<T, ParseError>;
 
+/// Maximum expression nesting the recursive-descent parser accepts. Deep enough
+/// for any hand-written program; bounded so adversarial input gets a diagnostic
+/// rather than a native stack overflow. The bound must hold for DEBUG builds
+/// too, whose stack frames are several times larger (a debug binary overflows
+/// near depth 300; 150 leaves the rest of the pipeline headroom as well).
+const MAX_EXPR_DEPTH: usize = 150;
+
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
+    fn new(tokens: Vec<Token>, base: usize) -> Self {
         Parser {
             tokens,
             pos: 0,
+            base,
+            expr_depth: 0,
             depth: 0,
             no_struct: false,
             ns_save: Vec::new(),
@@ -555,7 +570,19 @@ impl Parser {
     // ----- expressions (precedence cascade) -----
 
     fn parse_expr(&mut self) -> PResult<Expr> {
-        self.parse_or()
+        // Recursive descent consumes native stack per nesting level; without a
+        // bound, deeply nested source (thousands of `(`) aborts the whole
+        // process with a stack overflow instead of a diagnostic.
+        if self.expr_depth >= MAX_EXPR_DEPTH {
+            return Err(ParseError {
+                message: "expression nesting is too deep".into(),
+                span: self.span(),
+            });
+        }
+        self.expr_depth += 1;
+        let result = self.parse_or();
+        self.expr_depth -= 1;
+        result
     }
 
     fn parse_or(&mut self) -> PResult<Expr> {
@@ -1225,13 +1252,13 @@ impl Parser {
 
     // ----- string interpolation -----
 
-    fn lower_str(&self, parts: Vec<StrPart>, span: Span) -> PResult<Vec<StrSeg>> {
+    fn lower_str(&self, parts: Vec<StrPart>, _span: Span) -> PResult<Vec<StrSeg>> {
         let mut segs = Vec::new();
         for part in parts {
             match part {
                 StrPart::Lit(s) => segs.push(StrSeg::Lit(s)),
-                StrPart::Interp(raw) => {
-                    let e = parse_sub_expr(&raw, span)?;
+                StrPart::Interp(raw, frag_lo) => {
+                    let e = parse_sub_expr(&raw, self.base + frag_lo)?;
                     segs.push(StrSeg::Expr(Box::new(e)));
                 }
             }
@@ -1241,12 +1268,19 @@ impl Parser {
 }
 
 /// Parse the raw source of an interpolation `{...}` as a single expression.
-fn parse_sub_expr(raw: &str, _outer: Span) -> PResult<Expr> {
-    let tokens = lex(raw).map_err(|e| ParseError {
+/// `shift` is the fragment's absolute offset (file base + in-file position of
+/// the byte after the `{`); the fragment is lexed from zero, so every span is
+/// shifted to stay attributable to the real file and line.
+fn parse_sub_expr(raw: &str, shift: usize) -> PResult<Expr> {
+    let reattribute = |s: Span| Span::new(s.lo + shift, s.hi + shift);
+    let mut tokens = lex(raw).map_err(|e| ParseError {
         message: format!("in string interpolation: {}", e.message),
-        span: e.span,
+        span: reattribute(e.span),
     })?;
-    let mut p = Parser::new(tokens);
+    for t in &mut tokens {
+        t.span = reattribute(t.span);
+    }
+    let mut p = Parser::new(tokens, shift);
     p.eat_newlines();
     let e = p.parse_expr()?;
     p.eat_newlines();

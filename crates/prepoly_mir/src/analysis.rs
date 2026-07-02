@@ -95,32 +95,99 @@ fn closure_as_block(body: &Expr) -> Block {
 }
 
 /// Free variables of a closure body relative to its own parameters and locals,
-/// sorted for deterministic capture order.
+/// sorted for deterministic capture order. The walk is ordered and scoped: a
+/// read *before* a same-named later `let` is free (it refers to the outer
+/// binding the closure must capture), and a binding introduced inside a nested
+/// block, loop body, or match/if-let arm goes out of scope with it.
 pub fn free_vars_of(params: &[Param], body: &Block) -> Vec<String> {
     let mut bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
-    bound_block(body, &mut bound);
-    let mut refs = HashSet::new();
-    idents_block(body, &mut refs);
-    let mut free: Vec<String> = refs.into_iter().filter(|r| !bound.contains(r)).collect();
-    free.sort();
-    free
+    let mut free = HashSet::new();
+    free_block(body, &mut bound, &mut free);
+    let mut out: Vec<String> = free.into_iter().collect();
+    out.sort();
+    out
 }
 
-fn bound_block(b: &Block, out: &mut HashSet<String>) {
+/// Walk a block in statement order, adding reads of names not currently bound
+/// to `free`. `bound` is restored on exit, so the block's `let`s do not leak
+/// into the enclosing scope.
+fn free_block(b: &Block, bound: &mut HashSet<String>, free: &mut HashSet<String>) {
+    let saved = bound.clone();
     for s in &b.stmts {
-        bound_stmt(s, out);
+        match s {
+            Stmt::Let { pat, value, .. } => {
+                // The initializer is evaluated before the pattern binds, so a
+                // self-named reference in it (`let y = y + 1`) is a free read.
+                free_expr(value, bound, free);
+                bound_pat(pat, bound);
+            }
+            Stmt::Assign { target, value, .. } => {
+                free_expr(target, bound, free);
+                free_expr(value, bound, free);
+            }
+            Stmt::Expr(e) => free_expr(e, bound, free),
+            Stmt::While { cond, body, .. } => {
+                free_expr(cond, bound, free);
+                free_block(body, bound, free);
+            }
+            Stmt::For {
+                var, iter, body, ..
+            } => {
+                free_expr(iter, bound, free);
+                let mut inner = bound.clone();
+                inner.insert(var.clone());
+                free_block(body, &mut inner, free);
+            }
+            Stmt::Return(Some(e), _) => free_expr(e, bound, free),
+            _ => {}
+        }
     }
+    *bound = saved;
 }
 
-fn bound_stmt(s: &Stmt, out: &mut HashSet<String>) {
-    match s {
-        Stmt::Let { pat, .. } => bound_pat(pat, out),
-        Stmt::While { body, .. } => bound_block(body, out),
-        Stmt::For { var, body, .. } => {
-            out.insert(var.clone());
-            bound_block(body, out);
+fn free_expr(e: &Expr, bound: &mut HashSet<String>, free: &mut HashSet<String>) {
+    match e {
+        Expr::Ident(n, _) => {
+            if !bound.contains(n) {
+                free.insert(n.clone());
+            }
         }
-        _ => {}
+        // A nested closure binds its own parameters; whatever else it reads and
+        // we have not bound is transitively free here.
+        Expr::Closure(params, body, _) => {
+            let mut inner = bound.clone();
+            for p in params {
+                inner.insert(p.name.clone());
+            }
+            free_block(&closure_as_block(body), &mut inner, free);
+        }
+        Expr::Block(b, _) => free_block(b, bound, free),
+        Expr::If(c, t, els, _) => {
+            free_expr(c, bound, free);
+            free_block(t, bound, free);
+            if let Some(e) = els {
+                free_expr(e, bound, free);
+            }
+        }
+        // Pattern bindings are visible only in the arm they guard.
+        Expr::IfLet(pat, s, t, els, _) => {
+            free_expr(s, bound, free);
+            let mut inner = bound.clone();
+            bound_pat(pat, &mut inner);
+            free_block(t, &mut inner, free);
+            if let Some(e) = els {
+                free_expr(e, bound, free);
+            }
+        }
+        Expr::Match(s, arms, _) => {
+            free_expr(s, bound, free);
+            for a in arms {
+                let mut inner = bound.clone();
+                bound_pat(&a.pattern, &mut inner);
+                free_expr(&a.body, &mut inner, free);
+            }
+        }
+        _ => walk_subexprs(e, &mut |sub| free_expr(sub, bound, free)),
     }
 }
 
@@ -144,46 +211,12 @@ fn bound_pat(p: &Pattern, out: &mut HashSet<String>) {
     }
 }
 
-fn idents_block(b: &Block, out: &mut HashSet<String>) {
-    for s in &b.stmts {
-        idents_stmt(s, out);
-    }
-}
-
-fn idents_stmt(s: &Stmt, out: &mut HashSet<String>) {
-    match s {
-        Stmt::Let { value, .. } => idents_expr(value, out),
-        Stmt::Assign { target, value, .. } => {
-            idents_expr(target, out);
-            idents_expr(value, out);
-        }
-        Stmt::Expr(e) => idents_expr(e, out),
-        Stmt::While { cond, body, .. } => {
-            idents_expr(cond, out);
-            idents_block(body, out);
-        }
-        Stmt::For { iter, body, .. } => {
-            idents_expr(iter, out);
-            idents_block(body, out);
-        }
-        Stmt::Return(Some(e), _) => idents_expr(e, out),
-        _ => {}
-    }
-}
-
-fn idents_expr(e: &Expr, out: &mut HashSet<String>) {
-    if let Expr::Ident(n, _) = e {
-        out.insert(n.clone());
-    }
-    walk_subexprs(e, &mut |s| idents_expr(s, out));
-}
-
 /// Apply `f` to the immediate value sub-expressions of `e`. Nested closures are
 /// walked through their body so transitively captured names are still seen.
 fn walk_subexprs(e: &Expr, f: &mut impl FnMut(&Expr)) {
     match e {
         Expr::Unary(_, a, _) | Expr::Field(a, _, _) | Expr::ErrorProp(a, _) => f(a),
-        Expr::Binary(_, a, b, _) | Expr::Index(a, b, _) => {
+        Expr::Binary(_, a, b, _) | Expr::Index(a, b, _) | Expr::Range(a, b, _) => {
             f(a);
             f(b);
         }

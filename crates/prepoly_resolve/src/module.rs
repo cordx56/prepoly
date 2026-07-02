@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use prepoly_hir::{LoadedModule, Program};
+use prepoly_hir::LoadedModule;
 use prepoly_lexer::Span;
 use prepoly_parser::ast::TopLevel;
 
@@ -17,11 +17,10 @@ pub struct ResolveError {
 }
 
 /// Check each import against the loaded modules: the name must be public and
-/// exported by the named module. When the module is not a loaded file (a
-/// prelude or builtin reference, which the file resolver does not load under the
-/// import path), fall back to accepting any name that exists somewhere in the
-/// program, since prelude symbols are globally available.
-pub fn check_imports(program: &Program, modules: &[LoadedModule]) -> Vec<ResolveError> {
+/// exported by the named module. A bare prelude path (`io`) is checked against
+/// the loaded `std.io` module's exports; importing from any other module that
+/// was not loaded is an error.
+pub fn check_imports(modules: &[LoadedModule]) -> Vec<ResolveError> {
     let exports = collect_exports(modules);
     let mut errors = Vec::new();
     for m in modules {
@@ -72,17 +71,27 @@ pub fn check_imports(program: &Program, modules: &[LoadedModule]) -> Vec<Resolve
                     }),
                     Some(_) => {}
                     None => {
-                        // Not a loaded file module: accept only names that
-                        // resolve to a program-wide (prelude/builtin) symbol.
-                        let known = program.types.contains_key(name)
-                            || program.functions.contains_key(name);
-                        if !known {
-                            errors.push(ResolveError {
-                                message: format!(
-                                    "cannot import unknown name `{name}` from `{key}`"
-                                ),
+                        // Not a loaded file module. A bare prelude path (`io`)
+                        // aliases the loaded `std.io`, so it is checked against
+                        // that module's real exports. Any other unloaded module
+                        // is unknown: accepting any program-wide name here (the
+                        // old fallback) let a phantom `import std.x.{ name }`
+                        // reach private definitions of arbitrary modules.
+                        let std_alias = format!("std.{key}");
+                        match exports.get(std_alias.as_str()) {
+                            Some(names) if !names.contains(name) => {
+                                errors.push(ResolveError {
+                                    message: format!(
+                                        "module `{key}` has no exported name `{name}`"
+                                    ),
+                                    span: imp.span,
+                                });
+                            }
+                            Some(_) => {}
+                            None => errors.push(ResolveError {
+                                message: format!("cannot import from unknown module `{key}`"),
                                 span: imp.span,
-                            });
+                            }),
                         }
                     }
                 }
@@ -127,9 +136,9 @@ mod tests {
     }
 
     fn import_errors(modules: Vec<LoadedModule>) -> Vec<String> {
-        let (program, lerr) = lower(&modules);
+        let (_program, lerr) = lower(&modules);
         assert!(lerr.is_empty(), "lower errors: {lerr:?}");
-        check_imports(&program, &modules)
+        check_imports(&modules)
             .into_iter()
             .map(|e| e.message)
             .collect()
@@ -169,8 +178,7 @@ mod tests {
             "import a.util.{ helper }\nimport b.util.{ helper }\n",
         );
         let modules = vec![a, b, main];
-        let (program, _lerr) = lower(&modules);
-        let errors: Vec<String> = check_imports(&program, &modules)
+        let errors: Vec<String> = check_imports(&modules)
             .into_iter()
             .map(|e| e.message)
             .collect();

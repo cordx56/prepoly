@@ -17,6 +17,12 @@ use std::rc::Rc;
 use prepoly_hir::Type;
 use prepoly_mir::ClosureId;
 
+/// The deepest nesting a single value may be walked to (rendering, deep copy)
+/// before the walk errs out. Self-referential record types can build reference
+/// cycles, which would otherwise recurse without bound; the limit mirrors the
+/// interpreter's call-depth cap (`MAX_DEPTH` in [`crate::interp`]).
+pub(crate) const MAX_VALUE_DEPTH: usize = 8000;
+
 /// A boxed runtime value. Integers of every width are carried in an `i64`,
 /// normalized to their declared width/sign after each operation (see
 /// [`crate::interp`]); a present nullable is represented by its inner value and an

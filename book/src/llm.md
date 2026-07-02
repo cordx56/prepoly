@@ -67,25 +67,27 @@ fun area(s: Shape) -> float64 {   // optional param and return annotations
 
 ### References and mutability
 
-- An UNANNOTATED parameter is passed by reference and its mutability is
-  inferred, so a function can mutate the caller's value through it.
-- `infer` opts out of references and DEEP-COPIES the argument; the original is
-  untouched. Use `infer[]` to require "an array, element type inferred".
-- Explicit forms: `ref(T)` and `ref(mut(T))`.
+- An UNANNOTATED parameter is a read-only reference when the body only reads
+  it. If the body MUTATES it, the parameter becomes a PRIVATE DEEP COPY at
+  entry: the function works on its own copy and the caller's value is
+  untouched.
+- Writing through to the caller requires the explicit `ref(mut(T))` form.
+- `infer` is a read-only deep copy; mutating an `infer` parameter is a compile
+  error. Use `infer[]` to require "an array, element type inferred".
+- `self` is always a reference (mutating methods mutate the receiver).
 - Closures capture their environment by mutable reference.
 
 ```
-fun double(a) {            // a is effectively a mutable reference
+fun double(a) {            // mutated => a is a private deep copy
     for e in a { e *= 2 }
 }
 let arr = [1, 2, 3]
-double(arr)                // arr is now [2, 4, 6]
+double(arr)                // arr is still [1, 2, 3]
 
-fun untouched(a: infer) {  // a is deep-copied
+fun double_through(a: ref(mut(int32[]))) {
     for e in a { e *= 2 }
 }
-const xs = [1, 2, 3]
-untouched(xs)              // xs is still [1, 2, 3]
+double_through(arr)        // arr is now [2, 4, 6]
 ```
 
 ## Types

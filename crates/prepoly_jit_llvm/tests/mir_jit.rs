@@ -87,12 +87,16 @@ fn engine_jits_unboxed_typed_instances() {
     Engine::run(&mut backend, &mono).expect("engine run");
 
     // The recursive `fact` is specialized for int32 with an unboxed signature.
+    let fact_i32 = prepoly_engine::instance_symbol(
+        "fact",
+        &[prepoly_hir::Type::Int(prepoly_hir::IntKind::I32)],
+    );
     let sig = backend
-        .instance_fn_type_string("fact__int32")
+        .instance_fn_type_string(&fact_i32)
         .expect("fact instance");
     assert!(
         sig.contains("i32 (i32)"),
-        "fact__int32 should be unboxed: {sig}"
+        "{fact_i32} should be unboxed: {sig}"
     );
 
     // Recursion + arithmetic: fact(5) + 10 = 130.
@@ -140,10 +144,16 @@ fun use_flt() {
 
     // Two distinct instances of `id` with distinct unboxed signatures.
     let int_sig = backend
-        .instance_fn_type_string("id__int32")
+        .instance_fn_type_string(&prepoly_engine::instance_symbol(
+            "id",
+            &[prepoly_hir::Type::Int(prepoly_hir::IntKind::I32)],
+        ))
         .expect("id int32");
     let flt_sig = backend
-        .instance_fn_type_string("id__float64")
+        .instance_fn_type_string(&prepoly_engine::instance_symbol(
+            "id",
+            &[prepoly_hir::Type::Float(prepoly_hir::FloatKind::F64)],
+        ))
         .expect("id float64");
     assert!(int_sig.contains("i32 (i32)"), "{int_sig}");
     assert!(flt_sig.contains("double (double)"), "{flt_sig}");
