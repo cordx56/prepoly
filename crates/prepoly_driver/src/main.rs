@@ -59,31 +59,10 @@ enum Mode {
     Repl,
 }
 
-/// Initialize the tracing subscriber from the `PREPOLY_LOG` environment variable.
-/// `PREPOLY_LOG` uses `tracing_subscriber`'s `EnvFilter` syntax, so a level
-/// (`PREPOLY_LOG=debug`) or per-target directives
-/// (`PREPOLY_LOG=prepoly_typeck=debug,prepoly_solver=trace`) both work. Unset or
-/// empty, the filter defaults to `warn`, so an ordinary run only surfaces
-/// warnings and errors and the compiler's `debug!` traces stay silent. Logs are
-/// written to stderr (program output owns stdout) without timestamps, which keeps
-/// them readable as a compile trace and avoids a clock call on the wasm build.
-/// `try_init` so a second call (e.g. from a test harness) is a no-op rather than a
-/// panic.
-fn init_tracing() {
-    use tracing_subscriber::filter::LevelFilter;
-    let filter = tracing_subscriber::EnvFilter::builder()
-        .with_default_directive(LevelFilter::WARN.into())
-        .with_env_var("PREPOLY_LOG")
-        .from_env_lossy();
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(io::stderr)
-        .without_time()
-        .try_init();
-}
-
 fn main() -> ExitCode {
-    init_tracing();
+    // Shared across the prepoly binaries: PREPOLY_LOG (EnvFilter syntax) and
+    // PREPOLY_LOG_TYPE (comma-separated named log types) select the output.
+    prepoly_utils::init_tracing();
     let cli = Cli::parse();
     match cli.command {
         // A bare file argument is type-checked and run; with neither a file nor a

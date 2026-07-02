@@ -2108,9 +2108,11 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
     }
 
     fn execute(&mut self) -> Result<(), String> {
-        // Debugging aid: dump the finalized LLVM module when requested.
-        if std::env::var("PREPOLY_DUMP_IR").is_ok() {
-            self.module.print_to_stderr();
+        // Debugging aid: dump the finalized LLVM module when requested
+        // (PREPOLY_LOG_TYPE=ir). Guarded so the module is only rendered when
+        // the target is enabled.
+        if tracing::enabled!(target: "prepoly::ir", tracing::Level::TRACE) {
+            tracing::trace!(target: "prepoly::ir", "\n{}", self.module.print_to_string().to_string());
         }
         let inits = self.mir.init_symbols.clone();
         let frozen = self.mir.frozen_globals.clone();

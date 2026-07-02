@@ -1,0 +1,11 @@
+[package]
+name = "prepoly_utils"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true

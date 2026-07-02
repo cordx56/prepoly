@@ -18,8 +18,6 @@ mod wasm_serve;
 #[cfg(target_family = "wasm")]
 mod wasm_stdio;
 
-use std::io;
-
 use tower_lsp_server::{LspService, Server};
 
 use backend::Backend;
@@ -31,28 +29,15 @@ use tokio::io::{stdin, stdout};
 #[cfg(target_family = "wasm")]
 use wasm_stdio::{stdin, stdout};
 
-/// Send the compiler/server's own logs to stderr; stdout is the LSP transport.
-/// Controlled by `PREPOLY_LOG` (the same variable the driver uses), defaulting
-/// to warnings only.
-fn init_tracing() {
-    use tracing_subscriber::filter::LevelFilter;
-    let filter = tracing_subscriber::EnvFilter::builder()
-        .with_default_directive(LevelFilter::WARN.into())
-        .with_env_var("PREPOLY_LOG")
-        .from_env_lossy();
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(io::stderr)
-        .without_time()
-        .try_init();
-}
 
 // wasm has no threads, so the server runs on the current-thread runtime there;
 // native keeps the default multi-threaded runtime.
 #[cfg_attr(not(target_family = "wasm"), tokio::main)]
 #[cfg_attr(target_family = "wasm", tokio::main(flavor = "current_thread"))]
 async fn main() {
-    init_tracing();
+    // Logs go to stderr -- stdout is the LSP transport. Same PREPOLY_LOG /
+    // PREPOLY_LOG_TYPE switches as the driver.
+    prepoly_utils::init_tracing();
     let (service, socket) = LspService::new(Backend::new);
     let server = Server::new(stdin(), stdout(), socket);
 
