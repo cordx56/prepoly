@@ -2298,6 +2298,54 @@ mod tests {
     }
 
     #[test]
+    fn nullable_slice_annotation_flows_into_array_literal() {
+        // A `T?[]` annotation propagates the nullable element type to each element,
+        // so a `null` element and a plain integer are both accepted (a `null`
+        // element would otherwise force a heterogeneous, rejected literal).
+        let with_null = errs("const a: int32?[] = [4, 1, null, 65]\n");
+        assert!(
+            with_null.is_empty(),
+            "a null element in an int32?[] literal must be accepted: {with_null:?}"
+        );
+        let all_present = errs("const a: int32?[] = [4, 1, 65]\n");
+        assert!(
+            all_present.is_empty(),
+            "an all-present int32?[] literal must be accepted: {all_present:?}"
+        );
+    }
+
+    #[test]
+    fn nullable_slice_annotation_works_inside_a_function() {
+        // The in-function `let` exercises the HM engine too (it skips top-level
+        // init values): a null-containing literal is classified a tuple there and
+        // must flow element-wise into the annotated sequence, and the same literal
+        // must flow into a nullable-element parameter at a call site.
+        let with_null = errs("fun main() {\n    let a: int32?[] = [4, 1, null, 65]\n}\n");
+        assert!(
+            with_null.is_empty(),
+            "a null element in an int32?[] let binding must be accepted: {with_null:?}"
+        );
+        let all_present = errs("fun main() {\n    let a: int32?[] = [1, 2, 3]\n}\n");
+        assert!(
+            all_present.is_empty(),
+            "an all-present int32?[] let binding must be accepted: {all_present:?}"
+        );
+        let argument =
+            errs("fun take(xs: int32?[]) {\n}\nfun main() {\n    take([7, null, 8])\n}\n");
+        assert!(
+            argument.is_empty(),
+            "a null-containing literal must flow into an int32?[] parameter: {argument:?}"
+        );
+        // The element type still holds: a string element does not flow into
+        // `int32?` even via the element-wise tuple rule.
+        let bad = errs("fun main() {\n    let a: int32?[] = [1, \"s\", 3]\n}\n");
+        assert!(
+            !bad.is_empty(),
+            "a string element must not flow into an int32?[] literal"
+        );
+    }
+
+    #[test]
     fn fixed_array_literal_length_is_checked() {
         let e = errs("fun main() {\n    let values: int32[2] = [1, 2, 3]\n}\n");
         assert!(

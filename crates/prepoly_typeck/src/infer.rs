@@ -1495,6 +1495,21 @@ impl<'a> Checker<'a> {
             self.record_expr_type(expr, &ty);
             return ty;
         }
+        // An array literal in a required slice position (`int32?[]`): each element
+        // flows into the expected element type, so an integer literal takes the
+        // annotated width, a `null` element is a valid nullable, and a plain value
+        // widens to a nullable element. Propagating the element type is what lets
+        // `[4, 1, 5, null, 65]` and `[4, 1, 5, 65]` both be `int32?[]` instead of
+        // being inferred independently (a heterogeneous literal would otherwise
+        // become a tuple).
+        if let (Expr::Array(items, _), Type::Slice(elem)) = (expr, self.resolve(want)) {
+            for item in items {
+                self.check_expr_against(item, &elem, scopes);
+            }
+            let ty = Type::Slice(elem);
+            self.record_expr_type(expr, &ty);
+            return ty;
+        }
         // A bracket literal in a required tuple position: each element flows into
         // its own expected type, so e.g. an int literal takes the annotated width.
         if let (Expr::Array(items, span), Type::Tuple(elems)) = (expr, self.resolve(want)) {

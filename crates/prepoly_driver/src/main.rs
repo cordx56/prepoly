@@ -329,13 +329,18 @@ fn aggregate_result_types(
     use prepoly_hir::TypedExprKind;
     let mut per_span: HashMap<Span, Option<prepoly_hir::Type>> = HashMap::new();
     for e in &typed.expressions {
-        let relevant = matches!(
-            e.kind,
+        let relevant = match e.kind {
             TypedExprKind::Call
-                | TypedExprKind::TypeLiteral(_)
-                | TypedExprKind::VariantLiteral { .. }
-        );
-        if !relevant || !is_seedable_instance(&e.ty) {
+            | TypedExprKind::TypeLiteral(_)
+            | TypedExprKind::VariantLiteral { .. } => is_seedable_instance(&e.ty),
+            // An array literal is seeded only when its element is nullable: a
+            // nullable element is a heap cell, a representation the back end
+            // cannot re-derive from the (bare) element values, so the checked
+            // type must flow into lowering. Other literals stay inferred.
+            TypedExprKind::Array => is_seedable_nullable_array(&e.ty),
+            _ => false,
+        };
+        if !relevant {
             continue;
         }
         // The checker records only the inferred (unannotated) fields in a record's
@@ -421,6 +426,16 @@ fn complete_aggregate(ty: &prepoly_hir::Type, program: &Program) -> prepoly_hir:
 fn is_seedable_instance(ty: &prepoly_hir::Type) -> bool {
     use prepoly_hir::Type;
     matches!(ty, Type::Record(_) | Type::Sum(_)) && is_fully_known(ty)
+}
+
+/// Whether an array literal's checked type is worth seeding onto its result
+/// local: a fully-known slice/array whose *element* is nullable. Matches the
+/// [`prepoly_mir`] filter for array literals (a nullable element is a heap cell
+/// whose representation the back end cannot re-derive from bare element values).
+fn is_seedable_nullable_array(ty: &prepoly_hir::Type) -> bool {
+    use prepoly_hir::Type;
+    matches!(ty, Type::Slice(e) | Type::Array(e, _) if matches!(&**e, Type::Nullable(_)))
+        && is_fully_known(ty)
 }
 
 /// Whether `ty` contains no inference variable, recursing through every

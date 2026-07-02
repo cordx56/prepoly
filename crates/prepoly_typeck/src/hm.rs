@@ -390,6 +390,26 @@ impl<'p> Hm<'p> {
         }
         let h = self.solver.resolve(have);
         let w = self.solver.resolve(want);
+        // A bracket literal with differing element types was classified a tuple
+        // (`[4, null, 6]` -- plain values mixed with `null`), but it still flows
+        // into a sequence position when every element flows into the element type
+        // (`int32?[]` here): the sequence annotation re-checks the literal
+        // element-wise, mirroring the other engine's bidirectional array rule.
+        // Rolled back on failure so a genuine mismatch reports the original types.
+        if let Type::Tuple(ts) = &h {
+            let elem = match &w {
+                Type::Slice(e) => Some((**e).clone()),
+                Type::Array(e, n) if ts.len() == *n => Some((**e).clone()),
+                _ => None,
+            };
+            if let Some(elem) = elem {
+                let snap = self.solver.snapshot();
+                if ts.iter().all(|t| self.flow_unify(t, &elem)) {
+                    return;
+                }
+                self.solver.rollback(snap);
+            }
+        }
         // Unification failed; the value only flows if structural subtyping admits
         // it (a wider record into a narrower position). Trace this fallback: it is
         // where a too-permissive structural rule would let an unsound flow through.

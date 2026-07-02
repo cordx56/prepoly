@@ -8,6 +8,7 @@
 //! the AST-walking codegen so the two stay behaviorally equivalent.
 
 use prepoly_hir::Type;
+use prepoly_lexer::Span;
 use prepoly_parser::ast::{Arg, BinOp, Block, Expr, Param, Stmt, StrSeg};
 
 use crate::analysis::free_vars_of;
@@ -25,6 +26,18 @@ use crate::value::{Callee, Literal, Operand, Place, Projection, Rvalue};
 /// `Var` -- seeding them is unnecessary and perturbs value ownership.
 fn is_seedable_result(ty: &Type) -> bool {
     matches!(ty, Type::Record(_) | Type::Sum(_))
+}
+
+/// Whether a checker-resolved array-literal type must be seeded onto its result
+/// local: a slice/array whose *element* is nullable. A nullable element is a heap
+/// cell, not the bare value, so the literal must be built at the annotated
+/// element type; the back end re-derives element types from the element values
+/// alone, which would rebuild `[1, 2]` for an `int32?[]` binding at the bare
+/// `int32` and misrepresent every element. Plain-element literals keep an
+/// inferred `Var` (see [`is_seedable_result`] for why seeding is otherwise
+/// avoided).
+fn is_nullable_element_array(ty: &Type) -> bool {
+    matches!(ty, Type::Slice(e) | Type::Array(e, _) if matches!(**e, Type::Nullable(_)))
 }
 
 impl<'a, 'p> FnLower<'a, 'p> {
@@ -59,7 +72,7 @@ impl<'a, 'p> FnLower<'a, 'p> {
             Expr::Index(base, idx, _) => self.lower_index(base, idx),
             Expr::ErrorProp(inner, _) => self.lower_error_prop(inner),
             Expr::Closure(params, body, _) => self.lower_closure(params, body),
-            Expr::Array(es, _) => self.lower_array(es),
+            Expr::Array(es, span) => self.lower_array(es, *span),
             Expr::Range(lo, hi, _) => self.lower_range(lo, hi),
             Expr::TypeLit(name, fields, _) => self.lower_record(name, fields),
             Expr::VariantLit(ty, variant, fields, _) => self.lower_variant(ty, variant, fields),
@@ -409,13 +422,20 @@ impl<'a, 'p> FnLower<'a, 'p> {
         )))
     }
 
-    fn lower_array(&mut self, es: &[Expr]) -> Operand {
+    fn lower_array(&mut self, es: &[Expr], span: Span) -> Operand {
         let mut ops = Vec::with_capacity(es.len());
         for e in es {
             let v = self.lower_expr(e);
             ops.push(v);
         }
-        self.b.emit(Rvalue::Array(ops))
+        let rv = Rvalue::Array(ops);
+        // A literal the checker resolved to a nullable-element sequence carries
+        // that type onto its result local, so the back end builds each element
+        // as a nullable cell rather than the bare value it would re-derive.
+        match self.ctx.expr_type(span) {
+            Some(ty) if is_nullable_element_array(ty) => self.b.emit_known(rv, ty.clone()),
+            _ => self.b.emit(rv),
+        }
     }
 
     /// Lower `[lo..hi]` to an index loop that fills a fresh array with the
