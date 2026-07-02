@@ -2945,8 +2945,13 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
             // type (`node != null` after the argument's concrete type replaced a
             // `Node?` parameter type). Without this arm the comparison read the
             // unit placeholder -- false for `==` and `!=` alike.
-            Type::Nullable(_) | Type::Record(..) | Type::Sum(..) | Type::Slice(..)
-            | Type::Array(..) | Type::Fun(..) | Type::Tuple(..)
+            Type::Nullable(_)
+            | Type::Record(..)
+            | Type::Sum(..)
+            | Type::Slice(..)
+            | Type::Array(..)
+            | Type::Fun(..)
+            | Type::Tuple(..)
                 if matches!(op, BinOp::Eq | BinOp::Ne) =>
             {
                 let pa = self

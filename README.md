@@ -9,7 +9,7 @@
     with just-in-time compilation
   </p>
   <p>
-    <a href="https://prepoly.56.ax">Documentation / Playground</a>
+    <a href="https://prepoly.56.ax">Documentation &amp; Playground</a> |
     <a href="https://prepoly.zulipchat.com/join/ypl6haeltx6a2z24rz2vd5pp/">Zulip community</a>
   </p>
 </div>

@@ -358,7 +358,10 @@ fn dispatch_monomorphizes_and_types_a_recursive_program() {
     // The int32 instance of `fact` is named and typed (the instance symbol is
     // derived, not hard-coded, so the mangling scheme stays free to change).
     let fact_i32 = prepoly_engine::instance_symbol("fact", &[Type::Int(prepoly_hir::IntKind::I32)]);
-    assert!(out.contains(&format!("fn {fact_i32}(int32) -> int32")), "{out}");
+    assert!(
+        out.contains(&format!("fn {fact_i32}(int32) -> int32")),
+        "{out}"
+    );
     // `answer` is a zero-arg instance returning int32.
     assert!(out.contains("fn answer() -> int32"), "{out}");
     // Operations carry their concrete operand type.
@@ -379,9 +382,11 @@ fn dispatch_specializes_one_function_for_two_types() {
          fun use_flt() {\n  return id(2.0)\n}\n",
     );
     let id_i32 = prepoly_engine::instance_symbol("id", &[Type::Int(prepoly_hir::IntKind::I32)]);
-    let id_f64 =
-        prepoly_engine::instance_symbol("id", &[Type::Float(prepoly_hir::FloatKind::F64)]);
-    assert!(out.contains(&format!("fn {id_i32}(int32) -> int32")), "{out}");
+    let id_f64 = prepoly_engine::instance_symbol("id", &[Type::Float(prepoly_hir::FloatKind::F64)]);
+    assert!(
+        out.contains(&format!("fn {id_i32}(int32) -> int32")),
+        "{out}"
+    );
     assert!(
         out.contains(&format!("fn {id_f64}(float64) -> float64")),
         "{out}"

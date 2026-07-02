@@ -2572,7 +2572,11 @@ impl<'a> Checker<'a> {
             return None;
         };
         let f = fields.iter().find(|f| f.name == name)?;
-        Some(f.resolved_ty.clone().unwrap_or_else(|| self.fresh_unknown()))
+        Some(
+            f.resolved_ty
+                .clone()
+                .unwrap_or_else(|| self.fresh_unknown()),
+        )
     }
 
     fn apply_callable(

@@ -899,9 +899,7 @@ pub trait Codegen {
                     // ownership to the tuple (retaining them too would leak).
                     for ((op, v), ety) in es.iter().zip(&vals).zip(elem_types) {
                         let op_ty = operand_type_of(op, &f.local_types);
-                        if rc_managed(ety)
-                            && operand_is_alias(op)
-                            && !is_nullable_wrap(ety, &op_ty)
+                        if rc_managed(ety) && operand_is_alias(op) && !is_nullable_wrap(ety, &op_ty)
                         {
                             self.retain(*v);
                         }

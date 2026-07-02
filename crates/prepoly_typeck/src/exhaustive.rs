@@ -98,11 +98,7 @@ impl ExhaustiveVisitor<'_> {
         self.program
             .sums_containing_variant(first)
             .into_iter()
-            .filter(|info| {
-                variant_names
-                    .iter()
-                    .all(|n| info.variant(n).is_some())
-            })
+            .filter(|info| variant_names.iter().all(|n| info.variant(n).is_some()))
             .min_by_key(|info| match &info.kind {
                 TypeKind::Sum { variants } => (variants.len(), info.name.clone()),
                 TypeKind::Record { .. } => (usize::MAX, info.name.clone()),

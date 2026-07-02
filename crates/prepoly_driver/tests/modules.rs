@@ -534,10 +534,7 @@ fn phantom_std_import_is_rejected() {
     let main = setup(
         "phantom_std_import",
         &[
-            (
-                "a/util.pp",
-                "fun secret_helper() -> int32 { return 42 }\n",
-            ),
+            ("a/util.pp", "fun secret_helper() -> int32 { return 42 }\n"),
             (
                 "loader.pp",
                 "import a.util.{ secret_helper }\nfun use_it() -> int32 { return secret_helper() }\n",

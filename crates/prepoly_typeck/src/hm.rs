@@ -781,7 +781,10 @@ impl<'p> Hm<'p> {
                             self.unify(&it, &Type::Int(prepoly_hir::IntKind::I64), *span)
                         }
                         other => self.error(
-                            format!("cannot index with `{}`; an integer is required", other.display()),
+                            format!(
+                                "cannot index with `{}`; an integer is required",
+                                other.display()
+                            ),
                             *span,
                         ),
                     }

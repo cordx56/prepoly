@@ -124,10 +124,7 @@ fn all_methods(
     program.types.values().flat_map(|info| {
         let methods: Vec<(&String, &crate::MethodInfo)> = match &info.kind {
             TypeKind::Record { methods, .. } => methods.iter().collect(),
-            TypeKind::Sum { variants } => variants
-                .iter()
-                .flat_map(|v| v.methods.iter())
-                .collect(),
+            TypeKind::Sum { variants } => variants.iter().flat_map(|v| v.methods.iter()).collect(),
         };
         methods.into_iter().map(move |(name, m)| (info, name, m))
     })
@@ -278,10 +275,7 @@ fn write_through_fixpoint(program: &Program) -> MutationInfo {
 }
 
 fn method_has_self(m: &crate::MethodInfo) -> bool {
-    m.signature
-        .params
-        .first()
-        .is_some_and(|p| p.name == "self")
+    m.signature.params.first().is_some_and(|p| p.name == "self")
 }
 
 /// Whether `body` passes a place rooted at `root` into a position some callee
@@ -432,8 +426,7 @@ fn collect_param_calls(program: &Program) -> HashMap<String, Vec<ParamCall>> {
     }
     let mut map = HashMap::new();
     for f in program.functions.values() {
-        let param_names: Vec<String> =
-            f.signature.params.iter().map(|p| p.name.clone()).collect();
+        let param_names: Vec<String> = f.signature.params.iter().map(|p| p.name.clone()).collect();
         // Track every parameter so shadowing is respected uniformly.
         let roots: Roots = param_names.iter().map(|n| (n.clone(), false)).collect();
         let mut collector = Collector {
@@ -678,8 +671,7 @@ fn scan_expr(expr: &Expr, roots: &Roots, sink: &mut impl PlaceSink) -> bool {
             if sink.call(callee, args, roots) {
                 return true;
             }
-            scan_expr(callee, roots, sink)
-                || args.iter().any(|a| scan_expr(&a.expr, roots, sink))
+            scan_expr(callee, roots, sink) || args.iter().any(|a| scan_expr(&a.expr, roots, sink))
         }
         Expr::Unary(_, inner, _) | Expr::ErrorProp(inner, _) | Expr::Field(inner, _, _) => {
             scan_expr(inner, roots, sink)
@@ -687,9 +679,7 @@ fn scan_expr(expr: &Expr, roots: &Roots, sink: &mut impl PlaceSink) -> bool {
         Expr::Binary(_, left, right, _) | Expr::Range(left, right, _) => {
             scan_expr(left, roots, sink) || scan_expr(right, roots, sink)
         }
-        Expr::Index(base, idx, _) => {
-            scan_expr(base, roots, sink) || scan_expr(idx, roots, sink)
-        }
+        Expr::Index(base, idx, _) => scan_expr(base, roots, sink) || scan_expr(idx, roots, sink),
         Expr::Closure(params, body, _) => {
             // Closure parameters shadow like-named tracked bindings; captures
             // keep referring to the tracked value, so the body is scanned.
@@ -700,9 +690,9 @@ fn scan_expr(expr: &Expr, roots: &Roots, sink: &mut impl PlaceSink) -> bool {
             scan_expr(body, &inner, sink)
         }
         Expr::Array(items, _) => items.iter().any(|item| scan_expr(item, roots, sink)),
-        Expr::TypeLit(_, fields, _) | Expr::VariantLit(_, _, fields, _) => {
-            fields.iter().any(|(_, value)| scan_expr(value, roots, sink))
-        }
+        Expr::TypeLit(_, fields, _) | Expr::VariantLit(_, _, fields, _) => fields
+            .iter()
+            .any(|(_, value)| scan_expr(value, roots, sink)),
         Expr::Str(segs, _) => segs.iter().any(|seg| match seg {
             StrSeg::Expr(e) => scan_expr(e, roots, sink),
             _ => false,

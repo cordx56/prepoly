@@ -1595,7 +1595,12 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
     /// The declared parameter types of record `ty`'s field `field` when the
     /// field is annotated with a concrete function type -- the typing source for
     /// a closure stored into that field.
-    fn record_field_fun_params(&self, module: &[String], ty: &str, field: &str) -> Option<Vec<Type>> {
+    fn record_field_fun_params(
+        &self,
+        module: &[String],
+        ty: &str,
+        field: &str,
+    ) -> Option<Vec<Type>> {
         let info = self.program.resolve_type(module, ty)?;
         let TypeKind::Record { fields, .. } = &info.kind else {
             return None;
@@ -1615,11 +1620,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
     /// through a typed capture (`(x) -> func(g(x))` where `g: (int32) -> int32`
     /// is captured) pins `x` even though nothing outside the closure calls it.
     /// `None` when any parameter stays unpinned.
-    fn closure_params_from_body(
-        &self,
-        id: ClosureId,
-        capture_types: &[Type],
-    ) -> Option<Vec<Type>> {
+    fn closure_params_from_body(&self, id: ClosureId, capture_types: &[Type]) -> Option<Vec<Type>> {
         let clo = self.by_closure.get(&id)?;
         let body = &clo.body;
         let mut seeded: Vec<Option<Type>> = vec![None; body.locals.len()];
@@ -1632,7 +1633,8 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             }
         }
         let lt = self.probe_local_types(body, seeded);
-        let mut out: Vec<Option<Type>> = body.params.iter().map(|p| lt[p.index()].clone()).collect();
+        let mut out: Vec<Option<Type>> =
+            body.params.iter().map(|p| lt[p.index()].clone()).collect();
         for block in &body.blocks {
             for stmt in &block.stmts {
                 let (MirStmt::Assign(_, rv) | MirStmt::Eval(rv)) = stmt else {
@@ -1715,26 +1717,29 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                     None => return Ok(None),
                 },
             }
-        } else if let Some(pt) = record_field_closures.get(&local).and_then(|(dest, ty, field)| {
-            // The closure initializes a record field: the call contract is the
-            // field's declared function signature, or -- for an unannotated
-            // field -- the constructed instance's substitution entry when the
-            // checker seeded the destination local (`Iter { trans: (x) -> .. }`
-            // takes `trans`'s per-instance type from the seed).
-            self.record_field_fun_params(module, ty, field).or_else(|| {
-                match local_types[dest.index()].as_ref() {
-                    Some(Type::Record(n)) => match n.substitution.get(field) {
-                        Some(Type::Fun(params, _))
-                            if params.iter().all(prepoly_hir::is_fully_known) =>
-                        {
-                            Some(params.clone())
-                        }
+        } else if let Some(pt) = record_field_closures
+            .get(&local)
+            .and_then(|(dest, ty, field)| {
+                // The closure initializes a record field: the call contract is the
+                // field's declared function signature, or -- for an unannotated
+                // field -- the constructed instance's substitution entry when the
+                // checker seeded the destination local (`Iter { trans: (x) -> .. }`
+                // takes `trans`'s per-instance type from the seed).
+                self.record_field_fun_params(module, ty, field).or_else(|| {
+                    match local_types[dest.index()].as_ref() {
+                        Some(Type::Record(n)) => match n.substitution.get(field) {
+                            Some(Type::Fun(params, _))
+                                if params.iter().all(prepoly_hir::is_fully_known) =>
+                            {
+                                Some(params.clone())
+                            }
+                            _ => None,
+                        },
                         _ => None,
-                    },
-                    _ => None,
-                }
+                    }
+                })
             })
-        }) {
+        {
             pt
         } else if let Some(annotated) = self.closure_annotated_params(id) {
             // An escaping closure (returned): type it from its own parameter

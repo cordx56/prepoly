@@ -123,11 +123,7 @@ fn auto_acquire_modules(modules: &mut [LoadedModule]) -> Vec<(String, Span)> {
                             if let Member::Method(method) = member
                                 && let Some(body) = &method.body
                             {
-                                fns.push((
-                                    method.name.clone(),
-                                    name_list(&method.params),
-                                    body,
-                                ));
+                                fns.push((method.name.clone(), name_list(&method.params), body));
                             }
                         }
                     }

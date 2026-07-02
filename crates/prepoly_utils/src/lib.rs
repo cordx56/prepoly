@@ -29,7 +29,10 @@ pub fn init_tracing() {
         .from_env_lossy();
     if let Ok(types) = std::env::var("PREPOLY_LOG_TYPE") {
         for ty in types.split(',').map(str::trim).filter(|t| !t.is_empty()) {
-            for directive in [format!("prepoly::{ty}=trace"), format!("prepoly_{ty}=debug")] {
+            for directive in [
+                format!("prepoly::{ty}=trace"),
+                format!("prepoly_{ty}=debug"),
+            ] {
                 match directive.parse() {
                     Ok(d) => filter = filter.add_directive(d),
                     // A malformed type name must not silently vanish: the user

@@ -29,7 +29,6 @@ use tokio::io::{stdin, stdout};
 #[cfg(target_family = "wasm")]
 use wasm_stdio::{stdin, stdout};
 
-
 // wasm has no threads, so the server runs on the current-thread runtime there;
 // native keeps the default multi-threaded runtime.
 #[cfg_attr(not(target_family = "wasm"), tokio::main)]

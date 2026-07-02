@@ -66,7 +66,12 @@ pub type SpawnSummaries = HashMap<String, HashSet<usize>>;
 /// writing it after the spawn (through any alias), so it must be a lock-guarded
 /// cown -- freezing it would let a writer race lock-free readers. A parameter is
 /// always cowned: its callers are invisible here and may mutate concurrently.
-pub fn decide(var: &str, live_after: bool, fn_scope: &Block, params: &HashSet<String>) -> Ownership {
+pub fn decide(
+    var: &str,
+    live_after: bool,
+    fn_scope: &Block,
+    params: &HashSet<String>,
+) -> Ownership {
     if !live_after {
         return Ownership::Move;
     }
@@ -1319,10 +1324,7 @@ fn collect_summary_cowns(
 fn guard_map(stmts: &[Stmt], cowns: &BTreeSet<String>) -> BTreeMap<String, BTreeSet<String>> {
     let mut guards: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for c in cowns {
-        guards
-            .entry(c.clone())
-            .or_default()
-            .insert(c.clone());
+        guards.entry(c.clone()).or_default().insert(c.clone());
     }
     if guards.is_empty() {
         return guards;
@@ -1401,13 +1403,8 @@ fn transform_stmts(stmts: &mut Vec<Stmt>, ctx: &ScopeCtx, errors: &mut Vec<Spawn
             Some(SpawnArg::Literal) => {
                 let body = spawn_closure_body(&stmts[i]).expect("literal spawn body");
                 let bound = closure_bound_in(&stmts[i]);
-                let (cowns, freezes) = classify_captures(
-                    &body,
-                    &bound,
-                    &ctx.locals,
-                    ctx.fn_params,
-                    ctx.pristine_fn,
-                );
+                let (cowns, freezes) =
+                    classify_captures(&body, &bound, &ctx.locals, ctx.fn_params, ctx.pristine_fn);
                 // The spawned body is its own execution scope; nested spawns in
                 // it are classified against its own locals.
                 if let Some(inner) = spawn_closure_body_mut(&mut stmts[i]) {
@@ -1504,8 +1501,7 @@ fn transform_spawned_binding(stmt: &mut Stmt, ctx: &ScopeCtx, errors: &mut Vec<S
     }
     let block = closure_block(body);
     let bound = crate::closure::bound_names(params, &block);
-    let (cowns, _) =
-        classify_captures(&block, &bound, &ctx.locals, ctx.fn_params, ctx.pristine_fn);
+    let (cowns, _) = classify_captures(&block, &bound, &ctx.locals, ctx.fn_params, ctx.pristine_fn);
     // The bound closure body is its own execution scope once spawned.
     if let Expr::Block(b, _) = body.as_mut() {
         process_scope(
@@ -1528,7 +1524,12 @@ fn transform_spawned_binding(stmt: &mut Stmt, ctx: &ScopeCtx, errors: &mut Vec<S
 /// site), returning how many were inserted. Promotions run before the spawn so
 /// the owner -- and thus the reference count's atomicity -- is fixed before the
 /// closure crosses to the new thread.
-fn insert_promotions(stmts: &mut Vec<Stmt>, i: usize, cowns: &[String], freezes: &[String]) -> usize {
+fn insert_promotions(
+    stmts: &mut Vec<Stmt>,
+    i: usize,
+    cowns: &[String],
+    freezes: &[String],
+) -> usize {
     let span = spawn_stmt_span(&stmts[i]);
     let promos: Vec<Stmt> = cowns
         .iter()
@@ -1596,7 +1597,8 @@ fn spawn_closure_body_mut(stmt: &mut Stmt) -> Option<&mut Vec<Stmt>> {
 /// dereferences: promotions take the bare handle to retag it, `with`/`_with_all`
 /// take it to lock it, and `spawn` takes a closure. Wrapping any of these in a
 /// further lock is at best noise.
-const NON_FORWARDING_BUILTINS: &[&str] = &["with", "_with_all", "spawn", "sync", "_cown", "_freeze"];
+const NON_FORWARDING_BUILTINS: &[&str] =
+    &["with", "_with_all", "spawn", "sync", "_cown", "_freeze"];
 
 fn callee_is_non_forwarding(callee: &Expr) -> bool {
     matches!(callee, Expr::Ident(n, _) if NON_FORWARDING_BUILTINS.contains(&n.as_str()))
@@ -2284,7 +2286,8 @@ mod tests {
         // `start(c)` spawns a task capturing its parameter; `outer(x)` forwards
         // its own parameter to `start`. Both must be summarized (the second via
         // the call-graph fixpoint).
-        let src = "fun start(c) {\n    spawn(() -> { c.add(1) })\n}\nfun outer(x) {\n    start(x)\n}\n";
+        let src =
+            "fun start(c) {\n    spawn(() -> { c.add(1) })\n}\nfun outer(x) {\n    start(x)\n}\n";
         let module = parse(src).expect("parse");
         let mut fns: Vec<(String, Vec<String>, Block)> = Vec::new();
         for item in module.items {
@@ -2320,9 +2323,8 @@ mod tests {
         // in the helper races the caller otherwise.
         let mut summaries = SpawnSummaries::new();
         summaries.insert("start".to_string(), HashSet::from([0]));
-        let mut body = main_body(
-            "fun main() {\n    let c = make()\n    start(c)\n    c.add(1)\n}\n",
-        );
+        let mut body =
+            main_body("fun main() {\n    let c = make()\n    start(c)\n    c.add(1)\n}\n");
         let errors = auto_acquire(&mut body.stmts, &HashSet::new(), &summaries);
         assert!(errors.is_empty());
         assert!(

@@ -166,12 +166,25 @@ impl<'p> ProgramCtx<'p> {
         // which have no user-level declaration to find in the type table.
         if matches!(
             name,
-            "push" | "insert" | "remove" | "pop" | "len" | "read" | "write" | "size" | "close"
+            "push"
+                | "insert"
+                | "remove"
+                | "pop"
+                | "len"
+                | "read"
+                | "write"
+                | "size"
+                | "close"
                 | "seek"
         ) {
             return true;
         }
-        if self.program.primitive_methods.keys().any(|(_, m)| m == name) {
+        if self
+            .program
+            .primitive_methods
+            .keys()
+            .any(|(_, m)| m == name)
+        {
             return true;
         }
         self.program.types.values().any(|info| match &info.kind {
@@ -471,7 +484,10 @@ impl<'a, 'p> FnLower<'a, 'p> {
 /// Collect the global names a top-level `let` pattern binds, mirroring the
 /// binding forms `store_global_pattern` writes (a bare name, or an array
 /// pattern destructured element-wise).
-fn collect_global_names(pat: &prepoly_parser::ast::Pattern, out: &mut std::collections::HashSet<String>) {
+fn collect_global_names(
+    pat: &prepoly_parser::ast::Pattern,
+    out: &mut std::collections::HashSet<String>,
+) {
     use prepoly_parser::ast::Pattern;
     match pat {
         Pattern::Binding(name, _) => {
@@ -697,7 +713,10 @@ fn lower_init(
                 // monomorphization record the annotated type -- otherwise
                 // `let g: int32? = 5` records a bare int32 global whose reads
                 // then mismatch the nullable representation the checker assumed.
-                let v = match ty.as_ref().and_then(crate::lower::stmt::resolve_simple_type) {
+                let v = match ty
+                    .as_ref()
+                    .and_then(crate::lower::stmt::resolve_simple_type)
+                {
                     Some(t) => {
                         use crate::value::Rvalue;
                         let local = fl.b.fresh_local_typed(None, t);

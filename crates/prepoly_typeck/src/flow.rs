@@ -276,7 +276,9 @@ fn stmt_has_break(stmt: &Stmt) -> bool {
 fn expr_has_break(expr: &Expr) -> bool {
     match expr {
         Expr::If(cond, then, els, _) => {
-            expr_has_break(cond) || block_has_break(then) || els.as_deref().is_some_and(expr_has_break)
+            expr_has_break(cond)
+                || block_has_break(then)
+                || els.as_deref().is_some_and(expr_has_break)
         }
         Expr::IfLet(_, scrut, then, els, _) => {
             expr_has_break(scrut)

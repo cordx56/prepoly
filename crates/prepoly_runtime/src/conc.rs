@@ -277,7 +277,9 @@ unsafe fn span_cowns(ptrs: *const *mut Header, n: i64) -> Vec<*mut Header> {
     if ptrs.is_null() || n <= 0 {
         return Vec::new();
     }
-    let mut v: Vec<*mut Header> = (0..n).map(|i| unsafe { *ptrs.offset(i as isize) }).collect();
+    let mut v: Vec<*mut Header> = (0..n)
+        .map(|i| unsafe { *ptrs.offset(i as isize) })
+        .collect();
     v.sort_unstable_by_key(|p| *p as usize);
     v.dedup();
     v
