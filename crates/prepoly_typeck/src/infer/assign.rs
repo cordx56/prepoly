@@ -179,6 +179,9 @@ impl<'a> Checker<'a> {
         if integer_literal_fits(expr, want) {
             return;
         }
+        if float_literal_fits(expr, want) {
+            return;
+        }
         self.expect_assignable(got, want, expr.span());
     }
 
@@ -246,6 +249,23 @@ impl<'a> Checker<'a> {
         // position of another type (int widths/signedness, int -> float); the
         // back ends convert at the flow point. float -> int stays explicit.
         if numeric_flows_into(&got, &want) {
+            return;
+        }
+        // A numeric pair that is not value-preserving gets the dedicated
+        // narrowing diagnostic with the explicit-conversion hint from the
+        // flow authority.
+        if let prepoly_typesys::Flow::Forbidden(hint) = prepoly_typesys::numeric_flow(&got, &want)
+            && !hint.is_empty()
+        {
+            self.errors.push(TypeError {
+                message: format!(
+                    "cannot implicitly convert `{}` to `{}`: {hint} (`{}.from(x)`)",
+                    got.display(),
+                    want.display(),
+                    want.display(),
+                ),
+                span,
+            });
             return;
         }
         self.errors.push(TypeError {
@@ -374,10 +394,46 @@ pub(super) fn integer_literal_fits(expr: &Expr, want: &Type) -> bool {
             _ => None,
         }
     }
-    match (expr, int_kind(want)) {
-        (Expr::Int(value, _), Some(kind)) => int_fits_kind(*value, kind),
+    match (literal_int_value(expr), int_kind(want)) {
+        (Some(value), Some(kind)) => int_fits_kind(value, kind),
         _ => false,
     }
+}
+
+/// The compile-time value of an integer literal expression, INCLUDING the
+/// negated form: `-128` parses as `Unary(Neg, Int(128))`, and without this the
+/// fit-based literal adaptation (`let m: int8 = -128`) would fall through to
+/// the numeric-flow rules and be rejected as a narrowing.
+pub(super) fn literal_int_value(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Int(v, _) => Some(*v),
+        Expr::Unary(UnaryOp::Neg, inner, _) => match &**inner {
+            // The lexer bounds a literal's magnitude to i64::MAX, so the
+            // negation cannot overflow.
+            Expr::Int(v, _) => Some(-*v),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `expr` is a float LITERAL flowing into a float position. A literal
+/// is the value the programmer wrote against that annotation, so it adapts to
+/// any float width (the store converts) even though a float64 VALUE no longer
+/// narrows implicitly.
+pub(super) fn float_literal_fits(expr: &Expr, want: &Type) -> bool {
+    fn is_float(t: &Type) -> bool {
+        match t {
+            Type::Float(_) => true,
+            Type::Nullable(inner) | Type::Ref(inner) | Type::Mut(inner) | Type::ConstOf(inner) => {
+                is_float(inner)
+            }
+            _ => false,
+        }
+    }
+    let literal = matches!(expr, Expr::Float(..))
+        || matches!(expr, Expr::Unary(UnaryOp::Neg, inner, _) if matches!(**inner, Expr::Float(..)));
+    literal && is_float(want)
 }
 
 fn integer_literal_binary_type(

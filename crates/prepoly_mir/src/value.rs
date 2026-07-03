@@ -147,6 +147,18 @@ pub enum Rvalue {
     /// field-presence decision is made per instance by the back ends, so a `source`
     /// missing a field becomes a runtime null rather than a static error.
     RecordFrom { ty: String, source: Operand },
+    /// Convert an anonymous structural argument into the VIEW of a callee
+    /// parameter's row: a fresh structural record holding exactly the fields
+    /// `callee`'s parameter `param` requires (per the program-wide row table,
+    /// re-derived by the monomorphizer), with a guarded field that is absent or
+    /// type-mismatched materialized as null. Emitted only at call sites the
+    /// checker recorded as view-convertible; like `RecordFrom`, the node itself
+    /// is type-free -- presence decisions happen per monomorphized instance.
+    RecordView {
+        callee: String,
+        param: usize,
+        source: Operand,
+    },
     /// A closure value: the lowered body plus the captured operands, in the same
     /// order as the body's capture locals.
     Closure {
@@ -235,6 +247,11 @@ impl fmt::Display for Rvalue {
             Rvalue::Array(es) => write!(f, "[{}]", join_operands(es)),
             Rvalue::Record { ty, fields } => write!(f, "{ty} {{ {} }}", join_fields(fields)),
             Rvalue::RecordFrom { ty, source } => write!(f, "{ty}.from({source})"),
+            Rvalue::RecordView {
+                callee,
+                param,
+                source,
+            } => write!(f, "view({callee}#{param}, {source})"),
             Rvalue::Variant {
                 ty,
                 variant,

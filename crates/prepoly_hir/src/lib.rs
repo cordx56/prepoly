@@ -21,9 +21,9 @@ pub use mutation::{
 pub use typed::{Constness, Ownership, RegionId, TypedExpr, TypedExprKind, TypedProgram};
 pub use types::{
     FloatKind, INFER_VAR, IntKind, NominalInfo, NominalKind, NominalType, STRUCTURAL_RECORD_ID,
-    STRUCTURAL_RECORD_NAME, Substitution, Type, common_numeric_type, freshen_infer, index_element,
-    int_literal_kind, is_fully_known, numeric_flows_into, peel_modes, prim_method_symbol,
-    primitive_kind_conflict, resolve, structural_record,
+    STRUCTURAL_RECORD_NAME, Substitution, Type, freshen_infer, index_element, int_literal_kind,
+    is_fully_known, peel_modes, prim_method_symbol, primitive_kind_conflict, resolve,
+    structural_record,
 };
 
 /// Re-exported so back ends can name source spans (e.g. typed-literal codegen

@@ -647,9 +647,25 @@ impl<'a, 'p> FnLower<'a, 'p> {
                 let ops = self.lower_args(args);
                 return Rvalue::Call(Callee::Indirect(Operand::Local(local)), ops);
             }
-            // A known free function resolves to its storage symbol.
+            // A known free function resolves to its storage symbol. An argument
+            // the checker recorded as view-convertible (an anonymous structural
+            // value fitting an eligible parameter's row) is converted into that
+            // parameter's view at the call boundary, so every argument shape
+            // with the same view selects one callee instance.
             if let Some(symbol) = self.ctx.resolve_fn_symbol(&self.module, name) {
-                let mut ops = self.lower_args(args);
+                let mut ops = Vec::with_capacity(args.len());
+                for (i, a) in args.iter().enumerate() {
+                    let v = self.lower_expr(&a.expr);
+                    if self.ctx.is_view_arg(a.expr.span()) {
+                        ops.push(self.b.emit(Rvalue::RecordView {
+                            callee: symbol.clone(),
+                            param: i,
+                            source: v,
+                        }));
+                    } else {
+                        ops.push(v);
+                    }
+                }
                 self.pad_trailing_nullable(name, &mut ops);
                 return Rvalue::Call(Callee::Free(symbol), ops);
             }

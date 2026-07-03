@@ -29,10 +29,10 @@ use std::collections::{HashMap, HashSet};
 
 use prepoly_hir::{
     FloatKind, FunInfo, IntKind, MethodInfo, Program, Type, TypeInfo, TypeKind, int_literal_kind,
-    numeric_flows_into,
 };
 use prepoly_lexer::Span;
 use prepoly_parser::ast::{BinOp, Block, Expr, Pattern, Stmt, StrSeg, UnaryOp};
+use prepoly_typesys::numeric_flows_into;
 
 use crate::TypeError;
 use crate::solver::{InferenceVarKind, Scheme, Solver};
@@ -967,7 +967,7 @@ impl<'p> Hm<'p> {
                     self.lit_default(&ra).unwrap_or_else(|| ra.clone()),
                     self.lit_default(&rb).unwrap_or_else(|| rb.clone()),
                 );
-                if prepoly_hir::common_numeric_type(&pa, &pb).is_none() {
+                if prepoly_typesys::common_numeric_type(&pa, &pb).is_none() {
                     self.unify(&ta, &tb, span);
                 }
                 Type::Bool
@@ -987,7 +987,7 @@ impl<'p> Hm<'p> {
                     self.lit_default(&ra).unwrap_or_else(|| ra.clone()),
                     self.lit_default(&rb).unwrap_or_else(|| rb.clone()),
                 );
-                match prepoly_hir::common_numeric_type(&pa, &pb) {
+                match prepoly_typesys::common_numeric_type(&pa, &pb) {
                     Some(common) => {
                         if self.lit_default(&ra).is_some() {
                             self.unify(&ta, &pa, a.span());

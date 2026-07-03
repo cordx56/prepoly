@@ -481,6 +481,10 @@ impl BodyTyper {
                 .nominal(ty)
                 .map(|t| Type::Nullable(Box::new(t)))
                 .unwrap_or_else(|| self.fresh()),
+            // A view's field set depends on the row table, which this
+            // consistency pass does not carry; the monomorphizer already fixed
+            // the destination local's type, so stay open here.
+            Rvalue::RecordView { .. } => self.fresh(),
             Rvalue::Closure { .. } => self.fresh(),
         }
     }

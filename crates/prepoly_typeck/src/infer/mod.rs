@@ -14,10 +14,11 @@ use std::rc::Rc;
 use prepoly_hir::{
     CallableSignature, Constness, FloatKind, FunInfo, IntKind, NominalType, ParamInfo, Program,
     SchemeMethod, Substitution, Type, TypeInfo, TypeKind, TypeScheme, TypedProgram,
-    common_numeric_type, int_literal_kind, numeric_flows_into,
+    int_literal_kind,
 };
 use prepoly_lexer::Span;
 use prepoly_parser::ast::*;
+use prepoly_typesys::{common_numeric_type, numeric_flows_into};
 
 use crate::TypeError;
 use crate::constraint::ShapeConstraint;
@@ -97,6 +98,10 @@ pub struct Inference {
     /// field/method signatures over them), keyed by the type's source name. Read
     /// by the language server to render a method generically; see `build_schemes`.
     pub schemes: HashMap<String, TypeScheme>,
+    /// Spans of anonymous structural arguments that passed the callee-row check
+    /// for a view-eligible parameter (see `prepoly_typesys::rows`). MIR lowering
+    /// converts exactly these arguments into the parameter's view.
+    pub view_args: HashSet<Span>,
 }
 
 pub fn analyze(program: &Program) -> Inference {
@@ -184,6 +189,7 @@ pub fn analyze(program: &Program) -> Inference {
         typed: checker.typed,
         fn_instances: checker.fn_instances,
         schemes: checker.schemes,
+        view_args: checker.view_args,
     }
 }
 
@@ -251,6 +257,15 @@ struct Checker<'a> {
     /// Names assigned anywhere inside a closure literal of the callable body
     /// currently being checked; see `narrowed_bindings`.
     closure_write_targets: HashSet<String>,
+    /// Per-parameter rows (field presence/type requirements) of every free
+    /// function and method, derived once per program. An anonymous structural
+    /// argument to a row-covered parameter is checked against the row at the
+    /// argument's own span (the value is where the mismatch lives).
+    rows: prepoly_typesys::RowInfo,
+    /// Spans of anonymous structural arguments that passed their callee row
+    /// check for a view-ELIGIBLE parameter: exactly the call sites where MIR
+    /// lowering may convert the argument into the parameter's view.
+    view_args: HashSet<Span>,
 }
 
 impl<'a> Checker<'a> {
@@ -277,6 +292,8 @@ impl<'a> Checker<'a> {
             fixed_array_binding: false,
             narrowed_bindings: Vec::new(),
             closure_write_targets: HashSet::new(),
+            rows: prepoly_typesys::RowInfo::analyze(program),
+            view_args: HashSet::new(),
         }
     }
 
@@ -1030,7 +1047,7 @@ impl<'a> Checker<'a> {
         // type (resolution): record it at the target
         // kind so its runtime tag matches the annotation rather than defaulting
         // to int32 (typed literals).
-        if let Expr::Int(v, _) = expr {
+        if let Some(v) = assign::literal_int_value(expr) {
             let target = match self.resolve(want) {
                 Type::Int(k) => Some(k),
                 Type::Nullable(inner) => match *inner {
@@ -1040,7 +1057,7 @@ impl<'a> Checker<'a> {
                 _ => None,
             };
             if let Some(k) = target
-                && int_fits_kind(*v, k)
+                && int_fits_kind(v, k)
             {
                 let ty = Type::Int(k);
                 self.record_expr_type(expr, &ty);
@@ -2284,6 +2301,19 @@ impl<'a> Checker<'a> {
                         entry.push(resolved_args);
                     }
                 }
+                // An ANONYMOUS structural argument to a row-covered eligible
+                // parameter is checked against the callee's derived row HERE, at
+                // the value's own span: presence of every Required field and its
+                // Forced type. This replaces the body re-elaboration as the error
+                // source for these arguments -- on a row failure the body is not
+                // re-elaborated at all (the call is already known bad; interior
+                // spans would only duplicate the value-site report). A clean row
+                // check records the argument span so lowering may convert the
+                // argument into the parameter's view.
+                if !self.check_args_against_rows(name, &symbol, args, &arg_types) {
+                    self.invalidate_narrowed_after_call(scopes);
+                    return fallback_ret;
+                }
                 let before = self.errors.len();
                 let ret = self.instantiate_function_call(
                     &symbol,
@@ -3019,6 +3049,66 @@ impl<'a> Checker<'a> {
             }
             _ => {}
         }
+    }
+
+    /// Check every anonymous structural argument of a free-function call
+    /// against the callee parameter's derived row (see
+    /// `prepoly_typesys::rows`): a Required field must be present with a type
+    /// satisfying its Forced type; Guarded fields tolerate absence/mismatch
+    /// (they degrade to null in the view). Errors land on the argument's own
+    /// span -- the value is where the mismatch lives, not the callee body.
+    ///
+    /// Returns `false` when a row rejected an argument (the caller skips the
+    /// body re-elaboration: it would only restate the failure at interior
+    /// spans). On success, each checked argument to a view-ELIGIBLE parameter
+    /// is recorded in `view_args` for MIR lowering's view conversion.
+    fn check_args_against_rows(
+        &mut self,
+        name: &str,
+        symbol: &str,
+        args: &[Arg],
+        arg_types: &[Type],
+    ) -> bool {
+        let mut ok = true;
+        for (idx, arg) in args.iter().enumerate() {
+            let Some(arg_ty) = arg_types.get(idx) else {
+                continue;
+            };
+            let Some(prow) = self.rows.function_param(symbol, idx) else {
+                continue;
+            };
+            if !prow.eligible {
+                // The parameter needs the full value (method receiver, escape,
+                // annotated forward): keep the re-elaboration/reattribution path.
+                continue;
+            }
+            let resolved = self.resolve(arg_ty);
+            let Type::Record(n) = prepoly_hir::peel_modes(&resolved) else {
+                continue;
+            };
+            if n.id != prepoly_hir::STRUCTURAL_RECORD_ID {
+                continue;
+            }
+            let row = prow.row.clone();
+            let fields: Vec<(String, Type)> = n
+                .substitution
+                .iter()
+                .map(|(k, v)| (k.to_string(), self.resolve(v)))
+                .collect();
+            let issues = prepoly_typesys::check_row(&row, &fields);
+            if issues.is_empty() {
+                self.view_args.insert(arg.expr.span());
+            } else {
+                ok = false;
+                for issue in issues {
+                    self.errors.push(TypeError {
+                        message: format!("this value does not fit `{name}`'s parameter: {issue}"),
+                        span: arg.expr.span(),
+                    });
+                }
+            }
+        }
+        ok
     }
 
     fn check_signature_args_collect(

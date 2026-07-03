@@ -1,2 +1,1 @@
-error: float literal used where `int32` is required
-error: cannot use `float64` where `int32` is required
+cannot implicitly convert `float64` to `int32`: float to int drops the fraction; convert explicitly (`int32.from(x)`)

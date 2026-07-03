@@ -10,5 +10,6 @@ path = "src/lib.rs"
 prepoly_lexer.workspace = true
 prepoly_parser.workspace = true
 prepoly_hir.workspace = true
+prepoly_typesys.workspace = true
 prepoly_solver.workspace = true
 tracing.workspace = true

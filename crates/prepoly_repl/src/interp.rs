@@ -307,6 +307,40 @@ impl<'p, 'm> Interp<'p, 'm> {
                 }
                 Ok(Value::Record(Rc::new(RefCell::new(map))))
             }
+            // The view of a callee parameter's row: a filtered clone of the
+            // source record holding exactly the view type's fields, with a
+            // guarded field the source lacks (or carries at a non-flowing
+            // type) materialized as null. The per-field decision is the shared
+            // engine plan over the static types, so the interpreter and the
+            // typed back end degrade identically. A non-structural destination
+            // is mono's defensive identity pass-through.
+            Rvalue::RecordView { source, .. } => {
+                let src_ty = operand_type_of(source, &f.local_types);
+                if !matches!(dest_ty, Type::Record(n) if n.id == prepoly_hir::STRUCTURAL_RECORD_ID)
+                {
+                    return self.eval_operand(f, frame, source, dest_ty);
+                }
+                let src = self.eval_operand(f, frame, source, &src_ty)?;
+                let src_map = match &src {
+                    Value::Record(map) => Some(map.clone()),
+                    _ => None,
+                };
+                let mut map = HashMap::new();
+                for (name, fty, plan) in prepoly_engine::view_field_plans(dest_ty, &src_ty) {
+                    let v = match (&plan, &src_map) {
+                        (prepoly_engine::ViewFieldPlan::Copy, Some(m)) => {
+                            let ft = record_field_type(&src_ty, &name);
+                            let v = m.borrow().get(&name).cloned().unwrap_or(Value::Null);
+                            // Value nullability is implicit (a value or Null),
+                            // so only the numeric widening of `coerce` applies.
+                            coerce(v, &ft, &fty)
+                        }
+                        _ => Value::Null,
+                    };
+                    map.insert(name, v);
+                }
+                Ok(Value::Record(Rc::new(RefCell::new(map))))
+            }
             Rvalue::Variant {
                 variant, fields, ..
             } => {

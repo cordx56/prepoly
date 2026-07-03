@@ -1,0 +1,1 @@
+cannot implicitly convert `float64` to `float32`: a narrower float would lose precision; convert explicitly (`float32.from(x)`)

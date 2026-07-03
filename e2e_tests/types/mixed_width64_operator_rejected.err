@@ -1,0 +1,1 @@
+operator `+` is not defined for `int64` and `uint64` (no applicable conversion)

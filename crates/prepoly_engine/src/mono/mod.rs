@@ -416,6 +416,11 @@ struct Monomorphizer<'m, 'p> {
     global_types: HashMap<String, Type>,
     instances: HashMap<String, MonoFunction<'m>>,
     in_progress: HashSet<String>,
+    /// The program's parameter-row table, derived on first `RecordView` (the
+    /// same deterministic analysis the checker ran, so the view a call site was
+    /// approved for is the view built here). `None` until then: programs
+    /// without views never pay for the fixpoint.
+    rows: Option<prepoly_typesys::RowInfo>,
 }
 
 impl<'m, 'p> Monomorphizer<'m, 'p> {
@@ -445,7 +450,16 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             global_types: HashMap::new(),
             instances: HashMap::new(),
             in_progress: HashSet::new(),
+            rows: None,
         }
+    }
+
+    /// The row table, derived from the HIR program on first use.
+    fn rows(&mut self) -> &prepoly_typesys::RowInfo {
+        if self.rows.is_none() {
+            self.rows = Some(prepoly_typesys::RowInfo::analyze(self.program));
+        }
+        self.rows.as_ref().expect("rows just initialized")
     }
 
     /// Collect the instances created so far into a [`MonoProgram`] with a symbol
@@ -1174,6 +1188,33 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                     "`{ty}.from`: every field of the target record needs a declared type"
                 )),
             },
+            // The view of a callee parameter's row over this instance's concrete
+            // structural source: the canonical structural record whose type_key
+            // collapses every argument shape with the same view into one callee
+            // instance. Guarded fields are nullable slots (absent/mismatched ->
+            // null at construction). A non-structural or row-less source (a
+            // defensive case lowering should not produce) passes through as the
+            // identity, keeping type and value in agreement with codegen.
+            Rvalue::RecordView {
+                callee,
+                param,
+                source,
+            } => {
+                let Some(src) = self.operand_type(source, local_types)? else {
+                    return Ok(None);
+                };
+                match (
+                    prepoly_hir::peel_modes(&src),
+                    self.rows().function_param(callee, *param),
+                ) {
+                    (Type::Record(n), Some(prow))
+                        if n.id == prepoly_hir::STRUCTURAL_RECORD_ID && prow.eligible =>
+                    {
+                        prepoly_typesys::view_type(&prow.row, n).map(Some)
+                    }
+                    _ => Ok(Some(src)),
+                }
+            }
             // A `Result` construction takes the enclosing fallible callable's
             // inferred `Result` type; other (annotated) sums resolve directly.
             Rvalue::Variant {

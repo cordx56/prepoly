@@ -21,5 +21,7 @@ Features are summarized as follows:
 You can try prepoly on your browser:
 
 <div>
-  {{#include playground/index.html}}
+  {{#include playground/introduction.html}}
 </div>
+
+You can use [full-screen playground](playground/index.html).

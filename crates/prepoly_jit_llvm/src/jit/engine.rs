@@ -21,8 +21,9 @@ pub fn run(
     program: &Program,
     _int_lit_types: &std::collections::HashMap<prepoly_hir::Span, prepoly_hir::IntKind>,
     expr_types: &std::collections::HashMap<prepoly_hir::Span, prepoly_hir::Type>,
+    view_args: &std::collections::HashSet<prepoly_hir::Span>,
 ) -> Result<(), String> {
-    let mir = prepoly_mir::lower_program_with_types(program, expr_types);
+    let mir = prepoly_mir::lower_program_with_types(program, expr_types, view_args);
     // Debugging aid: dump the lowered MIR when requested
     // (PREPOLY_LOG_TYPE=mir) -- the first thing needed when monomorphization
     // rejects a checked program. Guarded so the rendering only runs when the

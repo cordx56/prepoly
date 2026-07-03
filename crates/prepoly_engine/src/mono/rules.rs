@@ -176,7 +176,8 @@ pub(super) fn check_bin(op: BinOp, a: &Type, b: &Type) -> Result<(), String> {
         // type (mixed width, signedness, and int-with-float); `+` also concatenates
         // two strings.
         BinOp::Add => {
-            if prepoly_hir::common_numeric_type(a, b).is_some() || (same && matches!(a, Type::Str))
+            if prepoly_typesys::common_numeric_type(a, b).is_some()
+                || (same && matches!(a, Type::Str))
             {
                 Ok(())
             } else {
@@ -188,7 +189,7 @@ pub(super) fn check_bin(op: BinOp, a: &Type, b: &Type) -> Result<(), String> {
             }
         }
         BinOp::Sub | BinOp::Mul | BinOp::Div => {
-            if prepoly_hir::common_numeric_type(a, b).is_some() {
+            if prepoly_typesys::common_numeric_type(a, b).is_some() {
                 Ok(())
             } else {
                 Err(format!(
@@ -225,7 +226,7 @@ pub(super) fn check_bin(op: BinOp, a: &Type, b: &Type) -> Result<(), String> {
         // A numeric comparison converts mixed operands to a common type; equality
         // also applies to two bools or two strings.
         BinOp::Eq | BinOp::Ne => {
-            if prepoly_hir::common_numeric_type(a, b).is_some()
+            if prepoly_typesys::common_numeric_type(a, b).is_some()
                 || (same && matches!(a, Type::Bool | Type::Str))
             {
                 Ok(())
@@ -238,7 +239,7 @@ pub(super) fn check_bin(op: BinOp, a: &Type, b: &Type) -> Result<(), String> {
             }
         }
         BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-            if prepoly_hir::common_numeric_type(a, b).is_some() {
+            if prepoly_typesys::common_numeric_type(a, b).is_some() {
                 Ok(())
             } else {
                 Err(format!(
@@ -298,7 +299,7 @@ pub(super) fn binary_operand_common(ta: &Type, tb: &Type, a_local: bool, b_local
     }
     // Mixed numeric operands implicitly convert to their common type (wider
     // width, signedness, and int-with-float).
-    if let Some(common) = prepoly_hir::common_numeric_type(na, nb) {
+    if let Some(common) = prepoly_typesys::common_numeric_type(na, nb) {
         return common;
     }
     if a_local || !b_local {

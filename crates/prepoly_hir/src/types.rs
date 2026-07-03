@@ -574,45 +574,6 @@ pub fn int_literal_kind(value: i64) -> IntKind {
     }
 }
 
-/// Whether a numeric value implicitly converts at a *flow* position (an
-/// assignment, argument, return, or element/field store): any integer flows
-/// into any integer type (width/signedness changes, possibly lossy, are part of
-/// the language's automatic numeric conversion), a float into a float of any
-/// width, and an integer into a float. A float does NOT implicitly flow into an
-/// integer -- silently truncating a fractional value is a bug magnet rather
-/// than a width choice, so that direction stays explicit (`int32.from`).
-pub fn numeric_flows_into(from: &Type, to: &Type) -> bool {
-    matches!(
-        (from, to),
-        (Type::Int(_), Type::Int(_))
-            | (Type::Float(_), Type::Float(_))
-            | (Type::Int(_), Type::Float(_))
-    )
-}
-
-/// The result type of an arithmetic or comparison operation between two numeric
-/// types, applying the implicit conversions:
-/// - int op int   -> the wider bit width (a mix of signed and unsigned is signed)
-/// - int op uint  -> a signed int (covered by the rule above)
-/// - int op float -> that float
-/// - float op float -> the wider bit width
-///
-/// `None` when either operand is not a numeric (int/float) type.
-pub fn common_numeric_type(a: &Type, b: &Type) -> Option<Type> {
-    match (a, b) {
-        (Type::Int(ka), Type::Int(kb)) => {
-            let signed = ka.is_signed() || kb.is_signed();
-            let bits = ka.bits().max(kb.bits());
-            Some(Type::Int(IntKind::of(signed, bits)))
-        }
-        (Type::Float(fa), Type::Float(fb)) => {
-            Some(Type::Float(if fa.bits() >= fb.bits() { *fa } else { *fb }))
-        }
-        (Type::Int(_), Type::Float(fk)) | (Type::Float(fk), Type::Int(_)) => Some(Type::Float(*fk)),
-        _ => None,
-    }
-}
-
 /// The type yielded by indexing into `ty`. Reference and mutability wrappers are
 /// seen through and re-applied to the element, so indexing a reference to an array
 /// yields a reference to the element of the same kind: `ref(T[])[i]` is `ref(T)`

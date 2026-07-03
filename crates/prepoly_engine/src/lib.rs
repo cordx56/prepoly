@@ -22,7 +22,9 @@ mod mir_infer;
 mod mono;
 mod runtime;
 
-pub use codegen::{Codegen, element_type, program_uses_with, rc_managed};
+pub use codegen::{
+    Codegen, ViewFieldPlan, element_type, program_uses_with, rc_managed, view_field_plans,
+};
 pub use engine::Engine;
 pub use mir_infer::{
     MirTypeError, NullResolver, ProgramResolver, Resolver, StructuralReq, gather_requirements,

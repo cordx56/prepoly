@@ -1,14 +1,18 @@
-// Automatic numeric conversion at *flow* positions: a numeric value converts
-// when assigned, passed, returned, compound-assigned, or stored into a numeric
-// position of a different type (int widths/signedness, int -> float). See
+// Automatic numeric conversion at *flow* positions: a VALUE-PRESERVING
+// widening converts when assigned, passed, returned, compound-assigned, or
+// stored into a numeric position of a different type. Narrowing (a smaller
+// width, a sign change, a float that cannot hold the integer exactly) is
+// never implicit: it goes through the explicit, fallible `T.from(x)`. See
 // numeric_conversions.pp for the operator-level conversions.
 
 fun widen(x: int64) -> int64 {
     return x
 }
 
-fun narrow(x: int32) -> int32 {
-    return x
+fun narrow(x: int64) -> int32! {
+    // Narrowing is explicit and fallible; out-of-range values are an Err
+    // instead of a silent truncation.
+    return int32.from(x % 100)!
 }
 
 fun halve(x: float64) -> float64 {
@@ -31,16 +35,15 @@ fun bump(c: ref(mut(Counter)), by: int32) {
 }
 
 fun main() {
-    // Assignments widen and (lossily) narrow.
+    // Assignments widen implicitly; narrowing is written out.
     let a: int32 = 5
     let b: int64 = a
     println(b)
-    let back: int32 = b
+    let back: int32 = int32.from(b)!
     println(back)
-    // Arguments and returns convert; 2^32 + 5 truncates to 5 through int32.
     let big: int64 = 4294967301
     println(widen(a))
-    println(narrow(big))
+    println(narrow(big)!)
     println(halve(a + 2))
     // Compound assignment converts the operand at the write-back.
     let t: int64 = 1

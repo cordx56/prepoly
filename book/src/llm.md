@@ -253,10 +253,12 @@ fun get_name(obj) {
 - Primitive types: `int8/16/32/64`, `uint8/16/32/64`, `float32`, `float64`,
   `bool`, `string`, `void`. There is no separate char type; a character is a
   one-character `string`.
-- Numeric operators and comparisons implicitly convert mixed numeric operands to
-  a common type (wider integer width/sign, or the float type for int+float).
-  Explicit conversions are still available and should be used when conversion is
-  the operation being performed. `string.from(x)` always succeeds and returns
+- Numeric operators and comparisons implicitly convert mixed numeric operands
+  to their common type, but only VALUE-PRESERVING conversions are implicit
+  (wider same-signed integer, unsigned into strictly wider signed, int into a
+  float that holds it exactly, float32 into float64). Lossy pairs (`int64`
+  with `uint64`, `int64` with `float64`, any narrowing) are compile errors;
+  convert explicitly. `string.from(x)` always succeeds and returns
   `string`. `float64.from(int)` widens. `int32.from(x)` / `uint8.from(x)` and
   the `T.parse(s)` family can fail and return `T!`, so unwrap with `!` or
   `match`.
@@ -358,10 +360,9 @@ of `main`, so insert `sync()` before a read that may race ahead.
 
 ## Common mistakes to avoid
 
-- Numeric operators convert mixed widths and int+float operands, but annotations
-  and function parameters still enforce their declared type. Use
-  `float64.from(...)` / `int32.from(...)` when storing or passing a converted
-  value explicitly.
+- Implicit numeric conversion is value-preserving widening ONLY. Narrowing
+  (smaller width, sign change, `float64 -> float32`, `int64 -> float64`,
+  float -> int) always goes through `T.from(x)!`.
 - `len()` returns `int64`; implicit int widening covers the common cases
   (`[0..len(xs)]` works without an annotation).
 - Use `==` for equality, not `=`.

@@ -357,9 +357,10 @@ fn execute(
     program: &Program,
     int_lit_types: &HashMap<Span, prepoly_hir::IntKind>,
     expr_types: &HashMap<Span, prepoly_hir::Type>,
+    view_args: &HashSet<Span>,
 ) -> Result<(), String> {
     install_jit_panic_guard();
-    prepoly_jit_llvm::run(program, int_lit_types, expr_types)
+    prepoly_jit_llvm::run(program, int_lit_types, expr_types, view_args)
 }
 
 /// Run a checked program through the default runtime: the REPL interpreter, used
@@ -369,8 +370,9 @@ fn execute(
     program: &Program,
     _int_lit_types: &HashMap<Span, prepoly_hir::IntKind>,
     expr_types: &HashMap<Span, prepoly_hir::Type>,
+    view_args: &HashSet<Span>,
 ) -> Result<(), String> {
-    prepoly_repl::run(program, expr_types, &mut io::stdout())
+    prepoly_repl::run(program, expr_types, view_args, &mut io::stdout())
 }
 
 /// Run a checked program through the REPL interpreter (the `repl` subcommand),
@@ -378,8 +380,9 @@ fn execute(
 fn execute_repl(
     program: &Program,
     expr_types: &HashMap<Span, prepoly_hir::Type>,
+    view_args: &HashSet<Span>,
 ) -> Result<(), String> {
-    prepoly_repl::run(program, expr_types, &mut io::stdout())
+    prepoly_repl::run(program, expr_types, view_args, &mut io::stdout())
 }
 
 /// Resolve each integer literal's source span to its inferred integer kind when
@@ -610,6 +613,9 @@ struct Checked {
     /// Checker-resolved instance types of aggregate-producing expressions, keyed
     /// by span; the back-end seeding channel (see [`aggregate_result_types`]).
     expr_types: HashMap<Span, prepoly_hir::Type>,
+    /// Spans of anonymous structural arguments the checker approved for view
+    /// conversion; MIR lowering wraps exactly these in `Rvalue::RecordView`.
+    view_args: HashSet<Span>,
 }
 
 /// Drive the front end on a source file, then act per `mode`. Front-end
@@ -641,15 +647,17 @@ fn drive(mode: Mode, file: &str) -> Result<(), u8> {
             &checked.program,
             &checked.int_lit_types,
             &checked.expr_types,
+            &checked.view_args,
         )
         .map_err(|e| {
             eprintln!("error: {e}");
             1
         }),
-        Mode::Repl => execute_repl(&checked.program, &checked.expr_types).map_err(|e| {
-            eprintln!("error: {e}");
-            1
-        }),
+        Mode::Repl => execute_repl(&checked.program, &checked.expr_types, &checked.view_args)
+            .map_err(|e| {
+                eprintln!("error: {e}");
+                1
+            }),
     }
 }
 
@@ -746,6 +754,7 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         program,
         int_lit_types,
         expr_types,
+        view_args: analysis.view_args,
     })
 }
 
@@ -861,7 +870,12 @@ fn run_capture(defs: &[String], body: &[String], root: &Path) -> Result<String, 
     let src = assemble(defs, body);
     let checked = analyze("<repl>", &src, root).map_err(|d| d.join("\n"))?;
     let mut buf: Vec<u8> = Vec::new();
-    prepoly_repl::run(&checked.program, &checked.expr_types, &mut buf)?;
+    prepoly_repl::run(
+        &checked.program,
+        &checked.expr_types,
+        &checked.view_args,
+        &mut buf,
+    )?;
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 

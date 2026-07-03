@@ -44,6 +44,10 @@ pub struct Analysis {
     /// field/method signatures over them), keyed by the type's source name. The
     /// language server renders a method generically from this.
     pub schemes: std::collections::HashMap<String, prepoly_hir::TypeScheme>,
+    /// Spans of anonymous structural arguments that passed the callee's row
+    /// check for a view-eligible parameter (`prepoly_typesys::rows`); MIR
+    /// lowering converts exactly these arguments into the parameter's view.
+    pub view_args: std::collections::HashSet<Span>,
 }
 
 /// Run all static checks. Returns the errors found (sorted by position).
@@ -81,6 +85,7 @@ pub fn analyze(program: &Program) -> Analysis {
         typed: infer.typed,
         fn_instances: infer.fn_instances,
         schemes: infer.schemes,
+        view_args: infer.view_args,
     }
 }
 
@@ -410,6 +415,34 @@ mod tests {
         }]);
         assert!(lerr.is_empty(), "lower errors: {lerr:?}");
         analyze(&prog)
+    }
+
+    #[test]
+    fn row_rejection_reports_once_at_the_value() {
+        // A row-rejected anonymous argument must produce exactly the value-site
+        // error: the callee body is not re-elaborated for that call, so no
+        // duplicate or interior-span variant of the same failure leaks out.
+        let msgs = errs(
+            "fun get_x(p) -> int32 {\n    return p.x\n}\n\
+             fun main() {\n    println(get_x({ y: 1 }))\n}\n",
+        );
+        assert_eq!(
+            msgs,
+            vec!["this value does not fit `get_x`'s parameter: missing field `x`".to_string()],
+        );
+    }
+
+    #[test]
+    fn row_pass_keeps_reelaboration_clean_and_records_the_view_argument() {
+        // A fitting anonymous argument passes the row check, the body still
+        // re-elaborates without errors, and the argument span is recorded for
+        // the view conversion (the lowering channel of stage D).
+        let a = analysis(
+            "fun get_x(p) -> int32 {\n    return p.x\n}\n\
+             fun main() {\n    println(get_x({ x: 1 }))\n}\n",
+        );
+        assert!(a.errors.is_empty(), "{:?}", a.errors);
+        assert_eq!(a.view_args.len(), 1, "one viewable argument expected");
     }
 
     #[test]
@@ -1700,7 +1733,7 @@ mod tests {
         let e = errs("fun main() {\n    let a: int32 = 3.5\n}\n");
         assert!(
             e.iter()
-                .any(|m| m.contains("cannot use `float64` where `int32` is required")),
+                .any(|m| m.contains("cannot implicitly convert `float64` to `int32`")),
             "{e:?}"
         );
     }
@@ -2308,16 +2341,16 @@ mod tests {
     fn numeric_values_convert_implicitly_at_flow_positions() {
         // Automatic numeric conversion: a numeric value flows into a numeric
         // position of a different type -- assignments, arguments, returns, and
-        // compound assignments alike. Narrowing int -> int is allowed (lossy by
-        // design); int -> float is allowed.
+        // compound assignments alike. Only VALUE-PRESERVING widenings convert;
+        // narrowing is explicit (see the companion rejection test below).
         for (label, src) in [
             (
                 "assignment widens",
                 "fun main() {\n    let a: int32 = 5\n    let b: int64 = a\n}\n",
             ),
             (
-                "assignment narrows (lossy)",
-                "fun main() {\n    let a: int64 = 5\n    let b: int32 = a\n}\n",
+                "unsigned widens into wider signed",
+                "fun main() {\n    let a: uint8 = 5\n    let b: int32 = a\n}\n",
             ),
             (
                 "argument widens",
@@ -2342,6 +2375,36 @@ mod tests {
         ] {
             let e = errs(src);
             assert!(e.is_empty(), "{label}: {e:?}");
+        }
+    }
+
+    #[test]
+    fn lossy_numeric_conversions_are_rejected() {
+        // Narrowing (width, sign, float precision) is never implicit; the
+        // diagnostic names the explicit conversion.
+        for (label, src) in [
+            (
+                "int narrowing",
+                "fun main() {\n    let a: int64 = 5\n    let b: int32 = a\n}\n",
+            ),
+            (
+                "sign change",
+                "fun main() {\n    let a: int32 = 5\n    let b: uint32 = a\n}\n",
+            ),
+            (
+                "float narrowing",
+                "fun main() {\n    let a: float64 = 1.5\n    let b: float32 = a\n}\n",
+            ),
+            (
+                "int64 into float64 (mantissa)",
+                "fun main() {\n    let a: int64 = 5\n    let f: float64 = a\n}\n",
+            ),
+        ] {
+            let e = errs(src);
+            assert!(
+                e.iter().any(|m| m.contains("cannot implicitly convert")),
+                "{label}: {e:?}"
+            );
         }
     }
 

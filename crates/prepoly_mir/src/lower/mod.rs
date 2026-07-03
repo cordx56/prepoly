@@ -47,6 +47,13 @@ pub(crate) struct ProgramCtx<'p> {
     /// would otherwise be unable to infer (a witness-free constructor). Empty
     /// when lowering without a checked program (tests, deferred re-lowering).
     expr_types: &'p HashMap<Span, Type>,
+    /// Spans of free-call arguments the checker verified as anonymous
+    /// structural values fitting a view-ELIGIBLE callee parameter's row. Only
+    /// these arguments are wrapped in [`crate::Rvalue::RecordView`]; lowering
+    /// itself stays type-free -- the checker decided, this set is the channel.
+    /// Empty when lowering without a checked program, so no view is ever
+    /// emitted then (tests, deferred re-lowering keep full values).
+    view_args: &'p std::collections::HashSet<Span>,
     /// Names each module's init binds as module-level globals (top-level
     /// `let`s), used to key global storage per defining module.
     module_globals: HashMap<Vec<String>, std::collections::HashSet<String>>,
@@ -59,7 +66,11 @@ pub(crate) struct ProgramCtx<'p> {
 }
 
 impl<'p> ProgramCtx<'p> {
-    fn new(program: &'p Program, expr_types: &'p HashMap<Span, Type>) -> Self {
+    fn new(
+        program: &'p Program,
+        expr_types: &'p HashMap<Span, Type>,
+        view_args: &'p std::collections::HashSet<Span>,
+    ) -> Self {
         let mut variant_names = std::collections::HashSet::new();
         for info in program.types.values() {
             if let TypeKind::Sum { variants } = &info.kind {
@@ -95,11 +106,18 @@ impl<'p> ProgramCtx<'p> {
             program,
             variant_names,
             expr_types,
+            view_args,
             module_globals,
             prelude_globals,
             closures: RefCell::new(Vec::new()),
             next_closure: Cell::new(0),
         }
+    }
+
+    /// Whether the checker recorded the argument at `span` as convertible into
+    /// its callee parameter's view.
+    fn is_view_arg(&self, span: Span) -> bool {
+        self.view_args.contains(&span)
     }
 
     /// The storage key of module-level global `name` as referenced from
@@ -544,7 +562,8 @@ pub fn lower_body(
     body: &Block,
 ) -> (MirBody, Vec<MirClosure>) {
     let no_types = HashMap::new();
-    let ctx = ProgramCtx::new(program, &no_types);
+    let no_views = std::collections::HashSet::new();
+    let ctx = ProgramCtx::new(program, &no_types, &no_views);
     let body = lower_one(
         &ctx,
         module.to_vec(),
@@ -574,16 +593,22 @@ fn lower_one(
 /// closures they spawn. Item enumeration mirrors `codegen::gen_functions` /
 /// `gen_inits`, including the `Name@module` storage-symbol keys.
 pub fn lower_program(program: &Program) -> MirProgram {
-    lower_program_with_types(program, &HashMap::new())
+    lower_program_with_types(program, &HashMap::new(), &std::collections::HashSet::new())
 }
 
-/// Lower a whole program with the checker's resolved expression types available,
-/// so call results that construct an aggregate are seeded with their instance
-/// type (see [`ProgramCtx::expr_types`]). The real execution paths pass the
-/// checker's map; [`lower_program`] is the inputs-free form used by tests and by
-/// runtime re-lowering, where the back end re-derives types on its own.
-pub fn lower_program_with_types(program: &Program, expr_types: &HashMap<Span, Type>) -> MirProgram {
-    let ctx = ProgramCtx::new(program, expr_types);
+/// Lower a whole program with the checker's outputs available: resolved
+/// expression types, so call results that construct an aggregate are seeded
+/// with their instance type (see [`ProgramCtx::expr_types`]); and the spans of
+/// view-convertible anonymous arguments (see [`ProgramCtx::view_args`]). The
+/// real execution paths pass the checker's data; [`lower_program`] is the
+/// inputs-free form used by tests and by runtime re-lowering, where the back
+/// end re-derives types on its own and keeps full argument values.
+pub fn lower_program_with_types(
+    program: &Program,
+    expr_types: &HashMap<Span, Type>,
+    view_args: &std::collections::HashSet<Span>,
+) -> MirProgram {
+    let ctx = ProgramCtx::new(program, expr_types, view_args);
     let mut out = MirProgram::default();
 
     let mut fn_names: Vec<&String> = program.functions.keys().collect();

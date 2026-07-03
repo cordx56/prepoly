@@ -1,0 +1,12 @@
+[package]
+name = "prepoly_typesys"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+prepoly_hir.workspace = true
+prepoly_parser.workspace = true
+tracing.workspace = true

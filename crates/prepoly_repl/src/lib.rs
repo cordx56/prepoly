@@ -28,9 +28,10 @@ pub use value::Value;
 pub fn run(
     program: &Program,
     expr_types: &std::collections::HashMap<prepoly_hir::Span, prepoly_hir::Type>,
+    view_args: &std::collections::HashSet<prepoly_hir::Span>,
     out: &mut dyn Write,
 ) -> Result<(), String> {
-    let mir = prepoly_mir::lower_program_with_types(program, expr_types);
+    let mir = prepoly_mir::lower_program_with_types(program, expr_types, view_args);
     let mono = prepoly_engine::monomorphize(&mir, program)
         .map_err(|e| format!("typed lowering failed: {e}"))?;
     if program.functions.contains_key("main") && mono.lookup("main").is_none() {

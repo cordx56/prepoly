@@ -843,6 +843,49 @@ pub trait Codegen {
                 // Wrap the freshly built record into the nullable result (`T` -> `T?`).
                 self.coerce(rec, &target, dest_ty)
             }
+            // The view of a callee parameter's row: a fresh structural record
+            // holding exactly the row's fields. `dest_ty` is the view type the
+            // monomorphizer fixed from the row and this instance's concrete
+            // source; per field the shared plan decides copy vs null, so a
+            // guarded field the source lacks (or carries at a non-flowing type)
+            // materializes as null rather than failing the call. A destination
+            // that is not a structural record is mono's defensive identity
+            // pass-through; mirror it.
+            Rvalue::RecordView { source, .. } => {
+                let src_ty = operand_type_of(source, &f.local_types);
+                if !matches!(dest_ty, Type::Record(n) if n.id == prepoly_hir::STRUCTURAL_RECORD_ID)
+                {
+                    return self.codegen_operand(program, f, source, dest_ty);
+                }
+                let src = self.codegen_operand(program, f, source, &src_ty);
+                let plans = view_field_plans(dest_ty, &src_ty);
+                let mut named: Vec<(&str, Self::Value)> = Vec::with_capacity(plans.len());
+                let mut managed: Vec<Self::Value> = Vec::new();
+                for (name, fty, plan) in &plans {
+                    let v = match plan {
+                        ViewFieldPlan::Copy => {
+                            let ft = record_field_type(strip_wrappers(&src_ty), name);
+                            let v = self.load_field(src, &src_ty, name);
+                            let v = self.coerce(v, &ft, fty);
+                            // The loaded field is an alias into the source, so
+                            // the fresh record must retain a managed one. A
+                            // guarded wrap is exempt: the wrap cell is fresh and
+                            // already retains its content itself.
+                            if rc_managed(fty) && !is_nullable_wrap(fty, &ft) {
+                                managed.push(v);
+                            }
+                            v
+                        }
+                        ViewFieldPlan::Null => self.const_null(),
+                    };
+                    named.push((name.as_str(), v));
+                }
+                let rec = self.make_record(dest_ty, &named);
+                for v in managed {
+                    self.retain(v);
+                }
+                rec
+            }
             // Construct a sum-type variant: `dest_ty` is the sum type.
             Rvalue::Variant {
                 variant, fields, ..
@@ -1754,6 +1797,60 @@ fn strip_wrappers(ty: &Type) -> &Type {
         Type::Ref(inner) | Type::Mut(inner) | Type::ConstOf(inner) => strip_wrappers(inner),
         other => other,
     }
+}
+
+/// How one field of a [`prepoly_mir::Rvalue::RecordView`] is materialized for a
+/// concrete (per-instance) source type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ViewFieldPlan {
+    /// Copy the source's field into the slot (identity, a value-preserving
+    /// numeric widening, or the guarded nullable wrap).
+    Copy,
+    /// The source lacks the (guarded) field, or carries it at a type that does
+    /// not flow into the slot's element: the view stores null.
+    Null,
+}
+
+/// The per-field construction plan of a view: each field of `view_ty` (the
+/// structural record the monomorphizer derived from the callee's row) with its
+/// slot type and how the concrete `src_ty` fills it. Derived purely from the
+/// two types, so the compiling back ends and the interpreter make the identical
+/// decision the type derivation made:
+///
+/// - a non-nullable slot is a Required row field -- presence and type were
+///   established by the checker (or the deferred boundary rejected the type);
+/// - a nullable slot is Guarded: it copies when the source field has the
+///   identical nullable type (a chained view passes its slot through) or a bare
+///   type flowing into the element, and is null otherwise.
+pub fn view_field_plans(view_ty: &Type, src_ty: &Type) -> Vec<(String, Type, ViewFieldPlan)> {
+    let Type::Record(view) = view_ty else {
+        return Vec::new();
+    };
+    let src = match strip_wrappers(src_ty) {
+        Type::Record(n) => Some(n),
+        _ => None,
+    };
+    view.substitution
+        .iter()
+        .map(|(name, fty)| {
+            let have = src.and_then(|s| s.substitution.get(name));
+            let plan = match fty {
+                Type::Nullable(inner) => match have {
+                    Some(ft) if ft == fty => ViewFieldPlan::Copy,
+                    Some(ft)
+                        if !matches!(ft, Type::Nullable(_))
+                            && !matches!(**inner, Type::Never)
+                            && prepoly_typesys::field_satisfies(ft, inner) =>
+                    {
+                        ViewFieldPlan::Copy
+                    }
+                    _ => ViewFieldPlan::Null,
+                },
+                _ => ViewFieldPlan::Copy,
+            };
+            (name.to_string(), fty.clone(), plan)
+        })
+        .collect()
 }
 
 /// Whether `T.from(source)` succeeds for a concrete (per-instance) `src_ty` and
