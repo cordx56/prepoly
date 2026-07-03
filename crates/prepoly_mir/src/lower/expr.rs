@@ -84,7 +84,7 @@ impl<'a, 'p> FnLower<'a, 'p> {
             Expr::ErrorProp(inner, _) => self.lower_error_prop(inner),
             Expr::Closure(params, body, _) => self.lower_closure(params, body),
             Expr::Array(es, span) => self.lower_array(es, *span),
-            Expr::Range(lo, hi, _) => self.lower_range(lo, hi),
+            Expr::Range(lo, hi, span) => self.lower_range(lo, hi, *span),
             Expr::TypeLit(name, fields, span) => self.lower_record(name, fields, *span),
             Expr::VariantLit(ty, variant, fields, _) => self.lower_variant(ty, variant, fields),
             Expr::If(cond, then, els, _) => self.lower_if(cond, then, els.as_deref()),
@@ -458,16 +458,49 @@ impl<'a, 'p> FnLower<'a, 'p> {
         }
     }
 
+    /// The checker-resolved element type of a range expression, when its
+    /// non-default representation was recorded (the expr_types channel). The
+    /// counting locals must carry it: monomorphization would otherwise
+    /// re-derive the literal bound's default width, and a counter narrower
+    /// than the checked type wraps before a wide `hi` bound is reached.
+    pub(crate) fn range_elem_type(&self, span: Span) -> Option<Type> {
+        match self.ctx.expr_type(span) {
+            Some(Type::Slice(e)) => Some((**e).clone()),
+            _ => None,
+        }
+    }
+
+    /// Materialize `op` into a local carrying the checker-resolved type when
+    /// one is known; a bare [`crate::builder::BodyBuilder::make_local`] otherwise.
+    pub(crate) fn make_local_seeded(&mut self, op: Operand, ty: Option<&Type>) -> LocalId {
+        match ty {
+            Some(t) => {
+                let id = self.b.fresh_local_typed(None, t.clone());
+                self.b.push(MirStmt::Assign(id, Rvalue::Use(op)));
+                id
+            }
+            None => self.b.make_local(op),
+        }
+    }
+
     /// Lower `[lo..hi]` to an index loop that fills a fresh array with the
     /// half-open integer range: `arr = []; i = lo; while i < hi { arr.push(i);
-    /// i += 1 }`. The empty array's element type is inferred from the push.
-    fn lower_range(&mut self, lo: &Expr, hi: &Expr) -> Operand {
-        let arr_op = self.b.emit(Rvalue::Array(Vec::new()));
+    /// i += 1 }`. The element type follows the checker's range type when it
+    /// was recorded (a non-default width); otherwise it is inferred from the
+    /// push.
+    fn lower_range(&mut self, lo: &Expr, hi: &Expr, span: Span) -> Operand {
+        let elem = self.range_elem_type(span);
+        let arr_op = match &elem {
+            Some(t) => self
+                .b
+                .emit_known(Rvalue::Array(Vec::new()), Type::Slice(Box::new(t.clone()))),
+            None => self.b.emit(Rvalue::Array(Vec::new())),
+        };
         let arr = self.b.make_local(arr_op);
         let lo_op = self.lower_expr(lo);
-        let i = self.b.make_local(lo_op);
+        let i = self.make_local_seeded(lo_op, elem.as_ref());
         let hi_op = self.lower_expr(hi);
-        let end = self.b.make_local(hi_op);
+        let end = self.make_local_seeded(hi_op, elem.as_ref());
 
         let cond_bb = self.b.new_block();
         let body_bb = self.b.new_block();

@@ -219,7 +219,23 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::Range(lo, _, _) => Type::Slice(Box::new(self.infer_expr_light(lo, env, errors))),
+            // Mirror the full check's range rule: the element type is the
+            // bounds' common integer type, a literal bound adapting to the
+            // other side (so `[0..n]` follows `n`'s width, not the literal's).
+            Expr::Range(lo, hi, _) => {
+                let lo_ty = self.infer_expr_light(lo, env, errors);
+                let hi_ty = self.infer_expr_light(hi, env, errors);
+                let lo_r = self.resolve(&lo_ty);
+                let hi_r = self.resolve(&hi_ty);
+                let elem = if matches!(hi_r, Type::Int(_)) && integer_literal_fits(lo, &hi_r) {
+                    hi_r
+                } else if matches!(lo_r, Type::Int(_)) && integer_literal_fits(hi, &lo_r) {
+                    lo_r
+                } else {
+                    common_numeric_type(&lo_r, &hi_r).unwrap_or(lo_r)
+                };
+                Type::Slice(Box::new(elem))
+            }
             Expr::TypeLit(name, fields, _) => self.infer_type_lit_light(name, fields, env, errors),
             Expr::VariantLit(name, variant, fields, _) => {
                 self.infer_variant_lit_light(name, variant, fields, env, errors)

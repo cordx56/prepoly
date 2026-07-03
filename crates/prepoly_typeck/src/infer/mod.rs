@@ -1565,14 +1565,14 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Range(lo, hi, _) => {
-                // `[lo..hi]` -- both bounds are integers of a shared type, the
-                // element type of the resulting array.
+                // `[lo..hi]` -- both bounds are integers; the element type is
+                // their common type, like a binary operator's operands.
                 let lo_ty = self.check_expr(lo, scopes);
                 let hi_ty = self.check_expr(hi, scopes);
                 self.expect_int_index(&lo_ty, lo.span());
                 self.expect_int_index(&hi_ty, hi.span());
-                self.expect_expr_assignable(&hi_ty, &lo_ty, hi);
-                Type::Slice(Box::new(lo_ty))
+                let elem = self.range_element_type(&lo_ty, lo, &hi_ty, hi);
+                Type::Slice(Box::new(elem))
             }
             Expr::TypeLit(name, fields, span) => self.check_record_lit(name, fields, *span, scopes),
             Expr::VariantLit(t, variant, fields, span) => {
@@ -3220,6 +3220,41 @@ impl<'a> Checker<'a> {
                 Some(elem)
             }
             _ => None,
+        }
+    }
+
+    /// The element type of `[lo..hi]`: the bounds' common integer type -- the
+    /// smallest both flow into, exactly as a binary operator types its
+    /// operands. Forcing `hi` into `lo`'s type would make the LITERAL's
+    /// default width dominate (`[0..a.len()]` would demand int64 -> int32
+    /// narrowing); instead a literal bound adapts to the other bound when its
+    /// value fits, so counting over a length runs at the length's width.
+    fn range_element_type(&mut self, lo_ty: &Type, lo: &Expr, hi_ty: &Type, hi: &Expr) -> Type {
+        let lo_r = self.resolve(lo_ty);
+        let hi_r = self.resolve(hi_ty);
+        match (&lo_r, &hi_r) {
+            // An open bound (still being inferred) follows the other side.
+            (Type::Unknown(_), _) => hi_r,
+            (_, Type::Unknown(_)) => lo_r,
+            (Type::Int(_), Type::Int(_)) => {
+                if integer_literal_fits(lo, &hi_r) {
+                    return hi_r;
+                }
+                if integer_literal_fits(hi, &lo_r) {
+                    return lo_r;
+                }
+                if let Some(t) = common_numeric_type(&lo_r, &hi_r) {
+                    return t;
+                }
+                // No value-preserving common width (e.g. int64 with uint64):
+                // report on `hi` with the explicit-conversion hint.
+                self.expect_expr_assignable(&hi_r, &lo_r, hi);
+                lo_r
+            }
+            // A non-integer bound was already rejected by expect_int_index;
+            // keep the integer side for downstream typing.
+            (Type::Int(_), _) => lo_r,
+            _ => hi_r,
         }
     }
 

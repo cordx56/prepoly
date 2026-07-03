@@ -325,7 +325,13 @@ impl FnLower<'_, '_> {
 
     /// `for v in iter` desugars to an index loop over the iterable's length,
     /// matching codegen: `i = 0; while i < len(iter) { v = iter[i]; body; i+=1 }`.
+    ///
+    /// A literal range iterable never escapes the loop, so it skips the array
+    /// materialization entirely and counts in place.
     fn lower_for(&mut self, var: &str, iter: &Expr, body: &Block) {
+        if let Expr::Range(lo, hi, span) = iter {
+            return self.lower_for_range(var, lo, hi, *span, body);
+        }
         let arr = self.lower_expr(iter);
         let arr = self.b.make_local(arr);
         let i = self.b.fresh_local(None);
@@ -378,6 +384,74 @@ impl FnLower<'_, '_> {
         let _ = self.lower_block_value(body);
         if !self.b.terminated() {
             self.emit_loop_writeback();
+            self.b.terminate(Terminator::Goto(incr_bb));
+        }
+        self.loops.pop();
+        self.pop_scope();
+
+        self.b.switch_to(incr_bb);
+        let next = self.b.emit(Rvalue::Bin(
+            prepoly_parser::ast::BinOp::Add,
+            Operand::Local(i),
+            Operand::Const(crate::value::Literal::Int(1)),
+        ));
+        self.b.push(MirStmt::Assign(i, Rvalue::Use(next)));
+        self.b.terminate(Terminator::Goto(cond_bb));
+        self.b.switch_to(end_bb);
+    }
+
+    /// `for v in [lo..hi]` counts directly: `i = lo; while i < hi { v = i;
+    /// body; i += 1 }`. Materializing the range as an array (the general
+    /// [`Self::lower_for`] path) would cost the full range in memory and one
+    /// push per element for a value the program can never observe. The loop
+    /// variable binds a COPY of the counter, so a body that reassigns it
+    /// neither skews iteration nor needs the array write-back -- the same
+    /// visible behavior as writing into the discarded range array. The
+    /// counter carries the checker's range element type when one was recorded
+    /// (see `range_elem_type`), so counting matches the checked width.
+    fn lower_for_range(
+        &mut self,
+        var: &str,
+        lo: &Expr,
+        hi: &Expr,
+        span: prepoly_lexer::Span,
+        body: &Block,
+    ) {
+        let elem = self.range_elem_type(span);
+        let lo_op = self.lower_expr(lo);
+        let i = self.make_local_seeded(lo_op, elem.as_ref());
+        let hi_op = self.lower_expr(hi);
+        let end = self.make_local_seeded(hi_op, elem.as_ref());
+
+        let cond_bb = self.b.new_block();
+        let body_bb = self.b.new_block();
+        let incr_bb = self.b.new_block();
+        let end_bb = self.b.new_block();
+        self.b.terminate(Terminator::Goto(cond_bb));
+
+        self.b.switch_to(cond_bb);
+        let c = self.b.emit(Rvalue::Bin(
+            prepoly_parser::ast::BinOp::Lt,
+            Operand::Local(i),
+            Operand::Local(end),
+        ));
+        self.b.terminate(Terminator::CondBranch {
+            cond: c,
+            then: body_bb,
+            els: end_bb,
+        });
+
+        self.b.switch_to(body_bb);
+        self.push_scope();
+        let elem = self.b.emit(Rvalue::Use(Operand::Local(i)));
+        self.bind_value(var, elem);
+        self.loops.push(crate::lower::LoopFrame {
+            cont: incr_bb,
+            brk: end_bb,
+            writeback: None,
+        });
+        let _ = self.lower_block_value(body);
+        if !self.b.terminated() {
             self.b.terminate(Terminator::Goto(incr_bb));
         }
         self.loops.pop();

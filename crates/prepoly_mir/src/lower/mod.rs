@@ -689,6 +689,10 @@ pub fn lower_program_with_types(
     let mut closures = ctx.closures.into_inner();
     closures.sort_by_key(|c| c.id.0);
     out.closures = closures;
+    // Constant array literals whose value is only ever read become
+    // once-initialized globals (see [`crate::promote`]); running on the shared
+    // MIR keeps the JIT and the REPL interpreter behaviorally identical.
+    crate::promote::promote_const_array_literals(&mut out);
     out
 }
 

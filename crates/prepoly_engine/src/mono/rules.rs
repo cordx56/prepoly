@@ -309,6 +309,29 @@ pub(super) fn binary_operand_common(ta: &Type, tb: &Type, a_local: bool, b_local
     }
 }
 
+/// The operand-type pair `validate` should check for a binary statement: a
+/// const integer literal takes the kind it adapts to at codegen (the first
+/// clause of [`binary_operand_common`]), so validation sees the pair the back
+/// ends actually emit -- `u64_counter + 1` is uint64/uint64, not the
+/// literal's magnitude-default uint64/int32. Every other pair validates at
+/// its own types.
+pub(super) fn bin_validation_types(
+    ta: &Type,
+    tb: &Type,
+    a_local: bool,
+    b_local: bool,
+) -> (Type, Type) {
+    if let (Type::Int(ka), Type::Int(kb)) = (unwrap_nullable(ta), unwrap_nullable(tb))
+        && a_local != b_local
+    {
+        let (lit, var) = if a_local { (kb, ka) } else { (ka, kb) };
+        if lit.bits() <= var.bits() {
+            return (Type::Int(*var), Type::Int(*var));
+        }
+    }
+    (ta.clone(), tb.clone())
+}
+
 /// Scan a body for `arr.push(elem)` calls, mapping each array local (resolved
 /// through `Use` aliases) to a pushed element operand. Used to infer the element
 /// Join two return-operand types of an unannotated non-fallible callable. The

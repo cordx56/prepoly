@@ -50,8 +50,8 @@ pub use symbols::{
 };
 
 use rules::{
-    binary_operand_common, check_bin, const_type, is_supported, merge_return_types,
-    resolve_nominal, variant_field_layoutable,
+    bin_validation_types, binary_operand_common, check_bin, const_type, is_supported,
+    merge_return_types, resolve_nominal, variant_field_layoutable,
 };
 use symbols::is_return_polymorphic_result;
 
@@ -2096,7 +2096,16 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                 else {
                     continue;
                 };
-                let (ta, tb) = (ty(a), ty(b));
+                // Validate the pair at the types codegen emits: a const
+                // integer literal adapts to the local operand's kind (the
+                // shared operand rule), so its magnitude default does not
+                // fail a pair the back ends handle (`u64 + 1`, `i64 << 2`).
+                let (ta, tb) = bin_validation_types(
+                    &ty(a),
+                    &ty(b),
+                    matches!(a, Operand::Local(_)),
+                    matches!(b, Operand::Local(_)),
+                );
                 check_bin(*op, &ta, &tb).map_err(|e| format!("{e} (in `{sym}`)"))?;
             }
         }

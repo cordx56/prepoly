@@ -242,13 +242,24 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
         self.builder.build_return(None).unwrap();
     }
 
-    /// Run the always-inliner over the module so the `alwaysinline`
-    /// marks above take effect before JIT codegen. Best-effort: optimization is not
-    /// required for correctness, so a pass-setup failure is non-fatal.
+    /// Run LLVM's `default<O2>` pipeline over the module (which subsumes the
+    /// always-inliner, so the `alwaysinline` marks above take effect too).
+    /// Codegen builds every local as a stack slot; without the mid-level
+    /// pipeline (mem2reg/SROA, instcombine, LICM, GVN) each MIR statement
+    /// keeps its memory round-trip and hot loops run several times slower
+    /// than the equivalent register-form code. Best-effort: optimization is
+    /// not required for correctness, so a pass-setup failure is non-fatal.
     fn run_optimization_passes(&self) {
         use inkwell::passes::PassBuilderOptions;
-        use inkwell::targets::{CodeModel, RelocMode, Target, TargetMachine};
+        use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
 
+        // The native target must be registered before the triple resolves.
+        // The JIT engine does this itself, but it is created after this pass
+        // runs, so resolve it here or `Target::from_triple` fails and the
+        // whole pipeline is silently skipped.
+        if Target::initialize_native(&InitializationConfig::default()).is_err() {
+            return;
+        }
         let triple = TargetMachine::get_default_triple();
         let Ok(target) = Target::from_triple(&triple) else {
             return;
@@ -263,9 +274,12 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
         ) else {
             return;
         };
-        let _ = self
-            .module
-            .run_passes("always-inline", &machine, PassBuilderOptions::create());
+        if let Err(e) =
+            self.module
+                .run_passes("default<O2>", &machine, PassBuilderOptions::create())
+        {
+            tracing::warn!(target: "prepoly::ir", "optimization pipeline failed: {e}");
+        }
     }
 
     /// A global string constant; returns its pointer and byte length.

@@ -112,6 +112,65 @@ fn for_loop_desugars_to_indexed_iteration() {
 }
 
 #[test]
+fn for_over_range_counts_without_materializing_an_array() {
+    // `for v in [lo..hi]` must lower to a direct counting loop: the range is
+    // unobservable as a value, and building it (one push per element) costs
+    // the full range in memory and time.
+    let (body, _) = lower_first("fun f(n) { for v in [0..n] { print(v) } }");
+    let text = body_to_string(&body);
+    assert!(!text.contains("push"), "range was materialized: {text}");
+    assert!(!text.contains("= []"), "range was materialized: {text}");
+    assert!(
+        !text.contains("array_len"),
+        "range was materialized: {text}"
+    );
+    // The counter still drives a bounded loop.
+    assert!(text.contains("Lt"), "{text}");
+    assert!(text.contains("Add 1"), "{text}");
+}
+
+#[test]
+fn range_as_a_value_still_materializes() {
+    // Outside a `for` head the range IS the value, so the fill loop remains.
+    let (body, _) = lower_first("fun f() { let xs = [0..3] return xs }");
+    let text = body_to_string(&body);
+    assert!(text.contains("push"), "{text}");
+}
+
+#[test]
+fn const_array_literal_promotes_to_a_shared_global() {
+    // A constant literal only read by the callee (indexed, measured) is
+    // rewritten into a read of a synthetic global built once by the prepended
+    // consts init, so a call inside a loop stops allocating per iteration.
+    let text = lower_whole(
+        "fun total(a) -> int32 {\n  let t = 0\n  for i in [0..a.len()] {\n    t += a[i]\n  }\n  return t\n}\n\
+         println(total([1, 2, 3]))\n",
+    );
+    assert!(text.contains("global __arr0@consts = "), "{text}");
+    assert!(text.contains("= global __arr0@consts"), "{text}");
+    // The literal itself must no longer be constructed at the call site: the
+    // only [1, 2, 3] construction left is the consts init's.
+    assert_eq!(text.matches("= [1, 2, 3]").count(), 1, "{text}");
+}
+
+#[test]
+fn mutated_and_escaping_literals_keep_per_evaluation_construction() {
+    // A literal mutated through its binding, and one stored into a mutable
+    // global structure, must stay a fresh value per evaluation -- sharing one
+    // frozen global would leak writes across evaluations.
+    let text = lower_whole(
+        "fun stash(x) {\n  holder[0] = x\n}\n\
+         let holder = [[0]]\n\
+         let m = [10, 20]\n\
+         m[0] = 11\n\
+         stash([5, 6])\n",
+    );
+    assert!(!text.contains("@consts"), "{text}");
+    assert!(text.contains("= [10, 20]"), "{text}");
+    assert!(text.contains("= [5, 6]"), "{text}");
+}
+
+#[test]
 fn error_propagation_branches_and_returns_on_err() {
     // `r!` tests the Result, unwraps on Ok, returns the Result on Err.
     let (body, _) = lower_first("fun f(r) { let x = r! return x }");

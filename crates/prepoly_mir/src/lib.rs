@@ -22,6 +22,7 @@ mod display;
 mod ids;
 mod lower;
 mod program;
+mod promote;
 mod ty;
 mod value;
 

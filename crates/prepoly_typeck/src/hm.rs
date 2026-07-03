@@ -664,14 +664,41 @@ impl<'p> Hm<'p> {
                 }
             }
             Expr::Range(lo, hi, span) => {
-                // `[lo..hi]` builds an array of the (integer) bound type. Both
-                // bounds share one integer type, which is the element type.
-                let int_v = self.literal_var(Type::Int(IntKind::I32), *span);
+                // `[lo..hi]` builds an array whose element type is the bounds'
+                // common integer type, mirroring the full check's range rule: a
+                // literal bound adapts to the other bound's width (`[0..a.len()]`
+                // is `int64[]`), two typed bounds meet at their common type
+                // without unifying (each widens at the flow point), and anything
+                // else shares one bound type as before.
                 let lo_ty = self.infer_expr(lo);
                 let hi_ty = self.infer_expr(hi);
-                self.unify(&lo_ty, &int_v, lo.span());
-                self.unify(&hi_ty, &int_v, hi.span());
-                Type::Slice(Box::new(int_v))
+                let (rl, rh) = (self.solver.resolve(&lo_ty), self.solver.resolve(&hi_ty));
+                let (ll, lh) = (self.lit_default(&rl), self.lit_default(&rh));
+                match (&rl, &rh) {
+                    (Type::Unknown(_), Type::Int(_)) if ll.is_some() => {
+                        self.unify(&lo_ty, &rh, lo.span());
+                        Type::Slice(Box::new(rh))
+                    }
+                    (Type::Int(_), Type::Unknown(_)) if lh.is_some() => {
+                        self.unify(&hi_ty, &rl, hi.span());
+                        Type::Slice(Box::new(rl))
+                    }
+                    (Type::Int(_), Type::Int(_)) => {
+                        match prepoly_typesys::common_numeric_type(&rl, &rh) {
+                            Some(c) => Type::Slice(Box::new(c)),
+                            None => {
+                                self.unify(&lo_ty, &hi_ty, *span);
+                                Type::Slice(Box::new(rl))
+                            }
+                        }
+                    }
+                    _ => {
+                        let int_v = self.literal_var(Type::Int(IntKind::I32), *span);
+                        self.unify(&lo_ty, &int_v, lo.span());
+                        self.unify(&hi_ty, &int_v, hi.span());
+                        Type::Slice(Box::new(int_v))
+                    }
+                }
             }
             Expr::If(cond, then, els, span) => {
                 // A condition may be a bool or a nullable (truthy = non-null), so
