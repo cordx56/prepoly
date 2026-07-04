@@ -147,7 +147,9 @@ fn collect_stmt_bindings(s: &Stmt, f: &mut impl FnMut(&str, Span)) {
     match s {
         Stmt::Let { pat, value, .. } => {
             collect_pattern_bindings(pat, f);
-            collect_expr_bindings(value, f);
+            if let Some(value) = value {
+                collect_expr_bindings(value, f);
+            }
         }
         Stmt::Assign { value, .. } => collect_expr_bindings(value, f),
         Stmt::Expr(e) => collect_expr_bindings(e, f),

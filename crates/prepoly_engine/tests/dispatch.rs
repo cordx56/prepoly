@@ -435,6 +435,34 @@ fn monomorphize_skips_unsupported_roots() {
 }
 
 #[test]
+fn failed_frame_rolls_back_mutually_recursive_callee() {
+    // Mutual recursion stores the callee (typed against the caller's
+    // provisional annotated return) before the caller. When the caller's frame
+    // then fails -- here on the unsupported `input` builtin after the recursive
+    // call -- the stored callee must be rolled back too: it holds a call to a
+    // symbol that will never materialize, and codegen would have no target.
+    let src = "fun ping(n: int64) -> int64 {\n  if n == 0 {\n    return pong(n - 1)\n  }\n  let s = input()\n  return 0\n}\n\
+               fun pong(n: int64) -> int64 {\n  if n == 0 {\n    return 0\n  }\n  return ping(n - 1)\n}\n\
+               fun run_ping() {\n  return ping(3)\n}\n";
+    let ast = prepoly_parser::parse(src).expect("parse");
+    let modules = [LoadedModule {
+        path: vec!["main".into()],
+        ast,
+    }];
+    let (program, _errors) = prepoly_hir::lower(&modules);
+    let mir = lower_program(&program);
+    let mono = monomorphize(&mir, &program).expect("best-effort monomorphize");
+    assert!(
+        mono.lookup("ping$$int64").is_none(),
+        "failing caller must not be stored"
+    );
+    assert!(
+        mono.lookup("pong$$int64").is_none(),
+        "callee typed against the failed frame must be rolled back"
+    );
+}
+
+#[test]
 fn monomorphize_types_module_globals() {
     // A top-level `let` types as a global from its initializer, and a function
     // reading it monomorphizes against that type.
@@ -460,12 +488,13 @@ fn monomorphize_types_module_globals() {
 #[test]
 fn main_module_top_level_failure_is_surfaced_not_dropped() {
     // A `main` module init that falls outside the typed subset (here mutual
-    // recursion) is the program's entry point, so monomorphization fails loudly
-    // rather than silently dropping it -- which had let a type-checked program run
-    // to a clean exit with no output. (A `main` function in the same shape is
-    // already rejected by both back ends.)
-    let src = "fun a(n: int32) -> int32 {\n  if n <= 0 { return 0 }\n  return b(n - 1)\n}\n\
-               fun b(n: int32) -> int32 {\n  if n <= 0 { return 0 }\n  return a(n - 1)\n}\n\
+    // recursion without return annotations, which has no sound provisional
+    // type to assume) is the program's entry point, so monomorphization fails
+    // loudly rather than silently dropping it -- which had let a type-checked
+    // program run to a clean exit with no output. (A `main` function in the
+    // same shape is already rejected by both back ends.)
+    let src = "fun a(n: int32) {\n  if n <= 0 { return 0 }\n  return b(n - 1)\n}\n\
+               fun b(n: int32) {\n  if n <= 0 { return 0 }\n  return a(n - 1)\n}\n\
                println(a(5))\n";
     let ast = prepoly_parser::parse(src).expect("parse");
     let modules = [LoadedModule {

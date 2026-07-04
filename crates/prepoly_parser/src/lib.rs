@@ -99,7 +99,7 @@ mod tests {
                 assert_eq!(f.body.stmts.len(), 1);
                 match &f.body.stmts[0] {
                     Stmt::Let { value, .. } => {
-                        assert!(matches!(value, Expr::Binary(BinOp::Mul, ..)))
+                        assert!(matches!(value, Some(Expr::Binary(BinOp::Mul, ..))))
                     }
                     _ => panic!(),
                 }
@@ -131,7 +131,7 @@ mod tests {
             TopLevel::Fun(f) => {
                 match &f.body.stmts[0] {
                     Stmt::Let {
-                        value: Expr::VariantLit(t, v, fields, _),
+                        value: Some(Expr::VariantLit(t, v, fields, _)),
                         ..
                     } => {
                         assert_eq!(t, "Animal");
@@ -142,7 +142,7 @@ mod tests {
                 }
                 match &f.body.stmts[1] {
                     Stmt::Let {
-                        value: Expr::Field(_, name, _),
+                        value: Some(Expr::Field(_, name, _)),
                         ..
                     } => assert_eq!(name, "Red"),
                     _ => panic!("expected field access for unit variant"),
@@ -173,7 +173,7 @@ mod tests {
         match &m.items[0] {
             TopLevel::Fun(f) => match &f.body.stmts[0] {
                 Stmt::Let {
-                    value: Expr::Str(segs, _),
+                    value: Some(Expr::Str(segs, _)),
                     ..
                 } => {
                     assert_eq!(segs.len(), 2);
@@ -219,21 +219,21 @@ mod tests {
                 assert!(matches!(
                     f.body.stmts[0],
                     Stmt::Let {
-                        value: Expr::Binary(..),
+                        value: Some(Expr::Binary(..)),
                         ..
                     }
                 ));
                 assert!(matches!(
                     f.body.stmts[1],
                     Stmt::Let {
-                        value: Expr::Closure(..),
+                        value: Some(Expr::Closure(..)),
                         ..
                     }
                 ));
                 assert!(matches!(
                     f.body.stmts[2],
                     Stmt::Let {
-                        value: Expr::Closure(..),
+                        value: Some(Expr::Closure(..)),
                         ..
                     }
                 ));

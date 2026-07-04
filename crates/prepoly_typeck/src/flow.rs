@@ -25,12 +25,18 @@ pub fn check(program: &Program) -> Vec<TypeError> {
         match &info.kind {
             TypeKind::Record { methods, .. } => {
                 for m in methods.values() {
+                    if prepoly_hir::keyed_return(m.decl.ret.as_ref()) {
+                        continue;
+                    }
                     check_callable(program, &m.signature, m.decl.body.as_ref(), &mut errors);
                 }
             }
             TypeKind::Sum { variants } => {
                 for v in variants {
                     for m in v.methods.values() {
+                        if prepoly_hir::keyed_return(m.decl.ret.as_ref()) {
+                            continue;
+                        }
                         check_callable(program, &m.signature, m.decl.body.as_ref(), &mut errors);
                     }
                 }
@@ -105,7 +111,10 @@ fn check_loop_control(stmts: &[Stmt], in_loop: bool, errors: &mut Vec<TypeError>
                 check_loop_control_expr(iter, in_loop, errors);
                 check_loop_control(&body.stmts, true, errors);
             }
-            Stmt::Let { value, .. } => check_loop_control_expr(value, in_loop, errors),
+            Stmt::Let {
+                value: Some(value), ..
+            } => check_loop_control_expr(value, in_loop, errors),
+            Stmt::Let { value: None, .. } => {}
             Stmt::Assign { target, value, .. } => {
                 check_loop_control_expr(target, in_loop, errors);
                 check_loop_control_expr(value, in_loop, errors);
@@ -256,7 +265,7 @@ fn stmt_has_break(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Break(_) => true,
         Stmt::Expr(e) => expr_has_break(e),
-        Stmt::Let { value, .. } => expr_has_break(value),
+        Stmt::Let { value, .. } => value.as_ref().is_some_and(expr_has_break),
         Stmt::Assign { target, value, .. } => expr_has_break(target) || expr_has_break(value),
         Stmt::Return(Some(e), _) => expr_has_break(e),
         // A `break` inside a nested loop's BODY binds to that loop, so it does

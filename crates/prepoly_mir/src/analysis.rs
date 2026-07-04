@@ -25,7 +25,10 @@ pub fn cell_promotions(body: &Block) -> HashSet<String> {
 fn promo_block(b: &Block, cap: &mut HashSet<String>, mutd: &mut HashSet<String>) {
     for s in &b.stmts {
         match s {
-            Stmt::Let { value, .. } => promo_expr(value, cap, mutd),
+            Stmt::Let {
+                value: Some(value), ..
+            } => promo_expr(value, cap, mutd),
+            Stmt::Let { value: None, .. } => {}
             Stmt::Assign { target, value, .. } => {
                 if let Expr::Ident(n, _) = target {
                     mutd.insert(n.clone());
@@ -118,7 +121,9 @@ fn free_block(b: &Block, bound: &mut HashSet<String>, free: &mut HashSet<String>
             Stmt::Let { pat, value, .. } => {
                 // The initializer is evaluated before the pattern binds, so a
                 // self-named reference in it (`let y = y + 1`) is a free read.
-                free_expr(value, bound, free);
+                if let Some(value) = value {
+                    free_expr(value, bound, free);
+                }
                 bound_pat(pat, bound);
             }
             Stmt::Assign { target, value, .. } => {
@@ -266,7 +271,10 @@ fn walk_subexprs(e: &Expr, f: &mut impl FnMut(&Expr)) {
 fn block_exprs(b: &Block, f: &mut impl FnMut(&Expr)) {
     for s in &b.stmts {
         match s {
-            Stmt::Let { value, .. } => f(value),
+            Stmt::Let {
+                value: Some(value), ..
+            } => f(value),
+            Stmt::Let { value: None, .. } => {}
             Stmt::Assign { target, value, .. } => {
                 f(target);
                 f(value);
@@ -295,7 +303,7 @@ pub fn fallible_block(b: &Block) -> bool {
 
 fn fallible_stmt(s: &Stmt) -> bool {
     match s {
-        Stmt::Let { value, .. } => fallible_expr(value),
+        Stmt::Let { value, .. } => value.as_ref().is_some_and(fallible_expr),
         Stmt::Assign { target, value, .. } => fallible_expr(target) || fallible_expr(value),
         Stmt::Expr(e) => fallible_expr(e),
         Stmt::While { cond, body, .. } => fallible_expr(cond) || fallible_block(body),

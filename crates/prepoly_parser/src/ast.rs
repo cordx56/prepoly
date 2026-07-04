@@ -106,7 +106,11 @@ pub enum Stmt {
     Let {
         pat: Pattern,
         ty: Option<TypeExpr>,
-        value: Expr,
+        /// `None` for a declaration without an initializer (`let p: Point`).
+        /// Only an annotated `let` (not `const`) may omit it; the binding must
+        /// then be definitely assigned -- whole or field by field -- before any
+        /// read, which the checker's definite-assignment pass enforces.
+        value: Option<Expr>,
         is_const: bool,
         span: Span,
     },
@@ -327,6 +331,10 @@ pub enum TypeExpr {
     /// inner is then a `mut(...)`). A reference parameter borrows the argument
     /// instead of deep-copying it; a non-reference parameter is passed by copy.
     Ref(Box<TypeExpr>, Span),
+    /// `typeof(e)` in type position: the static type of the value expression
+    /// `e`. The checker resolves it by tying the annotation to `e`'s inferred
+    /// type; `e` is type-checked but never evaluated at runtime.
+    TypeOf(Box<Expr>, Span),
 }
 
 impl TypeExpr {
@@ -340,7 +348,8 @@ impl TypeExpr {
             | TypeExpr::Tuple(_, s)
             | TypeExpr::Anonymous(_, s)
             | TypeExpr::Mut(_, s)
-            | TypeExpr::Ref(_, s) => *s,
+            | TypeExpr::Ref(_, s)
+            | TypeExpr::TypeOf(_, s) => *s,
         }
     }
 }

@@ -4,6 +4,8 @@
 
 use super::*;
 
+pub(super) use prepoly_hir::type_key;
+
 /// Marks a compiler-synthesized instance symbol (a module init, method, static,
 /// or closure) so it occupies a namespace disjoint from user function symbols.
 /// `$` cannot appear in a source identifier, so a user `fun init0` (symbol
@@ -25,70 +27,6 @@ pub fn instance_symbol(base: &str, type_args: &[Type]) -> String {
         let args = type_args.iter().map(type_key).collect::<Vec<_>>().join("_");
         format!("{base}$${args}")
     }
-}
-
-/// A collision-resistant key for one concrete type inside an instance symbol.
-/// Unlike `Type::display`, every token is self-delimiting (no `_` inside a
-/// token), constructors carry their arity, nominal types are keyed by id (two
-/// same-named types from different modules stay distinct), and substitution
-/// field names are length-prefixed. Joining keys with `_` is therefore a
-/// uniquely decodable code: equal symbols imply equal type tuples.
-fn type_key(ty: &Type) -> String {
-    match ty {
-        Type::Bool => "bool".into(),
-        Type::Int(k) => k.name().into(),
-        Type::Float(k) => k.name().into(),
-        Type::Str => "str".into(),
-        Type::Void => "void".into(),
-        Type::Never => "never".into(),
-        Type::Record(n) => nominal_key("rec", n),
-        Type::Sum(n) => nominal_key("sum", n),
-        Type::Array(e, len) => format!("arr{len}_{}", type_key(e)),
-        Type::Slice(e) => format!("slice_{}", type_key(e)),
-        Type::Tuple(es) => {
-            let mut out = format!("tup{}", es.len());
-            for e in es {
-                out.push('_');
-                out.push_str(&type_key(e));
-            }
-            out
-        }
-        Type::Fun(ps, ret) => {
-            let mut out = format!("fn{}", ps.len());
-            for p in ps {
-                out.push('_');
-                out.push_str(&type_key(p));
-            }
-            out.push('_');
-            out.push_str(&type_key(ret));
-            out
-        }
-        Type::Nullable(inner) => format!("opt_{}", type_key(inner)),
-        // Passing modes do not change the value's concrete layout.
-        Type::ConstOf(inner) | Type::Mut(inner) | Type::Ref(inner) => type_key(inner),
-        Type::Unknown(id) => format!("unk{id}"),
-        Type::SelfType => "selfty".into(),
-    }
-}
-
-/// Key of a record/sum: nominal id plus every substitution entry, so two
-/// instantiations of one generic container (`HashMap<string,int32>` vs
-/// `HashMap<int32,int32>`) -- and two structural records with different fields --
-/// get distinct instance symbols. Field names are length-prefixed because a
-/// source identifier may itself contain `_`.
-fn nominal_key(tag: &str, n: &prepoly_hir::NominalType) -> String {
-    let entries: Vec<(&str, &Type)> = n.substitution.iter().collect();
-    let mut out = format!("{tag}{}x{}", n.id, entries.len());
-    // A negative id is a shared internal id (e.g. every structural record uses
-    // `STRUCTURAL_RECORD_ID`), where identity also depends on the name -- mirror
-    // `NominalType::same_nominal` and fold the name in.
-    if n.id < 0 {
-        out.push_str(&format!("_nm{}_{}", n.name.len(), n.name));
-    }
-    for (name, ty) in entries {
-        out.push_str(&format!("_fld{}_{name}_{}", name.len(), type_key(ty)));
-    }
-    out
 }
 
 /// Instance symbol of an instance-method call. `type_args[0]` is the receiver

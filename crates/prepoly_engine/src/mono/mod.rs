@@ -311,6 +311,10 @@ pub struct MonoProgram<'m> {
     pub globals: Vec<(String, Type)>,
     /// Init instance symbols, in run order (executed before `main`).
     pub init_symbols: Vec<String>,
+    /// Why the `main` root was skipped, when it was: the first construct that
+    /// fell outside the typed subset. Roots are best-effort, but for `main`
+    /// (the program's entry point) the reason is the diagnostic the user needs.
+    pub main_skip: Option<String>,
     index: HashMap<String, usize>,
     global_index: HashMap<String, Type>,
 }
@@ -363,6 +367,7 @@ pub fn monomorphize<'m>(mir: &'m MirProgram, program: &Program) -> Result<MonoPr
             false,
         );
         mono.in_progress.clear();
+        mono.assumed_rets.clear();
         match res {
             Ok(_) => init_symbols.push(sym),
             Err(e) if matches!(init.module.as_slice(), [m] if m == "main") => {
@@ -373,19 +378,27 @@ pub fn monomorphize<'m>(mir: &'m MirProgram, program: &Program) -> Result<MonoPr
     }
 
     // Roots: every zero-parameter function. Their bodies pull in the rest.
+    let mut main_skip = None;
     for f in &mir.functions {
         if f.body.params.is_empty() {
             if let Err(e) = mono.instantiate_fn(&f.symbol, Vec::new()) {
                 // Best-effort (see above), but the reason a root was skipped is
                 // the first thing needed when a checked program is rejected as
-                // "outside the typed subset" -- surface it in the debug trace.
+                // "outside the typed subset" -- surface it in the debug trace,
+                // and keep `main`'s reason for the driver's error message.
                 tracing::debug!(root = %f.symbol, error = %e, "skipping untypeable root");
+                if f.symbol == "main" {
+                    main_skip = Some(e);
+                }
             }
             mono.in_progress.clear();
+            mono.assumed_rets.clear();
         }
     }
 
-    Ok(mono.into_program(init_symbols))
+    let mut program = mono.into_program(init_symbols);
+    program.main_skip = main_skip;
+    Ok(program)
 }
 
 /// Monomorphize a single callable on demand for a concrete argument-type tuple,
@@ -404,6 +417,7 @@ pub fn monomorphize_instance<'m>(
     let mut mono = Monomorphizer::new(mir, program);
     mono.instantiate_fn(base, type_args)?;
     mono.in_progress.clear();
+    mono.assumed_rets.clear();
     Ok(mono.into_program(Vec::new()))
 }
 
@@ -415,7 +429,24 @@ struct Monomorphizer<'m, 'p> {
     /// Module-level global name -> concrete type, populated by typing init bodies.
     global_types: HashMap<String, Type>,
     instances: HashMap<String, MonoFunction<'m>>,
-    in_progress: HashSet<String>,
+    /// Instances currently being typed (the instantiation stack), mapped to
+    /// their provisional return type. The type is `Some` when the callable
+    /// carries an authoritative return annotation (or, for a fallible callable
+    /// with a declared Ok payload, the `Result<ok, string>` guess), in which
+    /// case a call that reaches back into an in-progress instance (mutual
+    /// recursion) can be typed against it; `None` means nothing sound is known
+    /// yet and such a call is rejected with an annotation hint.
+    in_progress: HashMap<String, Option<Type>>,
+    /// Return types mutual recursion actually assumed, checked against the
+    /// final inferred type when the assumed-about frame completes. This is what
+    /// makes the fallible `Result<ok, string>` guess sound: a body whose error
+    /// payload turns out different fails its frame instead of miscompiling.
+    assumed_rets: HashMap<String, Type>,
+    /// Completed instances in insertion order. Mutual recursion stores a callee
+    /// before its caller, so when a frame fails, every instance stored during
+    /// that frame is rolled back here -- otherwise a survivor could keep a call
+    /// to a symbol that never materializes.
+    instance_log: Vec<String>,
     /// The program's parameter-row table, derived on first `RecordView` (the
     /// same deterministic analysis the checker ran, so the view a call site was
     /// approved for is the view built here). `None` until then: programs
@@ -449,7 +480,9 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             by_closure: mir.closures.iter().map(|c| (c.id, c)).collect(),
             global_types: HashMap::new(),
             instances: HashMap::new(),
-            in_progress: HashSet::new(),
+            in_progress: HashMap::new(),
+            assumed_rets: HashMap::new(),
+            instance_log: Vec::new(),
             rows: None,
         }
     }
@@ -484,6 +517,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             functions,
             globals,
             init_symbols,
+            main_skip: None,
             index,
             global_index,
         }
@@ -527,8 +561,53 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
     /// methods, and closures. `capture_seed` pre-types a closure's captured
     /// locals (read from its environment); `captures` records them for the back
     /// end.
+    ///
+    /// On failure every instance stored during this frame is rolled back:
+    /// mutual recursion types a callee against this frame's provisional return
+    /// and stores it first, so letting it survive a failed frame would leave an
+    /// instance calling a symbol that never materializes.
     #[allow(clippy::too_many_arguments)]
     fn type_and_store(
+        &mut self,
+        sym: String,
+        body: &'m MirBody,
+        module: &[String],
+        type_args: Vec<Type>,
+        ret_ann: Option<Type>,
+        declared_ok: Option<Type>,
+        seed_ret: Option<Type>,
+        capture_seed: &[(LocalId, Type)],
+        captures: Vec<LocalId>,
+        is_closure: bool,
+        fallible: bool,
+    ) -> Result<String, String> {
+        let watermark = self.instance_log.len();
+        let cleanup_sym = sym.clone();
+        let res = self.type_and_store_inner(
+            sym,
+            body,
+            module,
+            type_args,
+            ret_ann,
+            declared_ok,
+            seed_ret,
+            capture_seed,
+            captures,
+            is_closure,
+            fallible,
+        );
+        if res.is_err() {
+            for stored in self.instance_log.drain(watermark..) {
+                self.instances.remove(&stored);
+            }
+            self.in_progress.remove(&cleanup_sym);
+            self.assumed_rets.remove(&cleanup_sym);
+        }
+        res
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn type_and_store_inner(
         &mut self,
         sym: String,
         body: &'m MirBody,
@@ -552,7 +631,21 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                 type_args.len()
             ));
         }
-        self.in_progress.insert(sym.clone());
+        // The provisional return type mutual recursion may type against: the
+        // authoritative annotation when there is one. A fallible callable's
+        // annotation (`T!`) leaves the error payload open, so it is guessed as
+        // `string` (the payload `error(...)` produces); the guess is validated
+        // against the final inferred type when this frame completes.
+        let provisional = ret_ann.clone().or_else(|| {
+            if fallible {
+                declared_ok
+                    .clone()
+                    .map(|ok| result_type(ok, Type::Str))
+            } else {
+                None
+            }
+        });
+        self.in_progress.insert(sym.clone(), provisional);
 
         let mut local_types: Vec<Option<Type>> = vec![None; body.locals.len()];
         for (i, p) in body.params.iter().enumerate() {
@@ -563,10 +656,12 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         }
         // A `let x: T = ...` binding fixed its local's type during lowering; seed it
         // so monomorphization preserves an annotation the initializer alone cannot
-        // express (e.g. `let x: int32? = null`).
+        // express (e.g. `let x: int32? = null`). A nominal annotation (an
+        // uninitialized `let x: Point`) is a bare reference; resolve its field
+        // substitution from the declaration so the seed is self-describing.
         for (i, decl) in body.locals.iter().enumerate() {
             if let Some(t) = decl.ty.as_known() {
-                local_types[i] = Some(t.clone());
+                local_types[i] = Some(resolve_nominal(self.program, t));
             }
         }
         let mut ret = ret_ann;
@@ -705,7 +800,21 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         }
         self.validate(body, &sym, &local_types)?;
 
+        // Validate what mutual recursion assumed about this instance while it
+        // was in progress: a mismatch (e.g. a fallible body whose error payload
+        // is not the guessed `string`) must fail the frame -- the consumer was
+        // already typed against the assumption.
+        if let Some(assumed) = self.assumed_rets.remove(&sym)
+            && assumed != ret
+        {
+            return Err(format!(
+                "mutual recursion typed `{sym}` as returning `{}`, but its body returns `{}`",
+                assumed.display(),
+                ret.display()
+            ));
+        }
         self.in_progress.remove(&sym);
+        self.instance_log.push(sym.clone());
         self.instances.insert(
             sym.clone(),
             MonoFunction {
@@ -1407,10 +1516,20 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         if target == cur_sym {
             return Ok(cur_ret.clone());
         }
-        if self.in_progress.contains(&target) {
-            return Err(format!(
-                "mutual recursion (`{cur_sym}` <-> `{target}`) is unsupported on the typed backend"
-            ));
+        // The target is an ancestor on the instantiation stack (mutual
+        // recursion). With an authoritative return annotation the instance type
+        // is already fixed, so this call types against it and the ancestor frame
+        // completes the instance itself; without one nothing sound is known.
+        if let Some(provisional) = self.in_progress.get(&target) {
+            return match provisional.clone() {
+                Some(t) => {
+                    self.assumed_rets.insert(target, t.clone());
+                    Ok(Some(t))
+                }
+                None => Err(format!(
+                    "mutual recursion (`{cur_sym}` <-> `{target}`) needs an explicit return type annotation on `{target}`"
+                )),
+            };
         }
         let declared_ok = ret_ann.as_ref().and_then(result_concrete_ok);
         let sym = self.type_and_store(
@@ -1442,10 +1561,17 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         if target == cur_sym {
             return Ok(cur_ret.clone());
         }
-        if self.in_progress.contains(&target) {
-            return Err(format!(
-                "mutual recursion (`{cur_sym}` <-> `{target}`) is unsupported on the typed backend"
-            ));
+        // Mutual recursion; see resolve_callable for the provisional contract.
+        if let Some(provisional) = self.in_progress.get(&target) {
+            return match provisional.clone() {
+                Some(t) => {
+                    self.assumed_rets.insert(target, t.clone());
+                    Ok(Some(t))
+                }
+                None => Err(format!(
+                    "mutual recursion (`{cur_sym}` <-> `{target}`) needs an explicit return type annotation on `{target}`"
+                )),
+            };
         }
         let sym = self.instantiate_fn(base, arg_types)?;
         Ok(self.instances.get(&sym).map(|i| i.ret.clone()))
@@ -1994,7 +2120,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         if let Some(inst) = self.instances.get(&sym) {
             return Ok(inst.ret.clone());
         }
-        if self.in_progress.contains(&sym) {
+        if self.in_progress.contains_key(&sym) {
             return Err("recursive closures are unsupported on the typed backend".into());
         }
         let capture_seed: Vec<(LocalId, Type)> = clo

@@ -396,6 +396,8 @@ fn refs_type(ty: &TypeExpr, out: &mut HashSet<String>) {
                 refs_type(fty, out);
             }
         }
+        // `typeof(e)` names no type by identifier; its type comes from `e`.
+        TypeExpr::TypeOf(..) => {}
     }
 }
 
@@ -411,7 +413,9 @@ fn refs_stmt(s: &Stmt, out: &mut HashSet<String>) {
             if let Some(ty) = ty {
                 refs_type(ty, out);
             }
-            refs_expr(value, out);
+            if let Some(value) = value {
+                refs_expr(value, out);
+            }
         }
         Stmt::Assign { target, value, .. } => {
             refs_expr(target, out);

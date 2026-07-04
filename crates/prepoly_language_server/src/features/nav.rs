@@ -127,6 +127,7 @@ fn let_value_span(block: &Block, off: usize, name: &str) -> Option<Span> {
 fn let_value_in_stmt(s: &Stmt, off: usize, name: &str) -> Option<Span> {
     match s {
         Stmt::Let { pat, value, .. } => {
+            let value = value.as_ref()?;
             if let Pattern::Binding(n, bspan) = pat
                 && n == name
                 && contains(*bspan, off)
@@ -389,7 +390,10 @@ fn walk_block(b: &Block, visit: &mut impl FnMut(&Expr)) {
 
 fn walk_stmt(s: &Stmt, visit: &mut impl FnMut(&Expr)) {
     match s {
-        Stmt::Let { value, .. } => walk_expr(value, visit),
+        Stmt::Let {
+            value: Some(value), ..
+        } => walk_expr(value, visit),
+        Stmt::Let { value: None, .. } => {}
         Stmt::Assign { target, value, .. } => {
             walk_expr(target, visit);
             walk_expr(value, visit);

@@ -1,0 +1,4 @@
+ok: 1 2
+err: missing field 'y'
+err: cannot decode this value as `Point`
+err: cannot decode this value as `int64`

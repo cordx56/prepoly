@@ -118,6 +118,9 @@ impl ConstChecker<'_> {
                 }
             };
             for m in methods {
+                if prepoly_hir::keyed_return(m.decl.ret.as_ref()) {
+                    continue;
+                }
                 let Some(body) = m.decl.body.as_ref() else {
                     continue;
                 };
@@ -150,7 +153,7 @@ impl ConstChecker<'_> {
                 let Stmt::Let {
                     pat: Pattern::Binding(name, _),
                     ty,
-                    value,
+                    value: Some(value),
                     is_const,
                     ..
                 } = stmt
@@ -187,6 +190,16 @@ impl ConstChecker<'_> {
                 is_const,
                 ..
             } => {
+                let Some(value) = value else {
+                    // An uninitialized `let` is never a const and aliases
+                    // nothing; it just shadows any outer const of that name.
+                    if let Pattern::Binding(name, _) = pat
+                        && let Some(top) = scopes.last_mut()
+                    {
+                        top.insert(name.clone(), Binding::Mutable);
+                    }
+                    return;
+                };
                 self.check_expr(value, scopes);
                 if let Pattern::Binding(name, _) = pat {
                     let alias = self.const_alias_type(value, scopes);
@@ -716,7 +729,7 @@ fn rebinds(block: &Block, name: &str) -> bool {
             Stmt::Expr(e) | Stmt::Return(Some(e), _) | Stmt::Assign { value: e, .. } => {
                 in_expr(e, name)
             }
-            Stmt::Let { value, .. } => in_expr(value, name),
+            Stmt::Let { value, .. } => value.as_ref().is_some_and(|v| in_expr(v, name)),
             _ => false,
         }
     }

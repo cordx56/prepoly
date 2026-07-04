@@ -54,6 +54,18 @@ pub(crate) struct ProgramCtx<'p> {
     /// Empty when lowering without a checked program, so no view is ever
     /// emitted then (tests, deferred re-lowering keep full values).
     view_args: &'p std::collections::HashSet<Span>,
+    /// Field lists of `for f in fields(x)` loops, keyed by the loop statement's
+    /// span: the checker resolved the record type and checked one expanded copy
+    /// per field; lowering unrolls the same copies (`prepoly_hir::expand`).
+    /// Empty when lowering without a checked program -- a fields-loop reached
+    /// through deferred re-lowering is therefore unsupported.
+    fields_loops: &'p HashMap<Span, Vec<String>>,
+    /// Resolved type names of `typeof(x)` calls, keyed by call span; each
+    /// such call lowers to this string constant.
+    type_names: &'p HashMap<Span, String>,
+    /// Resolved binding types of `typeof`-bearing local annotations, keyed by
+    /// the annotation span; a `let x: typeof(v)` slot is seeded from this.
+    typeof_types: &'p HashMap<Span, Type>,
     /// Names each module's init binds as module-level globals (top-level
     /// `let`s), used to key global storage per defining module.
     module_globals: HashMap<Vec<String>, std::collections::HashSet<String>>,
@@ -70,6 +82,9 @@ impl<'p> ProgramCtx<'p> {
         program: &'p Program,
         expr_types: &'p HashMap<Span, Type>,
         view_args: &'p std::collections::HashSet<Span>,
+        fields_loops: &'p HashMap<Span, Vec<String>>,
+        type_names: &'p HashMap<Span, String>,
+        typeof_types: &'p HashMap<Span, Type>,
     ) -> Self {
         let mut variant_names = std::collections::HashSet::new();
         for info in program.types.values() {
@@ -107,6 +122,9 @@ impl<'p> ProgramCtx<'p> {
             variant_names,
             expr_types,
             view_args,
+            fields_loops,
+            type_names,
+            typeof_types,
             module_globals,
             prelude_globals,
             closures: RefCell::new(Vec::new()),
@@ -174,6 +192,20 @@ impl<'p> ProgramCtx<'p> {
     /// The checker-resolved type recorded for the expression at `span`, if any.
     fn expr_type(&self, span: Span) -> Option<&Type> {
         self.expr_types.get(&span)
+    }
+
+    /// The type named `sym` (a storage symbol, falling back to a bare source
+    /// name for types whose symbol is module-qualified), if any.
+    pub(crate) fn type_info(&self, sym: &str) -> Option<&prepoly_hir::TypeInfo> {
+        self.program
+            .types
+            .get(sym)
+            .or_else(|| self.program.types.values().find(|i| i.name == sym))
+    }
+
+    /// The type with nominal id `id`, if any.
+    pub(crate) fn type_info_by_id(&self, id: i32) -> Option<&prepoly_hir::TypeInfo> {
+        self.program.types.values().find(|i| i.id == id)
     }
 
     /// Allocate the next globally-unique closure id.
@@ -563,7 +595,17 @@ pub fn lower_body(
 ) -> (MirBody, Vec<MirClosure>) {
     let no_types = HashMap::new();
     let no_views = std::collections::HashSet::new();
-    let ctx = ProgramCtx::new(program, &no_types, &no_views);
+    let no_fields_loops = HashMap::new();
+    let no_type_names = HashMap::new();
+    let no_typeof_types = HashMap::new();
+    let ctx = ProgramCtx::new(
+        program,
+        &no_types,
+        &no_views,
+        &no_fields_loops,
+        &no_type_names,
+        &no_typeof_types,
+    );
     let body = lower_one(
         &ctx,
         module.to_vec(),
@@ -593,7 +635,14 @@ fn lower_one(
 /// closures they spawn. Item enumeration mirrors `codegen::gen_functions` /
 /// `gen_inits`, including the `Name@module` storage-symbol keys.
 pub fn lower_program(program: &Program) -> MirProgram {
-    lower_program_with_types(program, &HashMap::new(), &std::collections::HashSet::new())
+    lower_program_with_types(
+        program,
+        &HashMap::new(),
+        &std::collections::HashSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+    )
 }
 
 /// Lower a whole program with the checker's outputs available: resolved
@@ -607,8 +656,11 @@ pub fn lower_program_with_types(
     program: &Program,
     expr_types: &HashMap<Span, Type>,
     view_args: &std::collections::HashSet<Span>,
+    fields_loops: &HashMap<Span, Vec<String>>,
+    type_names: &HashMap<Span, String>,
+    typeof_types: &HashMap<Span, Type>,
 ) -> MirProgram {
-    let ctx = ProgramCtx::new(program, expr_types, view_args);
+    let ctx = ProgramCtx::new(program, expr_types, view_args, fields_loops, type_names, typeof_types);
     let mut out = MirProgram::default();
 
     let mut fn_names: Vec<&String> = program.functions.keys().collect();
@@ -642,6 +694,11 @@ pub fn lower_program_with_types(
                 ms.sort();
                 for m in ms {
                     let method = &methods[m];
+                    // A reflective `-> infer!` template is never lowered (generic
+                    // over the key); the driver injected concrete specializations.
+                    if prepoly_hir::keyed_return(method.decl.ret.as_ref()) {
+                        continue;
+                    }
                     if let Some(body) = &method.decl.body {
                         out.methods.push(lower_method(
                             &ctx,
@@ -661,6 +718,9 @@ pub fn lower_program_with_types(
                     ms.sort();
                     for m in ms {
                         let method = &v.methods[m];
+                        if prepoly_hir::keyed_return(method.decl.ret.as_ref()) {
+                            continue;
+                        }
                         if let Some(body) = &method.decl.body {
                             out.methods.push(lower_method(
                                 &ctx,
@@ -754,6 +814,9 @@ fn lower_init(
         }
         match s {
             Stmt::Let { pat, ty, value, .. } => {
+                // A module-level `let` needs an initializer (the checker
+                // rejects the uninitialized form at top level); skip defensively.
+                let Some(value) = value else { continue };
                 let v = fl.lower_expr(value);
                 // A resolvable annotation fixes the global's type exactly as it
                 // fixes a function-local slot: routing the value through a typed

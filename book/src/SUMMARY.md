@@ -11,5 +11,6 @@
 
 - [Hello, world!](hello.md)
 - [Type system](types.md)
+- [Compile-time reflection](reflection.md)
 - [Modules](modules.md)
 - [LLM agents](llm.md)

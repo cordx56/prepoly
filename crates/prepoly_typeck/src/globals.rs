@@ -63,7 +63,10 @@ fn collect_stmt_refs(
     out: &mut Vec<(String, Span)>,
 ) {
     match stmt {
-        Stmt::Let { value, .. } => collect_expr_refs(value, globals, bound, out),
+        Stmt::Let {
+            value: Some(value), ..
+        } => collect_expr_refs(value, globals, bound, out),
+        Stmt::Let { value: None, .. } => {}
         Stmt::Assign { target, value, .. } => {
             collect_expr_refs(target, globals, bound, out);
             collect_expr_refs(value, globals, bound, out);
@@ -97,7 +100,9 @@ fn collect_block_refs(
     let mut local = bound.clone();
     for stmt in &block.stmts {
         if let Stmt::Let { pat, value, .. } = stmt {
-            collect_expr_refs(value, globals, &local, out);
+            if let Some(value) = value {
+                collect_expr_refs(value, globals, &local, out);
+            }
             for name in pattern_names(pat) {
                 local.insert(name);
             }

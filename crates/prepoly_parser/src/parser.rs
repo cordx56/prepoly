@@ -506,6 +506,23 @@ impl Parser {
         } else {
             None
         };
+        // An annotated `let` may omit the initializer; the checker then
+        // enforces definite assignment before any read. A `const` cannot (it is
+        // never assignable afterwards), and an unannotated `let` has no type to
+        // declare the binding with.
+        if !is_const
+            && !matches!(self.peek(), TokenKind::Eq)
+            && let Some(ty) = ty
+        {
+            let hi = ty.span();
+            return Ok(Stmt::Let {
+                span: lo.merge(hi),
+                pat,
+                ty: Some(ty),
+                value: None,
+                is_const,
+            });
+        }
         self.expect(TokenKind::Eq, "'='")?;
         self.eat_newlines();
         let value = self.parse_expr()?;
@@ -513,7 +530,7 @@ impl Parser {
             span: lo.merge(value.span()),
             pat,
             ty,
-            value,
+            value: Some(value),
             is_const,
         })
     }
@@ -1229,6 +1246,14 @@ impl Parser {
                 } else {
                     TypeExpr::Ref(inner, span.merge(hi))
                 });
+            }
+            // `typeof(e)` -- the static type of the value expression `e`. Not a
+            // keyword; read as an identifier applied to a parenthesized value.
+            if name == "typeof" && self.at_p(TokenKind::LParen) {
+                self.open(TokenKind::LParen, "'('")?;
+                let e = self.parse_expr()?;
+                let hi = self.close(TokenKind::RParen, "')'")?;
+                return Ok(TypeExpr::TypeOf(Box::new(e), span.merge(hi)));
             }
             // `anonymous { field: T, ... }` -- an inline structural record type.
             if name == "anonymous" && self.at_p(TokenKind::LBrace) {

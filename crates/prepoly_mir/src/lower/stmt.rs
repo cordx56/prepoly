@@ -59,6 +59,10 @@ pub(crate) fn resolve_simple_type(te: &TypeExpr) -> Option<Type> {
         // Mutability and reference-ness are front-end concepts; the back end sees
         // the plain `T` (a reference is a pointer, the same as the value handle).
         TypeExpr::Mut(inner, _) | TypeExpr::Ref(inner, _) => resolve_simple_type(inner),
+        // `typeof(v)` is not a "simple" type here (it needs the checker's
+        // inference); the binding stays inferred and monomorphization recovers
+        // its type from the value / use, or from the recorded uninit-let type.
+        TypeExpr::TypeOf(..) => None,
     }
 }
 
@@ -121,15 +125,40 @@ impl FnLower<'_, '_> {
     /// Lower one statement, possibly emitting control flow.
     pub(crate) fn lower_stmt(&mut self, s: &Stmt) {
         match s {
-            Stmt::Let { pat, ty, value, .. } => self.lower_let(pat, ty.as_ref(), value),
+            Stmt::Let { pat, ty, value, .. } => match value {
+                Some(value) => self.lower_let(pat, ty.as_ref(), value),
+                None => self.lower_let_uninit(pat, ty.as_ref()),
+            },
             Stmt::Assign {
                 target, op, value, ..
             } => self.lower_assign(target, *op, value),
             Stmt::Expr(e) => self.lower_expr_stmt(e),
             Stmt::While { cond, body, .. } => self.lower_while(cond, body),
             Stmt::For {
-                var, iter, body, ..
-            } => self.lower_for(var, iter, body),
+                var,
+                iter,
+                body,
+                span,
+            } => {
+                // A fields-loop the checker approved unrolls into one copy per
+                // field; the copies are the same expansion the checker typed.
+                if let Some(fields) = self.ctx.fields_loops.get(span) {
+                    let fields = fields.clone();
+                    for (i, field) in fields.iter().enumerate() {
+                        let expanded = prepoly_hir::expand_fields_body(body, var, field, i);
+                        self.push_scope();
+                        for stmt in &expanded.stmts {
+                            if self.b.terminated() {
+                                break;
+                            }
+                            self.lower_stmt(stmt);
+                        }
+                        self.pop_scope();
+                    }
+                    return;
+                }
+                self.lower_for(var, iter, body)
+            }
             Stmt::Return(opt, _) => {
                 let v = match opt {
                     Some(e) => self.lower_expr(e),
@@ -170,6 +199,16 @@ impl FnLower<'_, '_> {
         }
     }
 
+    /// The concrete slot type for a `let` annotation: the checker-resolved type
+    /// for a `typeof`-bearing annotation (which the scope-free
+    /// [`resolve_simple_type`] cannot handle), else the simple resolution.
+    fn slot_type(&self, ty: &TypeExpr) -> Option<Type> {
+        if let Some(t) = self.ctx.typeof_types.get(&ty.span()) {
+            return Some(t.clone());
+        }
+        resolve_simple_type(ty)
+    }
+
     fn lower_let(&mut self, pat: &Pattern, ty: Option<&TypeExpr>, value: &Expr) {
         match pat {
             // The common case: a single name binds the value directly into its
@@ -184,7 +223,7 @@ impl FnLower<'_, '_> {
                 if self.is_cell(name) {
                     self.bind_value(name, v);
                 } else {
-                    match ty.and_then(resolve_simple_type) {
+                    match ty.and_then(|t| self.slot_type(t)) {
                         Some(t) => {
                             let local = self.b.fresh_local_typed(Some(name.clone()), t);
                             self.b.push(MirStmt::Assign(local, Rvalue::Use(v)));
@@ -206,6 +245,111 @@ impl FnLower<'_, '_> {
                 let subj = self.b.make_local(v);
                 self.lower_pattern_bind(pat, subj);
             }
+        }
+    }
+
+    /// Lower `let x: T` (no initializer). The slot is declared with its
+    /// annotated type; a record (or other aggregate) additionally gets a
+    /// default-valued skeleton so field-by-field initialization has a target
+    /// allocation. The checker's definite-assignment pass rejects any read
+    /// before full initialization, so a default value is never observed.
+    fn lower_let_uninit(&mut self, pat: &Pattern, ty: Option<&TypeExpr>) {
+        let Pattern::Binding(name, _) = pat else {
+            // The checker rejects uninitialized wildcard/destructuring lets.
+            return;
+        };
+        // Nominal annotations (records, sums) are not "simple" types; resolve
+        // them against the program's types for the slot type and, for records,
+        // the skeleton's field list.
+        if let Some(TypeExpr::Named(type_name, _)) = ty {
+            let sym = self.resolve_self_name(type_name);
+            if let Some(info) = self.ctx.type_info(&sym) {
+                let slot_ty = info.type_ref();
+                let local = self
+                    .b
+                    .fresh_local_typed(Some(name.clone()), slot_ty.clone());
+                if let Some(op) = self.default_operand(&slot_ty, &mut Vec::new()) {
+                    self.b.push(MirStmt::Assign(local, Rvalue::Use(op)));
+                }
+                self.bind(name, local);
+                return;
+            }
+        }
+        match ty.and_then(resolve_simple_type) {
+            Some(t) => {
+                let local = self.b.fresh_local_typed(Some(name.clone()), t.clone());
+                if let Some(op) = self.default_operand(&t, &mut Vec::new()) {
+                    self.b.push(MirStmt::Assign(local, Rvalue::Use(op)));
+                }
+                self.bind(name, local);
+            }
+            None => {
+                // No resolvable annotation (the checker already required one);
+                // bind an untyped slot so later whole assignments type it.
+                let local = self.b.fresh_local(Some(name.clone()));
+                self.bind(name, local);
+            }
+        }
+    }
+
+    /// A default-valued operand for `t`, or `None` when the type has no
+    /// constructible default (sums, function values, records containing one).
+    /// Emits the statements that build aggregate defaults. `visiting` guards
+    /// against infinitely recursive record skeletons (`type A = { b: B }`,
+    /// `type B = { a: A }`), which have no constructible value at all.
+    fn default_operand(&mut self, t: &Type, visiting: &mut Vec<i32>) -> Option<Operand> {
+        match t {
+            Type::Int(_) => Some(Operand::Const(Literal::Int(0))),
+            Type::Float(_) => Some(Operand::Const(Literal::Float(0.0))),
+            Type::Bool => Some(Operand::Const(Literal::Bool(false))),
+            Type::Str => Some(Operand::Const(Literal::Str(String::new()))),
+            Type::Nullable(_) => Some(Operand::Const(Literal::Null)),
+            // Aggregate defaults seed their temp local with the full type: an
+            // empty `[]` (or a zero literal element) carries no element type of
+            // its own, and monomorphization must not re-derive a narrower one.
+            Type::Slice(_) => Some(self.b.emit_known(Rvalue::Array(Vec::new()), t.clone())),
+            Type::Array(e, n) => {
+                let elems = (0..*n)
+                    .map(|_| self.default_operand(e, visiting))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(self.b.emit_known(Rvalue::Array(elems), t.clone()))
+            }
+            Type::Tuple(ts) => {
+                let elems = ts
+                    .iter()
+                    .map(|t| self.default_operand(t, visiting))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(self.b.emit_known(Rvalue::Array(elems), t.clone()))
+            }
+            Type::Record(n) => {
+                if visiting.contains(&n.id) {
+                    return None;
+                }
+                visiting.push(n.id);
+                let info = self.ctx.type_info_by_id(n.id)?;
+                let field_infos = match &info.kind {
+                    prepoly_hir::TypeKind::Record { fields, .. } => fields.clone(),
+                    _ => return None,
+                };
+                let ty_sym = info.symbol.clone();
+                let ty_name = info.name.clone();
+                let mut fields = Vec::with_capacity(field_infos.len());
+                // The declared field types also seed the result as a known
+                // substitution, so a literal default (`Int(0)`) is laid out at
+                // the field's width instead of the literal's default kind.
+                let mut subst = prepoly_hir::Substitution::empty();
+                for f in &field_infos {
+                    let ft = f.resolved_ty.as_ref()?;
+                    fields.push((f.name.clone(), self.default_operand(ft, visiting)?));
+                    subst.insert(f.name.clone(), ft.clone());
+                }
+                visiting.pop();
+                let known = Type::Record(prepoly_hir::NominalType::with_substitution(
+                    n.id, ty_name, subst,
+                ));
+                Some(self.b.emit_known(Rvalue::Record { ty: ty_sym, fields }, known))
+            }
+            _ => None,
         }
     }
 
@@ -483,7 +627,9 @@ fn stmt_reassigns_var(stmt: &Stmt, var: &str) -> bool {
         // A nested `for` that rebinds the same name shadows it, so stop there.
         Stmt::For { var: v, body, .. } => v != var && reassigns_var(body, var),
         Stmt::Expr(e) | Stmt::Return(Some(e), _) => expr_reassigns_var(e, var),
-        Stmt::Let { value, .. } => expr_reassigns_var(value, var),
+        Stmt::Let { value, .. } => value
+            .as_ref()
+            .is_some_and(|v| expr_reassigns_var(v, var)),
         _ => false,
     }
 }

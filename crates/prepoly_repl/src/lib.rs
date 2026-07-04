@@ -29,9 +29,19 @@ pub fn run(
     program: &Program,
     expr_types: &std::collections::HashMap<prepoly_hir::Span, prepoly_hir::Type>,
     view_args: &std::collections::HashSet<prepoly_hir::Span>,
+    fields_loops: &std::collections::HashMap<prepoly_hir::Span, Vec<String>>,
+    type_names: &std::collections::HashMap<prepoly_hir::Span, String>,
+    typeof_types: &std::collections::HashMap<prepoly_hir::Span, prepoly_hir::Type>,
     out: &mut dyn Write,
 ) -> Result<(), String> {
-    let mir = prepoly_mir::lower_program_with_types(program, expr_types, view_args);
+    let mir = prepoly_mir::lower_program_with_types(
+        program,
+        expr_types,
+        view_args,
+        fields_loops,
+        type_names,
+        typeof_types,
+    );
     let mono = prepoly_engine::monomorphize(&mir, program)
         .map_err(|e| format!("typed lowering failed: {e}"))?;
     if program.functions.contains_key("main") && mono.lookup("main").is_none() {

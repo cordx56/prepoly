@@ -67,6 +67,15 @@ impl<'a, 'p> FnLower<'a, 'p> {
                 self.b.emit(Rvalue::Un(*op, v))
             }
             Expr::Binary(op, a, b, _) => self.lower_binary(*op, a, b),
+            // `typeof(x)` in value position folds to the string constant the
+            // checker resolved (its type-name).
+            Expr::Call(callee, _, span)
+                if matches!(&**callee, Expr::Ident(n, _) if n == "typeof")
+                    && self.ctx.type_names.contains_key(span) =>
+            {
+                let name = self.ctx.type_names[span].clone();
+                Operand::Const(Literal::Str(name))
+            }
             Expr::Call(callee, args, span) => {
                 let rv = self.lower_call(callee, args);
                 // A call whose checker-resolved result is a constructed aggregate
@@ -609,6 +618,32 @@ impl<'a, 'p> FnLower<'a, 'p> {
     pub(crate) fn lower_call(&mut self, callee: &Expr, args: &[Arg]) -> Rvalue {
         // `recv.method(args)` or `Type.method(args)`.
         if let Expr::Field(base, method, _) = callee {
+            // `typeof(v).method(args)`: a static call on v's type, whose name the
+            // checker resolved into the type-name channel keyed by the inner
+            // `typeof(v)` span. Route it exactly like a written `Type.method`.
+            if let Expr::Call(c, _, tspan) = &**base
+                && matches!(&**c, Expr::Ident(n, _) if n == "typeof")
+                && let Some(tname) = self.ctx.type_names.get(tspan)
+            {
+                let tn = tname.clone();
+                if method == "from" && self.ctx.record_field_names(&self.module, &tn).is_some() {
+                    let source = self
+                        .lower_args(args)
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(Operand::void);
+                    return Rvalue::RecordFrom { ty: tn, source };
+                }
+                let qualifier = self.ctx.static_qualifier(&self.module, &tn);
+                let ops = self.lower_args(args);
+                return Rvalue::Call(
+                    Callee::Static {
+                        ty: qualifier,
+                        method: method.clone(),
+                    },
+                    ops,
+                );
+            }
             if let Expr::Ident(tname, _) = &**base
                 && self.lookup(tname).is_none()
                 && self.ctx.is_type_word(tname)

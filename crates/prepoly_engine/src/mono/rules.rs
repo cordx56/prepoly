@@ -63,6 +63,20 @@ pub(super) fn resolve_nominal(program: &Program, ty: &Type) -> Type {
                 stack.remove(&n.id);
                 Type::Record(NominalType::with_substitution(n.id, n.name.clone(), subst))
             }
+            // An already-substituted record may still carry bare references in
+            // its entries (a declared field's nominal type, e.g. the seed of an
+            // uninitialized `let`); resolve them in place.
+            Type::Record(n) if !n.is_name("File") => {
+                if !stack.insert(n.id) {
+                    return ty.clone();
+                }
+                let mut subst = Substitution::empty();
+                for (k, v) in n.substitution.iter() {
+                    subst.insert(k.to_string(), go(program, v, stack));
+                }
+                stack.remove(&n.id);
+                Type::Record(NominalType::with_substitution(n.id, n.name.clone(), subst))
+            }
             Type::Nullable(inner) => Type::Nullable(Box::new(go(program, inner, stack))),
             Type::Slice(inner) => Type::Slice(Box::new(go(program, inner, stack))),
             Type::Array(inner, k) => Type::Array(Box::new(go(program, inner, stack)), *k),

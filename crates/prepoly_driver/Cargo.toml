@@ -13,6 +13,7 @@ prepoly_parser.workspace = true
 prepoly_hir.workspace = true
 prepoly_resolve.workspace = true
 prepoly_typeck.workspace = true
+prepoly_typesys.workspace = true
 prepoly_repl.workspace = true
 
 clap = { version = "4", features = ["derive"] }

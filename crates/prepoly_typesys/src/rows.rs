@@ -490,8 +490,10 @@ impl ParamScan<'_> {
     fn walk_stmt(&mut self, stmt: &Stmt, active: bool) -> bool {
         match stmt {
             Stmt::Let { pat, ty, value, .. } => {
-                let forced = ty.as_ref().and_then(forced_primitive_annotation);
-                self.walk_value(value, active, forced.as_ref());
+                if let Some(value) = value {
+                    let forced = ty.as_ref().and_then(forced_primitive_annotation);
+                    self.walk_value(value, active, forced.as_ref());
+                }
                 // A binder of the same name shadows the parameter from here on.
                 if pattern_binds(pat, self.param) {
                     return false;
@@ -934,7 +936,10 @@ fn visit(e: &Expr, f: &mut impl FnMut(&Expr)) {
 fn visit_block(b: &Block, f: &mut impl FnMut(&Expr)) {
     for s in &b.stmts {
         match s {
-            Stmt::Let { value, .. } => visit(value, f),
+            Stmt::Let {
+                value: Some(value), ..
+            } => visit(value, f),
+            Stmt::Let { value: None, .. } => {}
             Stmt::Assign { target, value, .. } => {
                 visit(target, f);
                 visit(value, f);

@@ -124,15 +124,17 @@ fn scan_block(b: &Block, aliases: &mut HashSet<String>, found: &mut bool) {
 fn scan_stmt(s: &Stmt, aliases: &mut HashSet<String>, found: &mut bool) {
     match s {
         Stmt::Let { pat, value, .. } => {
-            scan_expr(value, aliases, found);
-            // A binding whose initializer mentions a current alias may be another
-            // handle to (or a container of) the same object; track it for the
-            // rest of the scan (see `mutates` for why over-approximating here is
-            // safe).
-            if let Pattern::Binding(name, _) = pat
-                && expr_mentions_any(value, aliases)
-            {
-                aliases.insert(name.clone());
+            if let Some(value) = value {
+                scan_expr(value, aliases, found);
+                // A binding whose initializer mentions a current alias may be
+                // another handle to (or a container of) the same object; track it
+                // for the rest of the scan (see `mutates` for why
+                // over-approximating here is safe).
+                if let Pattern::Binding(name, _) = pat
+                    && expr_mentions_any(value, aliases)
+                {
+                    aliases.insert(name.clone());
+                }
             }
         }
         Stmt::Assign { target, value, .. } => {
@@ -390,7 +392,7 @@ fn collect_mention_aliases(stmts: &[Stmt], handles: &mut HashSet<String>) {
         let binding: Option<(&String, &Expr)> = match stmt {
             Stmt::Let {
                 pat: Pattern::Binding(name, _),
-                value,
+                value: Some(value),
                 ..
             } => Some((name, value)),
             Stmt::Assign {
@@ -436,9 +438,9 @@ fn collect_local_bindings(stmts: &[Stmt], out: &mut HashSet<String>) {
 fn nested_block_stmts(stmt: &Stmt, f: &mut dyn FnMut(&[Stmt])) {
     match stmt {
         Stmt::While { body, .. } | Stmt::For { body, .. } => f(&body.stmts),
-        Stmt::Expr(e) | Stmt::Let { value: e, .. } | Stmt::Return(Some(e), _) => {
-            nested_block_stmts_expr(e, f)
-        }
+        Stmt::Expr(e)
+        | Stmt::Let { value: Some(e), .. }
+        | Stmt::Return(Some(e), _) => nested_block_stmts_expr(e, f),
         _ => {}
     }
 }
@@ -469,9 +471,9 @@ fn nested_block_stmts_expr(e: &Expr, f: &mut dyn FnMut(&[Stmt])) {
 fn nested_block_stmts_mut(stmt: &mut Stmt, f: &mut dyn FnMut(&mut Vec<Stmt>)) {
     match stmt {
         Stmt::While { body, .. } | Stmt::For { body, .. } => f(&mut body.stmts),
-        Stmt::Expr(e) | Stmt::Let { value: e, .. } | Stmt::Return(Some(e), _) => {
-            nested_block_stmts_expr_mut(e, f)
-        }
+        Stmt::Expr(e)
+        | Stmt::Let { value: Some(e), .. }
+        | Stmt::Return(Some(e), _) => nested_block_stmts_expr_mut(e, f),
         _ => {}
     }
 }
@@ -534,7 +536,9 @@ enum SpawnArg<'a> {
 fn spawn_arg(stmt: &Stmt) -> Option<SpawnArg<'_>> {
     let expr = match stmt {
         Stmt::Expr(e) => e,
-        Stmt::Let { value, .. } => value,
+        Stmt::Let {
+            value: Some(value), ..
+        } => value,
         _ => return None,
     };
     let Expr::Call(callee, args, span) = expr else {
@@ -556,7 +560,9 @@ fn spawn_arg(stmt: &Stmt) -> Option<SpawnArg<'_>> {
 fn spawn_closure_body(stmt: &Stmt) -> Option<Block> {
     let expr = match stmt {
         Stmt::Expr(e) => e,
-        Stmt::Let { value, .. } => value,
+        Stmt::Let {
+            value: Some(value), ..
+        } => value,
         _ => return None,
     };
     let Expr::Call(callee, args, _) = expr else {
@@ -573,7 +579,7 @@ fn spawn_closure_body(stmt: &Stmt) -> Option<Block> {
 
 fn closure_bound_in(stmt: &Stmt) -> HashSet<String> {
     let expr = match stmt {
-        Stmt::Expr(e) | Stmt::Let { value: e, .. } => e,
+        Stmt::Expr(e) | Stmt::Let { value: Some(e), .. } => e,
         _ => return HashSet::new(),
     };
     if let Expr::Call(_, args, _) = expr
@@ -618,7 +624,7 @@ fn closure_bindings_of(stmts: &[Stmt], name: &str, out: &mut Vec<(Vec<Param>, Bl
         match stmt {
             Stmt::Let {
                 pat: Pattern::Binding(n, _),
-                value: Expr::Closure(params, body, _),
+                value: Some(Expr::Closure(params, body, _)),
                 ..
             } if n == name => out.push((params.clone(), closure_block(body))),
             Stmt::Assign {
@@ -749,9 +755,12 @@ fn each_literal_spawn(stmts: &[Stmt], f: &mut impl FnMut(&Stmt)) {
 fn each_call<'a>(block: &'a Block, f: &mut impl FnMut(&'a str, Option<&'a Expr>, &'a [Arg])) {
     fn walk_stmt<'a>(s: &'a Stmt, f: &mut impl FnMut(&'a str, Option<&'a Expr>, &'a [Arg])) {
         match s {
-            Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::Return(Some(value), _) => {
-                walk_expr(value, f)
+            Stmt::Let {
+                value: Some(value), ..
             }
+            | Stmt::Expr(value)
+            | Stmt::Return(Some(value), _) => walk_expr(value, f),
+            Stmt::Let { value: None, .. } => {}
             Stmt::Assign { target, value, .. } => {
                 walk_expr(target, f);
                 walk_expr(value, f);
@@ -920,7 +929,7 @@ fn pre_scan_scope(
         // scope is a spawn body, not a plain closure.
         if let Stmt::Let {
             pat: prepoly_parser::ast::Pattern::Binding(name, _),
-            value: Expr::Closure(..),
+            value: Some(Expr::Closure(..)),
             ..
         } = stmt
             && spawned.contains(name)
@@ -1005,7 +1014,10 @@ fn pre_check_plain_expr(e: &Expr, errors: &mut Vec<SpawnError>) {
 /// blocks, which `nested_block_stmts` covers).
 fn each_stmt_expr(stmt: &Stmt, f: &mut dyn FnMut(&Expr)) {
     match stmt {
-        Stmt::Let { value, .. } => each_expr(value, f),
+        Stmt::Let {
+            value: Some(value), ..
+        } => each_expr(value, f),
+        Stmt::Let { value: None, .. } => {}
         Stmt::Assign { target, value, .. } => {
             each_expr(target, f);
             each_expr(value, f);
@@ -1348,7 +1360,7 @@ fn collect_alias_roots(
         let binding: Option<(&String, &Expr)> = match stmt {
             Stmt::Let {
                 pat: Pattern::Binding(name, _),
-                value,
+                value: Some(value),
                 ..
             } => Some((name, value)),
             Stmt::Assign {
@@ -1486,7 +1498,7 @@ fn transform_spawned_binding(stmt: &mut Stmt, ctx: &ScopeCtx, errors: &mut Vec<S
     let (name, params, body) = match stmt {
         Stmt::Let {
             pat: Pattern::Binding(name, _),
-            value: Expr::Closure(params, body, _),
+            value: Some(Expr::Closure(params, body, _)),
             ..
         } => (name, params, body),
         Stmt::Assign {
@@ -1573,7 +1585,7 @@ fn insert_summary_promotion_after_binding(
 /// into a nested spawn so its captures are promoted and its body guarded.
 fn spawn_closure_body_mut(stmt: &mut Stmt) -> Option<&mut Vec<Stmt>> {
     let expr = match stmt {
-        Stmt::Expr(e) | Stmt::Let { value: e, .. } => e,
+        Stmt::Expr(e) | Stmt::Let { value: Some(e), .. } => e,
         _ => return None,
     };
     let Expr::Call(callee, args, _) = expr else {
@@ -1610,7 +1622,10 @@ fn callee_is_non_forwarding(callee: &Expr) -> bool {
 /// cown safe. A statement that touches no guarded handle is left unchanged.
 fn guard_stmt_accesses(stmt: &mut Stmt, guards: &BTreeMap<String, BTreeSet<String>>) {
     match stmt {
-        Stmt::Let { value, .. } => guard_expr_accesses(value, guards),
+        Stmt::Let {
+            value: Some(value), ..
+        } => guard_expr_accesses(value, guards),
+        Stmt::Let { value: None, .. } => {}
         Stmt::Assign { target, value, .. } => {
             // A whole `c.f = v` (or `c[i] = v`) store is guarded as one unit so
             // both the place and the value evaluate under the lock.
@@ -1833,8 +1848,7 @@ fn place_guard_roots(
 /// The span of a statement, for synthesizing a wrapping `with`.
 fn stmt_span(stmt: &Stmt) -> Span {
     match stmt {
-        Stmt::Let { value, .. } => value.span(),
-        Stmt::Assign { span, .. } => *span,
+        Stmt::Let { span, .. } | Stmt::Assign { span, .. } => *span,
         Stmt::Expr(e) | Stmt::Return(Some(e), _) => e.span(),
         Stmt::While { cond, .. } => cond.span(),
         Stmt::For { iter, .. } => iter.span(),
@@ -1846,7 +1860,7 @@ fn stmt_span(stmt: &Stmt) -> Span {
 /// builtins do not fail, so the span only ever surfaces in internal diagnostics).
 fn spawn_stmt_span(stmt: &Stmt) -> Span {
     match stmt {
-        Stmt::Expr(e) | Stmt::Let { value: e, .. } => e.span(),
+        Stmt::Expr(e) | Stmt::Let { value: Some(e), .. } => e.span(),
         _ => Span::new(0, 0),
     }
 }
@@ -1867,7 +1881,7 @@ fn promote_stmt(builtin: &str, var: &str, span: Span) -> Stmt {
 /// around the whole body.
 fn wrap_spawn_body(stmt: &mut Stmt, cowns: &[String]) {
     let expr = match stmt {
-        Stmt::Expr(e) | Stmt::Let { value: e, .. } => e,
+        Stmt::Expr(e) | Stmt::Let { value: Some(e), .. } => e,
         _ => return,
     };
     let Expr::Call(callee, args, _) = expr else {

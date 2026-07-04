@@ -358,9 +358,20 @@ fn execute(
     int_lit_types: &HashMap<Span, prepoly_hir::IntKind>,
     expr_types: &HashMap<Span, prepoly_hir::Type>,
     view_args: &HashSet<Span>,
+    fields_loops: &HashMap<Span, Vec<String>>,
+    type_names: &HashMap<Span, String>,
+    typeof_types: &HashMap<Span, prepoly_hir::Type>,
 ) -> Result<(), String> {
     install_jit_panic_guard();
-    prepoly_jit_llvm::run(program, int_lit_types, expr_types, view_args)
+    prepoly_jit_llvm::run(
+        program,
+        int_lit_types,
+        expr_types,
+        view_args,
+        fields_loops,
+        type_names,
+        typeof_types,
+    )
 }
 
 /// Run a checked program through the default runtime: the REPL interpreter, used
@@ -371,8 +382,19 @@ fn execute(
     _int_lit_types: &HashMap<Span, prepoly_hir::IntKind>,
     expr_types: &HashMap<Span, prepoly_hir::Type>,
     view_args: &HashSet<Span>,
+    fields_loops: &HashMap<Span, Vec<String>>,
+    type_names: &HashMap<Span, String>,
+    typeof_types: &HashMap<Span, prepoly_hir::Type>,
 ) -> Result<(), String> {
-    prepoly_repl::run(program, expr_types, view_args, &mut io::stdout())
+    prepoly_repl::run(
+        program,
+        expr_types,
+        view_args,
+        fields_loops,
+        type_names,
+        typeof_types,
+        &mut io::stdout(),
+    )
 }
 
 /// Run a checked program through the REPL interpreter (the `repl` subcommand),
@@ -381,8 +403,19 @@ fn execute_repl(
     program: &Program,
     expr_types: &HashMap<Span, prepoly_hir::Type>,
     view_args: &HashSet<Span>,
+    fields_loops: &HashMap<Span, Vec<String>>,
+    type_names: &HashMap<Span, String>,
+    typeof_types: &HashMap<Span, prepoly_hir::Type>,
 ) -> Result<(), String> {
-    prepoly_repl::run(program, expr_types, view_args, &mut io::stdout())
+    prepoly_repl::run(
+        program,
+        expr_types,
+        view_args,
+        fields_loops,
+        type_names,
+        typeof_types,
+        &mut io::stdout(),
+    )
 }
 
 /// Resolve each integer literal's source span to its inferred integer kind when
@@ -616,6 +649,13 @@ struct Checked {
     /// Spans of anonymous structural arguments the checker approved for view
     /// conversion; MIR lowering wraps exactly these in `Rvalue::RecordView`.
     view_args: HashSet<Span>,
+    /// Field lists of checker-approved fields-loops, keyed by loop-statement
+    /// span; MIR lowering unrolls them (see `prepoly_hir::expand`).
+    fields_loops: HashMap<Span, Vec<String>>,
+    /// Resolved `typeof(x)` strings, keyed by call span.
+    type_names: HashMap<Span, String>,
+    /// Resolved binding types of `typeof`-bearing local annotations.
+    typeof_types: HashMap<Span, prepoly_hir::Type>,
 }
 
 /// Drive the front end on a source file, then act per `mode`. Front-end
@@ -648,16 +688,26 @@ fn drive(mode: Mode, file: &str) -> Result<(), u8> {
             &checked.int_lit_types,
             &checked.expr_types,
             &checked.view_args,
+            &checked.fields_loops,
+            &checked.type_names,
+            &checked.typeof_types,
         )
         .map_err(|e| {
             eprintln!("error: {e}");
             1
         }),
-        Mode::Repl => execute_repl(&checked.program, &checked.expr_types, &checked.view_args)
-            .map_err(|e| {
-                eprintln!("error: {e}");
-                1
-            }),
+        Mode::Repl => execute_repl(
+            &checked.program,
+            &checked.expr_types,
+            &checked.view_args,
+            &checked.fields_loops,
+            &checked.type_names,
+            &checked.typeof_types,
+        )
+        .map_err(|e| {
+            eprintln!("error: {e}");
+            1
+        }),
     }
 }
 
@@ -738,7 +788,27 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         types = program.types.len(),
         "running type analysis"
     );
-    let analysis = prepoly_typeck::analyze(&program);
+    let mut analysis = prepoly_typeck::analyze(&program);
+    // Reflective decoders: a `-> infer!` method call is keyed by the caller's
+    // expectation. Generate a concrete method per requested key, inject them,
+    // rewrite the calls to their specializations, and re-run the pipeline over
+    // the now fully-concrete program. Errors from the first pass are held until
+    // after specialization (a keyed call would otherwise report as an
+    // undeclared method); a genuine error re-surfaces in the second pass.
+    let mut program = program;
+    if !analysis.keyed_calls.is_empty() {
+        match specialize_keyed(&mut modules, &program, &analysis) {
+            Ok(()) => {
+                let (program2, lower_errors2) = lower(&modules);
+                for e in lower_errors2 {
+                    errors.push((e.message, e.span));
+                }
+                program = program2;
+                analysis = prepoly_typeck::analyze(&program);
+            }
+            Err(e) => errors.push(e),
+        }
+    }
     for e in &analysis.errors {
         errors.push((e.message.clone(), e.span));
     }
@@ -755,7 +825,155 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         int_lit_types,
         expr_types,
         view_args: analysis.view_args,
+        fields_loops: analysis.fields_loops,
+        type_names: analysis.type_names,
+        typeof_types: analysis.typeof_types,
     })
+}
+
+/// Generate concrete specializations of the reflective (`-> infer!`) methods
+/// the checker keyed, inject them into their defining modules' ASTs, and
+/// rewrite each keyed call site to its specialization. After this the program
+/// is fully concrete: the second checking/lowering pass sees ordinary methods.
+fn specialize_keyed(
+    modules: &mut [LoadedModule],
+    program: &Program,
+    analysis: &prepoly_typeck::Analysis,
+) -> Result<(), (String, Span)> {
+    // Deduplicate the requested (receiver, method, key) roots.
+    let mut roots: Vec<prepoly_typesys::KeyedNeed> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (recv, method, key) in analysis.keyed_calls.values() {
+        let sym = format!("{recv}.{method}:{}", prepoly_hir::type_key(key));
+        if seen.insert(sym) {
+            roots.push(prepoly_typesys::KeyedNeed {
+                recv: recv.clone(),
+                method: method.clone(),
+                key: key.clone(),
+            });
+        }
+    }
+    // Deterministic order so the specializations (and the shared-solver
+    // re-elaboration that checks them) do not vary run to run.
+    roots.sort_by(|a, b| {
+        (&a.recv, &a.method, prepoly_hir::type_key(&a.key)).cmp(&(
+            &b.recv,
+            &b.method,
+            prepoly_hir::type_key(&b.key),
+        ))
+    });
+    let generated = prepoly_typesys::specialize_all(program, &roots)
+        .map_err(|e| (format!("reflective specialization failed: {e}"), Span::new(0, 0)))?;
+    // Inject each generated method into the module that defines its receiver.
+    for (module_path, decl) in generated {
+        if let Some(m) = modules.iter_mut().find(|m| m.path == module_path) {
+            m.ast.items.push(TopLevel::Fun(decl));
+        }
+    }
+    // Rewrite the keyed call sites to their specializations.
+    let renames: std::collections::HashMap<Span, String> = analysis
+        .keyed_calls
+        .iter()
+        .map(|(span, (_, method, key))| (*span, prepoly_typesys::mangled_name(method, key)))
+        .collect();
+    for m in modules.iter_mut() {
+        for item in &mut m.ast.items {
+            if let TopLevel::Fun(f) = item {
+                rewrite_calls_block(&mut f.body, &renames);
+            } else if let TopLevel::Stmt(s) = item {
+                rewrite_calls_stmt(s, &renames);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Rewrite `recv.m(..)` calls whose span is in `renames` to `recv.<new>(..)`.
+fn rewrite_calls_block(
+    b: &mut prepoly_parser::ast::Block,
+    renames: &std::collections::HashMap<Span, String>,
+) {
+    for s in &mut b.stmts {
+        rewrite_calls_stmt(s, renames);
+    }
+}
+
+fn rewrite_calls_stmt(s: &mut Stmt, renames: &std::collections::HashMap<Span, String>) {
+    match s {
+        Stmt::Let {
+            value: Some(v), ..
+        } => rewrite_calls_expr(v, renames),
+        Stmt::Assign { target, value, .. } => {
+            rewrite_calls_expr(target, renames);
+            rewrite_calls_expr(value, renames);
+        }
+        Stmt::Expr(e) | Stmt::Return(Some(e), _) => rewrite_calls_expr(e, renames),
+        Stmt::While { cond, body, .. } => {
+            rewrite_calls_expr(cond, renames);
+            rewrite_calls_block(body, renames);
+        }
+        Stmt::For { iter, body, .. } => {
+            rewrite_calls_expr(iter, renames);
+            rewrite_calls_block(body, renames);
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_calls_expr(e: &mut prepoly_parser::ast::Expr, renames: &std::collections::HashMap<Span, String>) {
+    use prepoly_parser::ast::{Expr, StrSeg};
+    match e {
+        Expr::Call(callee, args, span) => {
+            if let Some(new_name) = renames.get(span)
+                && let Expr::Field(_, m, _) = &mut **callee
+            {
+                *m = new_name.clone();
+            }
+            rewrite_calls_expr(callee, renames);
+            for a in args.iter_mut() {
+                rewrite_calls_expr(&mut a.expr, renames);
+            }
+        }
+        Expr::Field(b, _, _) | Expr::Unary(_, b, _) | Expr::ErrorProp(b, _) => {
+            rewrite_calls_expr(b, renames)
+        }
+        Expr::Binary(_, l, r, _) | Expr::Index(l, r, _) | Expr::Range(l, r, _) => {
+            rewrite_calls_expr(l, renames);
+            rewrite_calls_expr(r, renames);
+        }
+        Expr::Array(es, _) => es.iter_mut().for_each(|e| rewrite_calls_expr(e, renames)),
+        Expr::TypeLit(_, fs, _) | Expr::VariantLit(_, _, fs, _) => {
+            fs.iter_mut().for_each(|(_, e)| rewrite_calls_expr(e, renames))
+        }
+        Expr::Str(segs, _) => segs.iter_mut().for_each(|seg| {
+            if let StrSeg::Expr(e) = seg {
+                rewrite_calls_expr(e, renames);
+            }
+        }),
+        Expr::If(c, t, els, _) => {
+            rewrite_calls_expr(c, renames);
+            rewrite_calls_block(t, renames);
+            if let Some(e) = els {
+                rewrite_calls_expr(e, renames);
+            }
+        }
+        Expr::IfLet(_, scrut, t, els, _) => {
+            rewrite_calls_expr(scrut, renames);
+            rewrite_calls_block(t, renames);
+            if let Some(e) = els {
+                rewrite_calls_expr(e, renames);
+            }
+        }
+        Expr::Match(scrut, arms, _) => {
+            rewrite_calls_expr(scrut, renames);
+            for arm in arms.iter_mut() {
+                rewrite_calls_expr(&mut arm.body, renames);
+            }
+        }
+        Expr::Block(b, _) => rewrite_calls_block(b, renames),
+        Expr::Closure(_, b, _) => rewrite_calls_expr(b, renames),
+        _ => {}
+    }
 }
 
 /// Parse `src` (labelled `name`) at byte-offset `base`, rendering a parse error
@@ -874,6 +1092,9 @@ fn run_capture(defs: &[String], body: &[String], root: &Path) -> Result<String, 
         &checked.program,
         &checked.expr_types,
         &checked.view_args,
+        &checked.fields_loops,
+        &checked.type_names,
+        &checked.typeof_types,
         &mut buf,
     )?;
     Ok(String::from_utf8_lossy(&buf).into_owned())

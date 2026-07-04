@@ -473,6 +473,9 @@ pub fn annotated_type_passes_by_copy(program: &Program, module: &[String], t: &T
                 })
         }
         TypeExpr::Fun(..) => false,
+        // `typeof(e)`'s underlying kind is unknown without inferring `e`;
+        // conservatively treat it as a copied aggregate (never a borrow).
+        TypeExpr::TypeOf(..) => true,
     }
 }
 
@@ -607,13 +610,20 @@ fn scan_block(block: &Block, roots: &Roots, sink: &mut impl PlaceSink) -> bool {
 fn scan_stmt(stmt: &Stmt, roots: &mut Roots, sink: &mut impl PlaceSink) -> bool {
     match stmt {
         Stmt::Let { pat, value, .. } => {
-            if scan_expr(value, roots, sink) {
-                return true;
+            if let Some(value) = value {
+                if scan_expr(value, roots, sink) {
+                    return true;
+                }
+                // `let q = <place rooted at a tracked name>` binds another handle to
+                // the same heap value, so `q` becomes a tracked alias; binding an
+                // unrelated value shadows any tracked name of the same name.
+                bind_pattern(pat, tracked_root(value, roots).is_some(), roots);
+            } else {
+                // An uninitialized `let` binds a fresh value (assigned later), so
+                // it is never an alias of a tracked name; it shadows like any
+                // other unrelated binding.
+                bind_pattern(pat, false, roots);
             }
-            // `let q = <place rooted at a tracked name>` binds another handle to
-            // the same heap value, so `q` becomes a tracked alias; binding an
-            // unrelated value shadows any tracked name of the same name.
-            bind_pattern(pat, tracked_root(value, roots).is_some(), roots);
             false
         }
         Stmt::Assign { target, value, .. } => {

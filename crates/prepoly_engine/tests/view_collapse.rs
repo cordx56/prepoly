@@ -47,6 +47,9 @@ fn three_shapes_collapse_to_one_display_instance() {
         &program,
         &std::collections::HashMap::new(),
         &analysis.view_args,
+        &analysis.fields_loops,
+        &analysis.type_names,
+        &analysis.typeof_types,
     );
     let mono = monomorphize(&mir, &program).expect("monomorphize");
     let display_instances: Vec<&str> = mono

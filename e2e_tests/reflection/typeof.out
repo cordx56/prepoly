@@ -1,0 +1,7 @@
+Point
+a Point with fields:
+Shape
+int32
+int32[3]
+  x: (in Point)
+  y: (in Point)

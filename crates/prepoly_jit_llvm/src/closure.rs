@@ -96,7 +96,10 @@ fn each_closure_block(b: &Block, f: &mut impl FnMut(&[Param], &Block)) {
 
 fn each_closure_stmt(s: &Stmt, f: &mut impl FnMut(&[Param], &Block)) {
     match s {
-        Stmt::Let { value, .. } => each_closure_expr(value, f),
+        Stmt::Let {
+            value: Some(value), ..
+        } => each_closure_expr(value, f),
+        Stmt::Let { value: None, .. } => {}
         Stmt::Assign { target, value, .. } => {
             each_closure_expr(target, f);
             each_closure_expr(value, f);
@@ -153,7 +156,10 @@ pub fn idents_stmts(stmts: &[Stmt], out: &mut HashSet<String>) {
 
 fn idents_stmt(s: &Stmt, out: &mut HashSet<String>) {
     match s {
-        Stmt::Let { value, .. } => idents_expr(value, out),
+        Stmt::Let {
+            value: Some(value), ..
+        } => idents_expr(value, out),
+        Stmt::Let { value: None, .. } => {}
         Stmt::Assign { target, value, .. } => {
             idents_expr(target, out);
             idents_expr(value, out);
@@ -233,7 +239,10 @@ fn walk_subexprs(e: &Expr, f: &mut impl FnMut(&Expr)) {
 fn block_exprs(b: &Block, f: &mut impl FnMut(&Expr)) {
     for s in &b.stmts {
         match s {
-            Stmt::Let { value, .. } => f(value),
+            Stmt::Let {
+                value: Some(value), ..
+            } => f(value),
+            Stmt::Let { value: None, .. } => {}
             Stmt::Assign { target, value, .. } => {
                 f(target);
                 f(value);

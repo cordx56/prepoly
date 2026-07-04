@@ -6,6 +6,7 @@
 
 pub mod constck;
 pub mod constraint;
+pub mod definite;
 pub mod exhaustive;
 pub mod flow;
 pub mod globals;
@@ -48,6 +49,20 @@ pub struct Analysis {
     /// check for a view-eligible parameter (`prepoly_typesys::rows`); MIR
     /// lowering converts exactly these arguments into the parameter's view.
     pub view_args: std::collections::HashSet<Span>,
+    /// Field lists of checker-approved `for f in fields(x)` loops, keyed by the
+    /// loop statement's span; MIR lowering unrolls the same expanded copies the
+    /// checker typed (see `prepoly_hir::expand`).
+    pub fields_loops: std::collections::HashMap<Span, Vec<String>>,
+    /// Resolved type names of `typeof(x)` calls, keyed by the call span; MIR
+    /// lowering replaces each call with the string constant.
+    pub type_names: std::collections::HashMap<Span, String>,
+    /// Reflective (`-> infer!`) method calls keyed by expectation: call span ->
+    /// (receiver type, method, target key). The driver specializes each and
+    /// rewrites the call to the concrete method.
+    pub keyed_calls: std::collections::HashMap<Span, (String, String, prepoly_hir::Type)>,
+    /// Resolved binding types of `typeof`-bearing local annotations, keyed by
+    /// the annotation span; MIR seeds the slot from this.
+    pub typeof_types: std::collections::HashMap<Span, prepoly_hir::Type>,
 }
 
 /// Run all static checks. Returns the errors found (sorted by position).
@@ -63,6 +78,7 @@ pub fn analyze(program: &Program) -> Analysis {
     errors.extend(interface::check(program));
     errors.extend(exhaustive::check(program));
     errors.extend(flow::check(program));
+    errors.extend(definite::check(program));
     errors.extend(globals::check(program));
     errors.extend(check_reserved_names(program));
     errors.extend(constck::check(program));
@@ -73,7 +89,10 @@ pub fn analyze(program: &Program) -> Analysis {
     tracing::debug!(after_hm = errors.len(), "errors after Hindley-Milner pass");
     let infer = infer::analyze(program);
     errors.extend(infer.errors);
-    errors.sort_by_key(|e| e.span.lo);
+    // Message is the secondary key so identical diagnostics from re-checked
+    // bodies (per-instance re-elaboration, expanded fields-loop copies) land
+    // adjacent and collapse in the dedup.
+    errors.sort_by(|a, b| (a.span.lo, &a.message).cmp(&(b.span.lo, &b.message)));
     errors.dedup();
     tracing::debug!(
         total = errors.len(),
@@ -86,6 +105,10 @@ pub fn analyze(program: &Program) -> Analysis {
         fn_instances: infer.fn_instances,
         schemes: infer.schemes,
         view_args: infer.view_args,
+        fields_loops: infer.fields_loops,
+        type_names: infer.type_names,
+        keyed_calls: infer.keyed_calls,
+        typeof_types: infer.typeof_types,
     }
 }
 
@@ -96,7 +119,8 @@ pub fn analyze(program: &Program) -> Analysis {
 /// (e.g. `len(s)`) or, in the case of `error`, become dead code because
 /// `error(x)` is always desugared to `Result.Err { error: x }`.
 fn check_reserved_names(program: &Program) -> Vec<TypeError> {
-    const RESERVED: &[&str] = &["len", "open", "spawn", "with", "sync", "error"];
+    const RESERVED: &[&str] =
+        &["len", "open", "spawn", "with", "sync", "error", "fields", "typeof"];
     let mut errors = Vec::new();
     for name in RESERVED {
         if let Some(info) = program.functions.get(*name) {
@@ -297,7 +321,9 @@ fn collect_stmt(stmt: &Stmt, out: &mut Vec<TypeExpr>) {
             if let Some(t) = ty {
                 out.push(t.clone());
             }
-            collect_expr(value, out);
+            if let Some(value) = value {
+                collect_expr(value, out);
+            }
         }
         Stmt::Assign { target, value, .. } => {
             collect_expr(target, out);

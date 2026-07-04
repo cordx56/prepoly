@@ -313,6 +313,30 @@ fun Vec2.length_sq(self) -> float64 { return self.x * self.x + self.y * self.y }
 let sq = v.length_sq()
 ```
 
+## Compile-time reflection
+
+`fields(x)` iterates a record's declared fields; it is legal only as a `for`
+iterable and is unrolled per field. In the body the loop variable is the field
+NAME (a string) except in `x[field]`, which projects the field's value. Use it
+with an uninitialized `let ret: T` (an annotated `let` with no initializer) to
+build a value field by field: storing into every field through the loop makes
+`ret` fully initialized. `typeof(x)` names `x`'s static type -- a string in
+value position (`print(typeof(x))`), a type in type position (`let y:
+typeof(x)`), and a static receiver (`typeof(x).from(v)`). Both read only the type, so they are allowed on an uninitialized binding.
+
+```
+type Point = { x: int64, y: int64 }
+fun doubled(p: Point) -> Point {
+    let ret: Point
+    for field in fields(ret) { ret[field] = p[field] * 2 }
+    return ret
+}
+```
+
+Mutually recursive functions are supported on the typed back end only when the
+functions carry return-type annotations (each recursive call types against the
+annotation).
+
 ## Modules
 
 One file is one module; the directory layout is the module path

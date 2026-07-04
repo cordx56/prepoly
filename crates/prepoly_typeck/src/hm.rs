@@ -42,7 +42,10 @@ use crate::solver::{InferenceVarKind, Scheme, Solver};
 pub fn check(program: &Program) -> Vec<TypeError> {
     let mut hm = Hm::new(program);
     hm.build_globals();
-    let symbols: Vec<String> = program.functions.keys().cloned().collect();
+    // Deterministic order: all callables share one solver, so a var that leaks
+    // across bodies would otherwise make diagnostics depend on HashMap order.
+    let mut symbols: Vec<String> = program.functions.keys().cloned().collect();
+    symbols.sort();
     for symbol in symbols {
         hm.check_function(&symbol);
     }
@@ -100,8 +103,14 @@ impl<'p> Hm<'p> {
     /// Build a scheme for every program function from its (already annotation-
     /// resolved) signature, so calls can be checked against a stable type.
     fn build_globals(&mut self) {
+        // Sorted: `signature_type` allocates fresh solver variables for
+        // unannotated positions, so an unordered walk would shift every later
+        // variable id and make the shared-solver check order-dependent.
+        let mut symbols: Vec<&String> = self.program.functions.keys().collect();
+        symbols.sort();
         let mut schemes = Vec::new();
-        for (symbol, f) in &self.program.functions {
+        for symbol in symbols {
+            let f = &self.program.functions[symbol];
             let ty = self.signature_type(f);
             schemes.push((symbol.clone(), ty));
         }
@@ -122,7 +131,16 @@ impl<'p> Hm<'p> {
             .iter()
             .map(|p| self.or_fresh(p.resolved_ty.clone()))
             .collect();
-        let ret = self.or_fresh(f.signature.ret_ty.clone());
+        // Freshen the shared INFER_VAR sentinel in a `T!` return so this
+        // function's scheme owns a distinct error variable -- otherwise every
+        // fallible function's scheme shares one var and their error payloads
+        // collide when one is later constrained to a non-`string` type.
+        let ret = match f.signature.ret_ty.clone() {
+            Some(t) => {
+                prepoly_hir::freshen_infer(t, &mut || self.solver.fresh(InferenceVarKind::Source))
+            }
+            None => self.solver.fresh(InferenceVarKind::Source),
+        };
         Type::Fun(params, Box::new(ret))
     }
 
@@ -207,18 +225,26 @@ impl<'p> Hm<'p> {
             match &info.kind {
                 TypeKind::Record { methods, .. } => {
                     for m in methods.values() {
+                        if prepoly_hir::keyed_return(m.decl.ret.as_ref()) {
+                            continue;
+                        }
                         jobs.push((Some(info.type_ref()), info.module.clone(), m.clone()));
                     }
                 }
                 TypeKind::Sum { variants } => {
                     for v in variants {
                         for m in v.methods.values() {
+                            if prepoly_hir::keyed_return(m.decl.ret.as_ref()) {
+                                continue;
+                            }
                             jobs.push((None, info.module.clone(), m.clone()));
                         }
                     }
                 }
             }
         }
+        // Deterministic order (shared solver; see `check`).
+        jobs.sort_by(|a, b| a.2.decl.name.cmp(&b.2.decl.name));
         for (recv, module, m) in jobs {
             self.check_method(recv, module, &m);
         }
@@ -277,13 +303,30 @@ impl<'p> Hm<'p> {
         self.self_type = self_ty;
         self.scopes = vec![HashMap::new()];
         self.lit_vars.clear();
+        // Isolate this body's transient inference: a function's public type is
+        // its (pre-built) global scheme, and a method's is re-derived per call
+        // from its signature, so nothing outside depends on the variables bound
+        // while checking THIS body. Rolling them back at the end keeps each
+        // callable's error/inference variables from leaking into the next
+        // through the shared solver.
+        let body_snapshot = self.solver.snapshot();
         for (name, ty) in &params {
             self.bind_mono(name, ty.clone());
         }
         self.check_duplicate_params(decl_params, context);
         self.ok = self.solver.fresh(InferenceVarKind::Source);
         self.err = self.solver.fresh(InferenceVarKind::Source);
-        let declared = self.or_fresh(ret_ty);
+        // A `T!` return resolves to `Result<T, Unknown(INFER_VAR)>` with the
+        // shared INFER_VAR sentinel; freshen it so each fallible callable gets
+        // its OWN error variable. Without this every `T!` callable aliases one
+        // error var -- harmless only while every error payload is `string`, but
+        // a spurious conflict the moment two differ.
+        let declared = match ret_ty {
+            Some(t) => {
+                prepoly_hir::freshen_infer(t, &mut || self.solver.fresh(InferenceVarKind::Source))
+            }
+            None => self.solver.fresh(InferenceVarKind::Source),
+        };
         // A callable returns `Result<ok, err>` -- so a bare `return v` is the `Ok`
         // payload and every error site reconciles to `err` -- when its body uses
         // `error(x)`/`expr!`, OR its declared return is already a `Result` (a `T!`
@@ -300,6 +343,9 @@ impl<'p> Hm<'p> {
         }
         self.infer_block(body);
         self.finalize_literals();
+        // Discard this body's transient bindings (see the snapshot above); its
+        // diagnostics are already recorded in `self.errors`.
+        self.solver.rollback(body_snapshot);
     }
 
     // ----- environment -----
@@ -485,17 +531,30 @@ impl<'p> Hm<'p> {
     fn infer_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let { pat, ty, value, .. } => {
-                let value_ty = self.infer_expr(value);
                 // An annotation is the declared (authoritative) type: the value
                 // must flow into it, and the binding takes the annotated type
                 // (e.g. `let m: int32? = total` binds `m` at `int32?`, so later
-                // uses see the nullable, not the promoted `int32` value).
-                let bound_ty = match ty.as_ref().and_then(|a| self.resolve_annotation(a)) {
-                    Some(annot_ty) => {
+                // uses see the nullable, not the promoted `int32` value). An
+                // uninitialized `let` has no value; the annotation alone types
+                // the binding (definite assignment guards the reads).
+                let annot = ty.as_ref().and_then(|a| self.resolve_annotation(a));
+                let bound_ty = match (value, annot) {
+                    (Some(value), Some(annot_ty)) => {
+                        let value_ty = self.infer_expr(value);
                         self.flow_into(&value_ty, &annot_ty, stmt.span());
                         annot_ty
                     }
-                    None => value_ty,
+                    (Some(value), None) => self.infer_expr(value),
+                    // A `Self` annotation is resolved positionally by the infer
+                    // pass; here it would read as a foreign nominal, so let the
+                    // binding's uses pin a fresh variable instead.
+                    (None, Some(_))
+                        if matches!(ty.as_ref(), Some(prepoly_parser::ast::TypeExpr::Named(n, _)) if n == "Self") =>
+                    {
+                        self.solver.fresh(InferenceVarKind::Source)
+                    }
+                    (None, Some(annot_ty)) => annot_ty,
+                    (None, None) => self.solver.fresh(InferenceVarKind::Source),
                 };
                 // A simple binding is generalized over variables not free in the
                 // environment: the HM `let` rule that makes a bound closure
@@ -544,6 +603,12 @@ impl<'p> Hm<'p> {
             Stmt::For {
                 var, iter, body, ..
             } => {
+                // A fields-loop is expanded and fully checked per field by the
+                // infer pass; its body does not type as ordinary code (the loop
+                // variable changes meaning per position), so HM skips it.
+                if prepoly_hir::fields_loop_target(stmt).is_some() {
+                    return;
+                }
                 let iter_ty = self.infer_expr(iter);
                 // The loop variable is the element type of a slice/array iterable
                 // (seeing through reference/mutability wrappers, so iterating a
@@ -1213,7 +1278,16 @@ impl<'p> Hm<'p> {
                         self.flow_into(a, pty, span);
                     }
                 }
-                return ret.unwrap_or_else(|| self.solver.fresh(InferenceVarKind::Source));
+                // The method's declared return may carry the shared INFER_VAR
+                // sentinel (a `T!` open error payload). Freshen it so this call
+                // gets its own error variable -- otherwise every `T!` method call
+                // in the program aliases one error var and their payloads collide.
+                return match ret {
+                    Some(t) => prepoly_hir::freshen_infer(t, &mut || {
+                        self.solver.fresh(InferenceVarKind::Source)
+                    }),
+                    None => self.solver.fresh(InferenceVarKind::Source),
+                };
             }
             return self.solver.fresh(InferenceVarKind::Source);
         }
@@ -1519,7 +1593,11 @@ fn block_is_fallible(block: &Block) -> bool {
 
 fn stmt_is_fallible(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Let { value, .. } | Stmt::Return(Some(value), _) => expr_is_fallible(value),
+        Stmt::Let {
+            value: Some(value), ..
+        }
+        | Stmt::Return(Some(value), _) => expr_is_fallible(value),
+        Stmt::Let { value: None, .. } => false,
         Stmt::Assign { target, value, .. } => expr_is_fallible(target) || expr_is_fallible(value),
         Stmt::Expr(e) => expr_is_fallible(e),
         Stmt::While { cond, body, .. } => expr_is_fallible(cond) || block_is_fallible(body),

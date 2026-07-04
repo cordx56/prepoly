@@ -1,0 +1,1 @@
+field `x` of `p` is read before it is assigned

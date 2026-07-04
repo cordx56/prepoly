@@ -22,8 +22,18 @@ pub fn run(
     _int_lit_types: &std::collections::HashMap<prepoly_hir::Span, prepoly_hir::IntKind>,
     expr_types: &std::collections::HashMap<prepoly_hir::Span, prepoly_hir::Type>,
     view_args: &std::collections::HashSet<prepoly_hir::Span>,
+    fields_loops: &std::collections::HashMap<prepoly_hir::Span, Vec<String>>,
+    type_names: &std::collections::HashMap<prepoly_hir::Span, String>,
+    typeof_types: &std::collections::HashMap<prepoly_hir::Span, prepoly_hir::Type>,
 ) -> Result<(), String> {
-    let mir = prepoly_mir::lower_program_with_types(program, expr_types, view_args);
+    let mir = prepoly_mir::lower_program_with_types(
+        program,
+        expr_types,
+        view_args,
+        fields_loops,
+        type_names,
+        typeof_types,
+    );
     // Debugging aid: dump the lowered MIR when requested
     // (PREPOLY_LOG_TYPE=mir) -- the first thing needed when monomorphization
     // rejects a checked program. Guarded so the rendering only runs when the
@@ -33,9 +43,16 @@ pub fn run(
     }
     let mono = prepoly_engine::monomorphize(&mir, program)
         .map_err(|e| format!("typed lowering failed: {e}"))?;
-    // No Value fallback: a program outside the typed subset is rejected.
+    // No Value fallback: a program outside the typed subset is rejected. The
+    // skip reason names the first offending construct -- without it the user
+    // sees only the generic sentence for a program the checker accepted.
     if program.functions.contains_key("main") && mono.lookup("main").is_none() {
-        return Err("program uses constructs outside the typed (Value-free) subset".to_string());
+        return Err(match &mono.main_skip {
+            Some(reason) => format!(
+                "program uses constructs outside the typed (Value-free) subset: {reason}"
+            ),
+            None => "program uses constructs outside the typed (Value-free) subset".to_string(),
+        });
     }
     let context = Context::create();
     let mut backend = crate::LlvmCodegen::new_backend(&context, program);

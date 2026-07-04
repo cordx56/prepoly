@@ -16,7 +16,12 @@ impl<'a> Checker<'a> {
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Let { pat, value, .. } => {
-                    let ty = self.infer_expr_light(value, env, errors);
+                    let ty = match value {
+                        Some(value) => self.infer_expr_light(value, env, errors),
+                        // Uninitialized `let`: the light pass has no annotation
+                        // resolution; the full check types the binding.
+                        None => Type::Unknown(prepoly_hir::INFER_VAR),
+                    };
                     self.bind_pattern_light(pat, &ty, env);
                 }
                 Stmt::Assign { value, .. } => {
@@ -454,7 +459,10 @@ impl<'a> Checker<'a> {
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Let { pat, value, .. } => {
-                    let ty = self.infer_expr_light(value, env, errors);
+                    let ty = match value {
+                        Some(value) => self.infer_expr_light(value, env, errors),
+                        None => Type::Unknown(prepoly_hir::INFER_VAR),
+                    };
                     self.bind_pattern_light(pat, &ty, env);
                     last = Type::Void;
                 }

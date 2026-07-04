@@ -48,7 +48,10 @@ pub fn walk_block(b: &Block, v: &mut impl ExprVisitor) {
 
 pub fn walk_stmt(s: &Stmt, v: &mut impl ExprVisitor) {
     match s {
-        Stmt::Let { value, .. } => walk_expr(value, v),
+        Stmt::Let {
+            value: Some(value), ..
+        } => walk_expr(value, v),
+        Stmt::Let { value: None, .. } => {}
         Stmt::Assign { target, value, .. } => {
             walk_expr(target, v);
             walk_expr(value, v);

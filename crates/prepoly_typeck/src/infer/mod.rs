@@ -102,6 +102,22 @@ pub struct Inference {
     /// for a view-eligible parameter (see `prepoly_typesys::rows`). MIR lowering
     /// converts exactly these arguments into the parameter's view.
     pub view_args: HashSet<Span>,
+    /// Field lists of `for f in fields(x)` loops, keyed by the loop statement's
+    /// span. The checker resolved `x`'s record type and checked one expanded
+    /// copy per field; MIR lowering unrolls the same copies from this list.
+    pub fields_loops: HashMap<Span, Vec<String>>,
+    /// Resolved type names of `typeof(x)` calls, keyed by the call span. MIR
+    /// lowering replaces each such call with this string constant.
+    pub type_names: HashMap<Span, String>,
+    /// Reflective (`-> infer!`) method calls keyed by the caller's expectation:
+    /// call span -> (receiver type name, method, target key). The driver
+    /// generates a concrete specialization per (receiver, method, key) and
+    /// rewrites the call to it.
+    pub keyed_calls: HashMap<Span, (String, String, Type)>,
+    /// Resolved binding types of local annotations that contain a `typeof(v)`,
+    /// keyed by the annotation's span; MIR seeds the slot from this (the type
+    /// is not recoverable from a `null`/inferred initializer alone).
+    pub typeof_types: HashMap<Span, Type>,
 }
 
 pub fn analyze(program: &Program) -> Inference {
@@ -122,6 +138,11 @@ pub fn analyze(program: &Program) -> Inference {
         match &t.kind {
             TypeKind::Record { methods, .. } => {
                 for m in methods.values() {
+                    // A reflective `-> infer!` template has no fixed body type;
+                    // it is specialized per key by the driver, so skip it here.
+                    if prepoly_hir::keyed_return(m.decl.ret.as_ref()) {
+                        continue;
+                    }
                     if let Some(body) = &m.decl.body {
                         let mut scopes = checker.signature_scopes(&m.signature.params);
                         let ret = m.signature.ret_ty.clone();
@@ -132,6 +153,9 @@ pub fn analyze(program: &Program) -> Inference {
             TypeKind::Sum { variants } => {
                 for v in variants {
                     for m in v.methods.values() {
+                        if prepoly_hir::keyed_return(m.decl.ret.as_ref()) {
+                            continue;
+                        }
                         if let Some(body) = &m.decl.body {
                             let mut scopes = checker.signature_scopes(&m.signature.params);
                             let ret = m.signature.ret_ty.clone();
@@ -190,6 +214,10 @@ pub fn analyze(program: &Program) -> Inference {
         fn_instances: checker.fn_instances,
         schemes: checker.schemes,
         view_args: checker.view_args,
+        fields_loops: checker.fields_loops,
+        type_names: checker.type_names,
+        keyed_calls: checker.keyed_calls,
+        typeof_types: checker.typeof_types,
     }
 }
 
@@ -247,6 +275,15 @@ struct Checker<'a> {
     /// slice. Consumed (reset) by the literal itself, so nested literals and any
     /// other position stay slices.
     fixed_array_binding: bool,
+    /// The type a call-position expression is expected to produce, set by
+    /// `check_expr_against` and consumed at the start of `check_call`; keys a
+    /// reflective `-> infer!` method by its result.
+    call_expected: Option<Type>,
+    /// Reflective method calls discovered so far (see [`Inference::keyed_calls`]).
+    keyed_calls: HashMap<Span, (String, String, Type)>,
+    /// Resolved binding types of `typeof`-bearing local annotations, keyed by
+    /// the annotation span (see [`Inference::typeof_types`]).
+    typeof_types: HashMap<Span, Type>,
     /// Bindings narrowed non-null in the current callable, with their original
     /// nullable types. A call can re-null a narrowed GLOBAL (any callee may
     /// write it) or a narrowed local ASSIGNED INSIDE A CLOSURE of this body (a
@@ -266,6 +303,11 @@ struct Checker<'a> {
     /// check for a view-ELIGIBLE parameter: exactly the call sites where MIR
     /// lowering may convert the argument into the parameter's view.
     view_args: HashSet<Span>,
+    /// Field lists of checked fields-loops, keyed by loop-statement span; the
+    /// channel MIR lowering unrolls from (see [`Inference::fields_loops`]).
+    fields_loops: HashMap<Span, Vec<String>>,
+    /// Resolved type names of checked `typeof(x)` calls, keyed by call span.
+    type_names: HashMap<Span, String>,
 }
 
 impl<'a> Checker<'a> {
@@ -290,10 +332,15 @@ impl<'a> Checker<'a> {
             fn_instances: HashMap::new(),
             schemes: HashMap::new(),
             fixed_array_binding: false,
+            call_expected: None,
+            keyed_calls: HashMap::new(),
+            typeof_types: HashMap::new(),
             narrowed_bindings: Vec::new(),
             closure_write_targets: HashSet::new(),
             rows: prepoly_typesys::RowInfo::analyze(program),
             view_args: HashSet::new(),
+            fields_loops: HashMap::new(),
+            type_names: HashMap::new(),
         }
     }
 
@@ -672,6 +719,16 @@ impl<'a> Checker<'a> {
                 let Stmt::Let { pat, ty, value, .. } = stmt else {
                     continue;
                 };
+                let Some(value) = value else {
+                    // A module-level binding is a global initialized by the
+                    // module's init; without an initializer there is no init
+                    // order at which it becomes defined.
+                    self.errors.push(TypeError {
+                        message: "a top-level `let` needs an initializer".to_string(),
+                        span: stmt.span(),
+                    });
+                    continue;
+                };
                 let value_ty = self.infer_expr_light(value, &env, &mut errors);
                 let binding_ty = match ty {
                     Some(te) => match self.resolve_type(te) {
@@ -741,6 +798,11 @@ impl<'a> Checker<'a> {
             }
             TypeExpr::Mut(inner, _) => Ok(Type::Mut(Box::new(self.resolve_type(inner)?))),
             TypeExpr::Ref(inner, _) => Ok(Type::Ref(Box::new(self.resolve_type(inner)?))),
+            // `typeof(v)` outside a value-scope context (e.g. a signature) has no
+            // binding to tie to; it becomes a fresh inference variable. Inside a
+            // local `let` it is instead resolved against the binding's scope by
+            // `resolve_annotation_scoped`, which ties it to v's type.
+            TypeExpr::TypeOf(..) => Ok(self.fresh_unknown()),
         }
     }
 
@@ -881,7 +943,15 @@ impl<'a> Checker<'a> {
                     let resolved = self.resolve(&want);
                     if let Some((ok, _err)) = resolved.result_payloads() {
                         let ok = ok.clone();
+                        // `return e!` where the enclosing return is `T!` keys a
+                        // reflective method inside `e` by the Ok payload `ok`
+                        // (or by `want` when `e` is itself a `Result`). Set the
+                        // channel narrowly for a direct call / `call!`.
+                        if matches!(e, Expr::Call(..) | Expr::ErrorProp(..)) {
+                            self.call_expected = Some(ok.clone());
+                        }
                         let got = self.check_expr(e, scopes);
+                        self.call_expected = None;
                         if self.resolve(&got).is_result_type() {
                             self.expect_assignable(&got, &want, span);
                         } else {
@@ -923,8 +993,15 @@ impl<'a> Checker<'a> {
                 is_const,
                 ..
             } => {
+                let Some(value) = value else {
+                    // `let x: T` without an initializer: the annotation alone
+                    // types the binding; the definite-assignment pass rejects
+                    // any read before the binding is fully assigned.
+                    self.bind_uninit_let(pat, ty.as_ref(), scopes);
+                    return;
+                };
                 let binding_ty = if let Some(te) = ty {
-                    match self.resolve_type(te) {
+                    match self.resolve_annotation_scoped(te, scopes) {
                         Ok(annotated) => {
                             let got = self.check_expr_against(value, &annotated, scopes);
                             self.instantiate_annotated_type(&annotated, &got)
@@ -1016,6 +1093,10 @@ impl<'a> Checker<'a> {
             Stmt::For {
                 var, iter, body, ..
             } => {
+                if prepoly_hir::fields_loop_target(s).is_some() {
+                    self.check_fields_loop(s, scopes);
+                    return;
+                }
                 let iter_ty = self.check_expr(iter, scopes);
                 // Iterating sees through reference/mutability wrappers and binds the
                 // loop variable to the element of the same kind: over `ref(mut(T[]))`
@@ -1040,6 +1121,174 @@ impl<'a> Checker<'a> {
             Stmt::Break(_) | Stmt::Continue(_) => {}
         }
         self.apply_guard_narrowing(s, scopes);
+    }
+
+    /// Bind an uninitialized `let x: T`: the annotation is the binding's type.
+    /// Only a single-name binding makes sense (there is no value to
+    /// destructure); the definite-assignment pass enforces write-before-read.
+    /// Resolve a local-binding annotation with the value scope in hand, so a
+    /// `typeof(v)` node ties the binding to `v`'s inferred type (`let x:
+    /// typeof(v)` gives x the same type as v). Structural wrappers around a
+    /// `typeof` recurse; a `typeof`-free annotation delegates to `resolve_type`.
+    /// `v` is type-checked (needed to know its type) but never lowered.
+    fn resolve_annotation_scoped(
+        &mut self,
+        te: &TypeExpr,
+        scopes: &mut ScopeStack,
+    ) -> Result<Type, String> {
+        let resolved = self.resolve_annotation_scoped_inner(te, scopes)?;
+        // A `typeof`-bearing annotation is not recoverable by MIR's scope-free
+        // resolver, so record the resolved type for the back end to seed the
+        // binding's slot (needed when the initializer -- e.g. `null` -- does not
+        // itself carry the type).
+        if contains_typeof(te) {
+            self.typeof_types
+                .insert(te.span(), self.resolve(&resolved));
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_annotation_scoped_inner(
+        &mut self,
+        te: &TypeExpr,
+        scopes: &mut ScopeStack,
+    ) -> Result<Type, String> {
+        match te {
+            TypeExpr::TypeOf(e, _) => Ok(self.check_expr(e, scopes)),
+            TypeExpr::Nullable(inner, _) => Ok(Type::Nullable(Box::new(
+                self.resolve_annotation_scoped_inner(inner, scopes)?,
+            ))),
+            TypeExpr::Array(inner, Some(n), _) => Ok(Type::Array(
+                Box::new(self.resolve_annotation_scoped_inner(inner, scopes)?),
+                *n,
+            )),
+            TypeExpr::Array(inner, None, _) => Ok(Type::Slice(Box::new(
+                self.resolve_annotation_scoped_inner(inner, scopes)?,
+            ))),
+            TypeExpr::Fallible(inner, _) => {
+                let ok = self.resolve_annotation_scoped_inner(inner, scopes)?;
+                Ok(Type::result(ok, self.fresh_unknown()))
+            }
+            TypeExpr::Mut(inner, _) => Ok(Type::Mut(Box::new(
+                self.resolve_annotation_scoped_inner(inner, scopes)?,
+            ))),
+            TypeExpr::Ref(inner, _) => Ok(Type::Ref(Box::new(
+                self.resolve_annotation_scoped_inner(inner, scopes)?,
+            ))),
+            TypeExpr::Tuple(elems, _) => {
+                let mut ts = Vec::with_capacity(elems.len());
+                for e in elems {
+                    ts.push(self.resolve_annotation_scoped_inner(e, scopes)?);
+                }
+                Ok(Type::Tuple(ts))
+            }
+            // Named / Anonymous / Fun carry no `typeof` in practice; resolve them
+            // with the ordinary (scope-free) resolver.
+            _ => self.resolve_type(te),
+        }
+    }
+
+    fn bind_uninit_let(
+        &mut self,
+        pat: &Pattern,
+        ty: Option<&TypeExpr>,
+        scopes: &mut ScopeStack,
+    ) {
+        // The parser only omits the initializer when an annotation is present.
+        let Some(te) = ty else { return };
+        let binding_ty = match self.resolve_annotation_scoped(te, scopes) {
+            Ok(t) => t,
+            Err(message) => {
+                self.errors.push(TypeError {
+                    message,
+                    span: te.span(),
+                });
+                return;
+            }
+        };
+        if !matches!(pat, Pattern::Binding(..)) {
+            self.errors.push(TypeError {
+                message: "an uninitialized `let` must bind a single name".to_string(),
+                span: te.span(),
+            });
+            return;
+        }
+        self.bind_pattern(pat, &binding_ty, scopes);
+    }
+
+    /// Check a `for f in fields(x)` loop: `x` must be a record; the body is
+    /// expanded and checked once per field (declaration order for a nominal
+    /// record, canonical key order for an anonymous one), with the loop
+    /// variable decayed to the field name and `v[f]` to the field projection
+    /// (see `prepoly_hir::expand`). The field list is recorded for MIR
+    /// lowering, which unrolls the identical copies.
+    fn check_fields_loop(&mut self, s: &Stmt, scopes: &mut ScopeStack) {
+        let Some((var, arg, body)) = prepoly_hir::fields_loop_target(s) else {
+            return;
+        };
+        let arg_ty = self.check_expr(arg, scopes);
+        let resolved = self.resolve(&arg_ty);
+        let (type_name, field_names) = match &resolved {
+            Type::Record(n) if n.id == prepoly_hir::STRUCTURAL_RECORD_ID => (
+                prepoly_hir::STRUCTURAL_RECORD_NAME.to_string(),
+                n.substitution.iter().map(|(k, _)| k.to_string()).collect(),
+            ),
+            Type::Record(n) => {
+                let Some(info) = self.program.type_by_id(n.id) else {
+                    self.errors.push(TypeError {
+                        message: format!("`fields(..)` requires a record value, got `{}`", resolved.display()),
+                        span: arg.span(),
+                    });
+                    return;
+                };
+                let TypeKind::Record { fields, .. } = &info.kind else {
+                    self.errors.push(TypeError {
+                        message: format!("`fields(..)` requires a record value, got `{}`", resolved.display()),
+                        span: arg.span(),
+                    });
+                    return;
+                };
+                (
+                    info.name.clone(),
+                    fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
+                )
+            }
+            other => {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "`fields(..)` requires a record value, got `{}`",
+                        other.display()
+                    ),
+                    span: arg.span(),
+                });
+                return;
+            }
+        };
+        // The loop variable is substituted textually into every copy, so a
+        // rebinding inside the body would silently change meaning.
+        if block_rebinds(body, var) {
+            self.errors.push(TypeError {
+                message: format!("the fields-loop variable `{var}` must not be shadowed in the body"),
+                span: s.span(),
+            });
+            return;
+        }
+        self.fields_loops.insert(s.span(), field_names.clone());
+        for (i, field) in field_names.iter().enumerate() {
+            let expanded = prepoly_hir::expand_fields_body(body, var, field, i);
+            let err_start = self.errors.len();
+            self.check_block(&expanded, scopes);
+            // Copies carry shifted spans (so span-keyed sidecars stay distinct
+            // per copy); surface diagnostics at the source position, naming
+            // the field whose copy failed.
+            for e in &mut self.errors[err_start..] {
+                e.span = prepoly_hir::unshift_span(e.span);
+                e.message = format!(
+                    "{} (while expanding field `{field}` of `{type_name}`)",
+                    e.message
+                );
+            }
+        }
     }
 
     fn check_expr_against(&mut self, expr: &Expr, want: &Type, scopes: &mut ScopeStack) -> Type {
@@ -1131,7 +1380,19 @@ impl<'a> Checker<'a> {
         {
             return self.check_closure_against(expr, params, body, &want_params, &want_ret, scopes);
         }
-        let got = self.check_expr(expr, scopes);
+        // A call (or `call!`) in a required position keys a reflective
+        // `-> infer!` method by `want`. Only these shapes can be keyed; set the
+        // channel narrowly so it never leaks into an operand of a larger
+        // expression (`check_call` takes it).
+        let got = if matches!(expr, Expr::Call(..) | Expr::ErrorProp(..)) {
+            let resolved = self.resolve(want);
+            let saved = self.call_expected.replace(resolved);
+            let g = self.check_expr(expr, scopes);
+            self.call_expected = saved;
+            g
+        } else {
+            self.check_expr(expr, scopes)
+        };
         self.expect_expr_assignable(&got, want, expr);
         got
     }
@@ -1453,7 +1714,18 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::ErrorProp(inner, span) => {
-                let ty = self.check_expr(inner, scopes);
+                // `e!` unwraps a `Result`; the outer expectation W means the
+                // inner must produce W!, so a keyed method inside `e` is keyed
+                // by W -- keep the pending expectation for a direct inner call,
+                // clear it otherwise so siblings do not see it.
+                let ty = if matches!(&**inner, Expr::Call(..)) {
+                    self.check_expr(inner, scopes)
+                } else {
+                    let saved = self.call_expected.take();
+                    let t = self.check_expr(inner, scopes);
+                    self.call_expected = saved;
+                    t
+                };
                 let resolved = self.resolve(&ty);
                 match resolved.result_payloads() {
                     Some((ok, _)) => {
@@ -2247,7 +2519,39 @@ impl<'a> Checker<'a> {
         span: prepoly_lexer::Span,
         scopes: &mut ScopeStack,
     ) -> Type {
+        // Consume the caller's expectation (a keyed `-> infer!` method reads it);
+        // taking it here keeps an argument's own calls from reusing it.
+        let call_expected = self.call_expected.take();
         if let Expr::Ident(name, _) = callee {
+            if name == "fields" {
+                self.errors.push(TypeError {
+                    message: "`fields(..)` is a compile-time construct, usable only as a \
+                              `for` loop iterable"
+                        .to_string(),
+                    span,
+                });
+                return self.fresh_unknown();
+            }
+            // `typeof(x)` in value position: a compile-time string constant, the
+            // source name of x's static type (the same construct also names a
+            // type in type/receiver position; see resolve_annotation and
+            // static_qualifier). Resolved here and recorded for MIR lowering.
+            if name == "typeof" {
+                let [arg] = args else {
+                    self.errors.push(TypeError {
+                        message: format!("`typeof` takes 1 argument, found {}", args.len()),
+                        span,
+                    });
+                    for a in args {
+                        self.check_expr(&a.expr, scopes);
+                    }
+                    return Type::Str;
+                };
+                let arg_ty = self.check_expr(&arg.expr, scopes);
+                self.type_names
+                    .insert(span, self.resolve(&arg_ty).type_name());
+                return Type::Str;
+            }
             if name == "error" {
                 let err_ty = args
                     .first()
@@ -2374,6 +2678,17 @@ impl<'a> Checker<'a> {
         }
         if let Expr::Field(base, method, _) = callee {
             if let Some(qualifier) = self.static_qualifier(base, scopes) {
+                // A `typeof(v)` qualifier resolves to v's type NAME; record it at
+                // the inner `typeof(v)` span so MIR routes the static call (the
+                // same channel that folds a value-position `typeof` to its name).
+                if let Expr::Call(c, cargs, tspan) = &**base
+                    && matches!(&**c, Expr::Ident(n, _) if n == "typeof")
+                {
+                    for a in cargs {
+                        self.check_expr(&a.expr, scopes);
+                    }
+                    self.type_names.insert(*tspan, qualifier.clone());
+                }
                 let ret = self.check_static_call(&qualifier, method, args, span, scopes);
                 self.invalidate_narrowed_after_call(scopes);
                 return ret;
@@ -2384,6 +2699,24 @@ impl<'a> Checker<'a> {
             }
             if let Some(ret) = self.builtin_method_type(&recv_ty, method, args, scopes, span) {
                 return ret;
+            }
+            // A reflective `-> infer!` method is keyed by the caller's
+            // expectation: its result type is fixed per call site, and the
+            // driver generates a concrete specialization per key (this call is
+            // rewritten to it). The template body is not elaborated here.
+            if let Some(methods) = self.methods_for_type(&recv_ty, method)
+                && methods
+                    .first()
+                    .is_some_and(|m| prepoly_hir::keyed_return(m.method.ret.as_ref()))
+            {
+                return self.check_keyed_method_call(
+                    &recv_ty,
+                    method,
+                    args,
+                    span,
+                    call_expected.as_ref(),
+                    scopes,
+                );
             }
             if let Some(methods) = self.methods_for_type(&recv_ty, method) {
                 return self
@@ -2638,6 +2971,48 @@ impl<'a> Checker<'a> {
     /// method resolution): check the signature/arity/arguments, re-elaborate
     /// each candidate body, and produce the call's result type. Body errors are
     /// re-attributed to `reattribute_to` when given (a structural receiver's
+    /// Type a reflective `-> infer!` method call. The result is the caller's
+    /// expectation (unwrapped from a `Result`/nullable), wrapped as `key!`; the
+    /// (receiver, method, key) triple is recorded so the driver generates the
+    /// concrete specialization and rewrites this call to it. The template body
+    /// is not elaborated here (it is generic over the key).
+    fn check_keyed_method_call(
+        &mut self,
+        recv_ty: &Type,
+        method: &str,
+        args: &[Arg],
+        span: prepoly_lexer::Span,
+        expected: Option<&Type>,
+        scopes: &mut ScopeStack,
+    ) -> Type {
+        for a in args {
+            self.check_expr(&a.expr, scopes);
+        }
+        let key = match expected.map(|t| self.resolve(t)) {
+            Some(t) => match t.result_payloads() {
+                Some((ok, _)) => ok.clone(),
+                None => t,
+            },
+            None => {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "cannot infer the target type of `{method}`; annotate the \
+                         destination (e.g. `let x: T = value.{method}()!`)"
+                    ),
+                    span,
+                });
+                return self.fresh_unknown();
+            }
+        };
+        let recv_name = match prepoly_hir::peel_modes(&self.resolve(recv_ty)) {
+            Type::Record(n) | Type::Sum(n) => n.name.clone(),
+            other => other.type_name(),
+        };
+        self.keyed_calls
+            .insert(span, (recv_name, method.to_string(), key.clone()));
+        Type::result(key, Type::Str)
+    }
+
     /// value span), else to the call site for a foreign-module method.
     #[allow(clippy::too_many_arguments)]
     fn check_methods_call(
@@ -3727,6 +4102,23 @@ impl<'a> Checker<'a> {
             {
                 Some(self.resolve_self_name(name))
             }
+            // `typeof(v).method(..)`: `typeof(v)` names v's static type, so it is
+            // a static-call qualifier -- `typeof(v).from(x)` calls the `from` of
+            // v's type. The receiver's type must already be resolved to a
+            // nominal (or primitive) here; an open type has no name yet.
+            Expr::Call(callee, args, _)
+                if matches!(&**callee, Expr::Ident(n, _) if n == "typeof") =>
+            {
+                let [arg] = args.as_slice() else {
+                    return None;
+                };
+                let ty = self.static_arg_type(&arg.expr, scopes)?;
+                match prepoly_hir::peel_modes(&self.resolve(&ty)) {
+                    Type::Record(n) | Type::Sum(n) => Some(n.name.clone()),
+                    Type::Unknown(_) => None,
+                    other => Some(other.type_name()),
+                }
+            }
             Expr::Field(base, variant, _) => {
                 let Expr::Ident(type_name, _) = &**base else {
                     return None;
@@ -3747,6 +4139,18 @@ impl<'a> Checker<'a> {
 
     fn lookup(&self, scopes: &ScopeStack, name: &str) -> Option<Type> {
         scopes.iter().rev().find_map(|s| s.get(name).cloned())
+    }
+
+    /// The type of a `typeof(arg)` argument for static-qualifier resolution,
+    /// looked up without inference (so this stays `&self`): a bound variable's
+    /// type, or `self`'s. A general expression has no already-known type here
+    /// and is not a static qualifier.
+    fn static_arg_type(&self, arg: &Expr, scopes: &ScopeStack) -> Option<Type> {
+        match arg {
+            Expr::Ident(name, _) => self.lookup(scopes, name),
+            Expr::SelfExpr(_) => self.lookup(scopes, "self"),
+            _ => None,
+        }
     }
 
     /// Whether `name` denotes a legitimate value that needs no local binding: a
@@ -4102,6 +4506,23 @@ fn is_runtime_builtin_value(name: &str) -> bool {
 /// Whether `ty` is a fully known primitive with no user fields or methods.
 /// Field/method access on such a receiver cannot be deferred to runtime shape
 /// dispatch and is therefore a static error.
+/// Whether a type annotation contains a `typeof(v)` node (so its resolved type
+/// must be recorded for the back end rather than re-derived scope-free).
+fn contains_typeof(te: &TypeExpr) -> bool {
+    match te {
+        TypeExpr::TypeOf(..) => true,
+        TypeExpr::Nullable(i, _)
+        | TypeExpr::Array(i, _, _)
+        | TypeExpr::Fallible(i, _)
+        | TypeExpr::Mut(i, _)
+        | TypeExpr::Ref(i, _) => contains_typeof(i),
+        TypeExpr::Tuple(es, _) => es.iter().any(contains_typeof),
+        TypeExpr::Fun(ps, r, _) => ps.iter().any(contains_typeof) || contains_typeof(r),
+        TypeExpr::Anonymous(fs, _) => fs.iter().any(|(_, t)| contains_typeof(t)),
+        TypeExpr::Named(..) => false,
+    }
+}
+
 fn is_concrete_primitive(ty: &Type) -> bool {
     matches!(
         ty,
@@ -4439,9 +4860,62 @@ fn closure_write_targets_block(b: &Block) -> HashSet<String> {
     acc
 }
 
+/// Whether `block` (transitively, ignoring nested closures' parameter lists)
+/// re-binds `var` -- a `let`, a `for` variable, or a pattern binding of that
+/// name. Used to reject shadowing of a fields-loop variable, which is
+/// substituted textually into the expanded copies.
+fn block_rebinds(block: &Block, var: &str) -> bool {
+    fn pat_binds(pat: &Pattern, var: &str) -> bool {
+        match pat {
+            Pattern::Binding(n, _) => n == var,
+            Pattern::Array(ps, _) => ps.iter().any(|p| pat_binds(p, var)),
+            Pattern::Record(_, fields, _) => fields.iter().any(|f| match &f.pat {
+                Some(p) => pat_binds(p, var),
+                None => f.name == var,
+            }),
+            _ => false,
+        }
+    }
+    fn expr_rebinds(e: &Expr, var: &str) -> bool {
+        match e {
+            Expr::IfLet(pat, _, then, els, _) => {
+                pat_binds(pat, var)
+                    || block_rebinds(then, var)
+                    || els.as_ref().is_some_and(|e| expr_rebinds(e, var))
+            }
+            Expr::If(_, then, els, _) => {
+                block_rebinds(then, var) || els.as_ref().is_some_and(|e| expr_rebinds(e, var))
+            }
+            Expr::Match(_, arms, _) => arms
+                .iter()
+                .any(|a| pat_binds(&a.pattern, var) || expr_rebinds(&a.body, var)),
+            Expr::Block(b, _) => block_rebinds(b, var),
+            Expr::Closure(params, body, _) => {
+                params.iter().any(|p| p.name == var) || expr_rebinds(body, var)
+            }
+            _ => false,
+        }
+    }
+    block.stmts.iter().any(|stmt| match stmt {
+        Stmt::Let { pat, value, .. } => {
+            pat_binds(pat, var) || value.as_ref().is_some_and(|v| expr_rebinds(v, var))
+        }
+        Stmt::For {
+            var: v, body: b, ..
+        } => v == var || block_rebinds(b, var),
+        Stmt::While { body: b, .. } => block_rebinds(b, var),
+        Stmt::Expr(e) | Stmt::Return(Some(e), _) => expr_rebinds(e, var),
+        Stmt::Assign { value, .. } => expr_rebinds(value, var),
+        _ => false,
+    })
+}
+
 fn collect_closure_writes_stmt(stmt: &Stmt, in_closure: bool, acc: &mut HashSet<String>) {
     match stmt {
-        Stmt::Let { value, .. } => collect_closure_writes_expr(value, in_closure, acc),
+        Stmt::Let {
+            value: Some(value), ..
+        } => collect_closure_writes_expr(value, in_closure, acc),
+        Stmt::Let { value: None, .. } => {}
         Stmt::Assign { target, value, .. } => {
             if in_closure && let Expr::Ident(name, _) = target {
                 acc.insert(name.clone());
@@ -4554,7 +5028,7 @@ fn collect_closure_writes_expr(expr: &Expr, in_closure: bool, acc: &mut HashSet<
 /// `return` makes the arm non-foldable. Conservative: `true` when unsure.
 fn stmt_may_branch(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Let { value, .. } => expr_may_branch(value),
+        Stmt::Let { value, .. } => value.as_ref().is_some_and(expr_may_branch),
         Stmt::Assign { target, value, .. } => expr_may_branch(target) || expr_may_branch(value),
         Stmt::Expr(e) => expr_may_branch(e),
         Stmt::While { .. } | Stmt::For { .. } => true,

@@ -1,0 +1,1 @@
+`n` is captured by a closure before it is fully initialized
