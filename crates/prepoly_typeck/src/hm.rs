@@ -32,7 +32,7 @@ use prepoly_hir::{
 };
 use prepoly_lexer::Span;
 use prepoly_parser::ast::{BinOp, Block, Expr, Pattern, Stmt, StrSeg, UnaryOp};
-use prepoly_typesys::numeric_flows_into;
+use prepoly_typesys::{numeric_flows_into, strip_nullable};
 
 use crate::TypeError;
 use crate::solver::{InferenceVarKind, Scheme, Solver};
@@ -419,19 +419,11 @@ impl<'p> Hm<'p> {
         self.errors.push(TypeError { message, span });
     }
 
-    /// Unify with Prepoly's value-flow leniency, returning whether it succeeded.
-    /// A top-level nullable is stripped from each side (a `T` flows into a `T?` by
-    /// promotion and a guarded `T?` into a `T` by narrowing), and a fixed array,
-    /// slice, or array literal reconcile by element type (a `[1,2,3]` literal,
-    /// inferred as a slice, matches an `int32[3]` annotation). Deeper null- and
-    /// length-safety is the flow checker's concern, not unification's.
+    /// Unify with Prepoly's value-flow leniency, returning whether it
+    /// succeeded. The rule itself is `prepoly_typesys::flow_unify`, shared
+    /// with the JIT-time MIR checker so the two can never drift.
     fn flow_unify(&mut self, a: &Type, b: &Type) -> bool {
-        let a = strip_nullable(self.solver.resolve(a));
-        let b = strip_nullable(self.solver.resolve(b));
-        if let (Some(x), Some(y)) = (array_elem(&a), array_elem(&b)) {
-            return self.flow_unify(&x, &y);
-        }
-        self.solver.unify(&a, &b).is_ok()
+        prepoly_typesys::flow_unify(&mut self.solver, a, b)
     }
 
     /// Check that a value of type `have` may flow into a `want` position
@@ -878,7 +870,7 @@ impl<'p> Hm<'p> {
                             *span,
                         ),
                     }
-                    match array_elem(&resolved) {
+                    match prepoly_hir::index_element(&resolved) {
                         Some(elem) => elem,
                         None => {
                             if matches!(
@@ -1518,7 +1510,7 @@ impl<'p> Hm<'p> {
                         self.bind_pattern(p, ety);
                     }
                 } else {
-                    let elem = array_elem(&resolved)
+                    let elem = prepoly_hir::index_element(&resolved)
                         .unwrap_or_else(|| self.solver.fresh(InferenceVarKind::Source));
                     for p in pats {
                         self.bind_pattern(p, &elem);
@@ -1626,21 +1618,6 @@ fn expr_is_fallible(e: &Expr) -> bool {
         // A nested closure has its own fallibility; do not descend.
         _ => false,
     }
-}
-
-/// A nullable's element type (one level), else the type unchanged. Used so value
-/// flow treats `T` and `T?` as compatible.
-fn strip_nullable(ty: Type) -> Type {
-    match ty {
-        Type::Nullable(inner) => *inner,
-        other => other,
-    }
-}
-
-/// The element type of a slice or fixed array, if `ty` is one. Lets value flow
-/// reconcile slices, fixed arrays, and array literals by their elements.
-fn array_elem(ty: &Type) -> Option<Type> {
-    prepoly_hir::index_element(ty)
 }
 
 /// The compile-time value of a constant non-negative integer index expression

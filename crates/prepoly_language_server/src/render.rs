@@ -59,63 +59,12 @@ impl UnknownNamer {
 }
 
 /// Render a resolved type, mapping inference variables to `unknown_N`.
+///
+/// Delegates to the compiler's one type renderer (`Type::display_with`),
+/// injecting the hover numbering, so hover and diagnostics can never disagree
+/// on type syntax; only the inference-variable spelling differs.
 pub fn render_type(ty: &Type, namer: &mut UnknownNamer) -> String {
-    match ty {
-        Type::Bool => "bool".into(),
-        Type::Int(k) => k.name().into(),
-        Type::Float(k) => k.name().into(),
-        Type::Str => "string".into(),
-        Type::Void => "void".into(),
-        Type::Never => "never".into(),
-        Type::Record(n) | Type::Sum(n) => render_nominal(n, namer),
-        Type::Array(t, len) => format!("{}[{}]", render_type(t, namer), len),
-        Type::Slice(t) => format!("{}[]", render_type(t, namer)),
-        Type::Tuple(ts) => format!(
-            "[{}]",
-            ts.iter()
-                .map(|t| render_type(t, namer))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        Type::Fun(params, ret) => format!(
-            "({}) -> {}",
-            params
-                .iter()
-                .map(|p| render_type(p, namer))
-                .collect::<Vec<_>>()
-                .join(", "),
-            render_type(ret, namer)
-        ),
-        Type::Nullable(t) => format!("{}?", render_type(t, namer)),
-        Type::ConstOf(t) => format!("const {}", render_type(t, namer)),
-        Type::Mut(t) => format!("mut({})", render_type(t, namer)),
-        Type::Ref(t) => format!("ref({})", render_type(t, namer)),
-        Type::Unknown(id) => namer.named(*id),
-        Type::SelfType => "Self".into(),
-    }
-}
-
-/// Render a nominal type reference, recursing into a `Result` payload (or any
-/// substitution) so inference variables there are also numbered.
-fn render_nominal(n: &prepoly_hir::NominalType, namer: &mut UnknownNamer) -> String {
-    if let Some((ok, err)) = n.result_payloads() {
-        return format!(
-            "Result<{}, {}>",
-            render_type(ok, namer),
-            render_type(err, namer)
-        );
-    }
-    let mut subst: Vec<_> = n.substitution.iter().collect();
-    if subst.is_empty() {
-        return n.name().to_string();
-    }
-    subst.sort_by(|a, b| a.0.cmp(b.0));
-    let entries = subst
-        .into_iter()
-        .map(|(key, ty)| format!("{key}={}", render_type(ty, namer)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{}<{entries}>", n.name())
+    ty.display_with(&mut |id| namer.named(id))
 }
 
 /// Render a function or method signature as `fun name(p: T, ...) -> R`.

@@ -62,9 +62,17 @@ pub enum TypedExprKind {
     Index,
     ErrorPropagate,
     Closure,
-    Array,
+    Array {
+        /// Whether the literal has no elements. An empty literal's element
+        /// representation cannot be re-derived from element values, so its
+        /// checked type is the back end's only source (the seeding channel).
+        empty: bool,
+    },
     TypeLiteral(String),
-    VariantLiteral { ty: String, variant: String },
+    VariantLiteral {
+        ty: String,
+        variant: String,
+    },
     If,
     IfLet,
     Match,
@@ -89,7 +97,12 @@ impl TypedExprKind {
             Expr::Index(..) => Self::Index,
             Expr::ErrorProp(..) => Self::ErrorPropagate,
             Expr::Closure(..) => Self::Closure,
-            Expr::Array(..) | Expr::Range(..) => Self::Array,
+            Expr::Array(es, _) => Self::Array {
+                empty: es.is_empty(),
+            },
+            // A range is an array-valued expression; it always has bounds, so
+            // it is never an empty literal.
+            Expr::Range(..) => Self::Array { empty: false },
             Expr::TypeLit(name, ..) => Self::TypeLiteral(name.clone()),
             Expr::VariantLit(ty, variant, ..) => Self::VariantLiteral {
                 ty: ty.clone(),
@@ -138,7 +151,7 @@ impl TypedProgram {
             | TypedExprKind::Float
             | TypedExprKind::String
             | TypedExprKind::Bool
-            | TypedExprKind::Array
+            | TypedExprKind::Array { .. }
             | TypedExprKind::TypeLiteral(_)
             | TypedExprKind::VariantLiteral { .. } => Ownership::Local,
             _ => Ownership::Unknown,

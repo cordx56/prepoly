@@ -460,9 +460,14 @@ impl<'a, 'p> FnLower<'a, 'p> {
         // A literal whose checked element representation differs from what the
         // back end would re-derive (a nullable cell, a non-default numeric
         // width) carries that type onto its result local, so the elements are
-        // built at the annotated representation from the start.
+        // built at the annotated representation from the start. An EMPTY
+        // literal has no elements to derive from at all, so any recorded
+        // checked type (the channel only records fully-known ones for it) is
+        // its only source and is always carried.
         match self.ctx.expr_type(span) {
-            Some(ty) if array_element_needs_seed(ty) => self.b.emit_known(rv, ty.clone()),
+            Some(ty) if array_element_needs_seed(ty) || es.is_empty() => {
+                self.b.emit_known(rv, ty.clone())
+            }
             _ => self.b.emit(rv),
         }
     }

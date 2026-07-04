@@ -45,9 +45,16 @@ pub fn run(
     let mono = prepoly_engine::monomorphize(&mir, program)
         .map_err(|e| format!("typed lowering failed: {e}"))?;
     if program.functions.contains_key("main") && mono.lookup("main").is_none() {
-        return Err(
-            "program uses constructs outside the REPL runtime's supported subset".to_string(),
-        );
+        // `main_skip` is the first construct that made `main` untypeable --
+        // the diagnostic the user needs, same as the JIT engine's error path.
+        return Err(match &mono.main_skip {
+            Some(reason) => format!(
+                "program uses constructs outside the REPL runtime's supported subset: {reason}"
+            ),
+            None => {
+                "program uses constructs outside the REPL runtime's supported subset".to_string()
+            }
+        });
     }
     let mut interp = Interp::new(&mono, program, out);
     interp.run()

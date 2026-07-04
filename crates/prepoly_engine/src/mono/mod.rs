@@ -33,8 +33,10 @@ use prepoly_parser::ast::{BinOp, UnaryOp};
 use crate::mir_infer::{MirTypeError, Resolver, infer_body};
 
 mod boundary;
+mod closure;
 mod fold;
 mod rules;
+mod scan;
 mod symbols;
 
 pub use boundary::{
@@ -44,6 +46,11 @@ pub use boundary::{
 pub use fold::{cond_static_truthiness, reachable_blocks};
 pub use rules::binary_operand_type;
 pub(crate) use rules::unwrap_nullable;
+pub use scan::operand_type_of;
+
+// `is_comparison` lives with the constraint generator; re-exported here so the
+// monomorphizer's public API (and `prepoly_engine::is_comparison`) is unchanged.
+pub use crate::mir_infer::is_comparison;
 pub use symbols::{
     SYNTH_SIGIL, closure_symbol, instance_symbol, method_symbol, prim_method_instance,
     static_symbol,
@@ -52,6 +59,11 @@ pub use symbols::{
 use rules::{
     bin_validation_types, binary_operand_common, check_bin, const_type, is_supported,
     merge_return_types, resolve_nominal, variant_field_layoutable,
+};
+use scan::{
+    binding_name_of, body_has_error_source, collect_array_pushes, collect_closure_passes,
+    collect_indirect_args, collect_record_field_closures, method_ret_annotation,
+    propagated_result_returns, result_concrete_ok, seed_returned_aggregate,
 };
 use symbols::is_return_polymorphic_result;
 
@@ -193,11 +205,6 @@ fn result_type(ok: Type, err: Type) -> Type {
         "Result",
         subst,
     ))
-}
-
-/// Whether a type is a `Result`.
-fn is_result(ty: &Type) -> bool {
-    matches!(ty, Type::Sum(n) if n.id == RESULT_TYPE_ID)
 }
 
 /// The constant non-negative index carried by a tuple-position projection operand
@@ -699,6 +706,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                 for stmt in &block.stmts {
                     self.type_stmt(
                         stmt,
+                        body,
                         &sym,
                         module,
                         &indirect_args,
@@ -746,7 +754,18 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         let local_types = local_types
             .into_iter()
             .enumerate()
-            .map(|(i, t)| t.ok_or_else(|| format!("cannot infer type of local _{i} in `{sym}`")))
+            .map(|(i, t)| {
+                t.ok_or_else(|| {
+                    // Name the binding whose type stayed unknown; a bare local
+                    // index means nothing to the programmer.
+                    match binding_name_of(body, LocalId(i as u32)) {
+                        Some(n) => format!("cannot infer the type of `{n}` in `{sym}`"),
+                        None => format!(
+                            "cannot infer the type of an expression temporary (local _{i}) in `{sym}`"
+                        ),
+                    }
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         // A non-fallible callable with a non-null declared return cannot return an
@@ -927,10 +946,10 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn type_stmt(
         &mut self,
         stmt: &MirStmt,
+        body: &MirBody,
         cur_sym: &str,
         module: &[String],
         indirect_args: &HashMap<LocalId, Vec<Operand>>,
@@ -947,9 +966,23 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             MirStmt::Assign(local, Rvalue::Array(es)) if es.is_empty() => {
                 if local_types[local.index()].is_none() {
                     let Some(elem_op) = array_pushes.get(local) else {
-                        return Err(
-                            "empty array literal with no element type on the typed backend".into(),
-                        );
+                        let binding = match binding_name_of(body, *local) {
+                            Some(n) => format!(" bound to `{n}`"),
+                            None => String::new(),
+                        };
+                        // A synthetic symbol (an init body) means top-level
+                        // code; the wrapper already says so, and the mangled
+                        // name would only confuse.
+                        let context = if cur_sym.starts_with(SYNTH_SIGIL) {
+                            String::new()
+                        } else {
+                            format!(" (in `{cur_sym}`)")
+                        };
+                        return Err(format!(
+                            "the element type of the empty array literal{binding} is unknown: \
+                             annotate the binding (e.g. `let x: T[] = []`) or push a value into \
+                             it first{context}"
+                        ));
                     };
                     if let Some(elem) = self.operand_type(elem_op, local_types)? {
                         local_types[local.index()] = Some(Type::Slice(Box::new(elem)));
@@ -1330,12 +1363,12 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                 fields,
             } => {
                 if ty == "Result" {
-                    Ok(cur_ret.clone().filter(is_result))
+                    Ok(cur_ret.clone().filter(|t| t.is_result_type()))
                 } else {
                     self.variant_type(module, ty, variant, fields, local_types)
                 }
             }
-            Rvalue::Array(es) => self.array_type(es, local_types),
+            Rvalue::Array(es) => self.array_type(es, cur_sym, local_types),
             // A global read: its type is recorded when its init body is typed.
             Rvalue::Global(name) => Ok(self.global_types.get(name).cloned()),
             Rvalue::Closure { .. } => Err("closures are unsupported on the typed backend".into()),
@@ -1782,10 +1815,14 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
     fn array_type(
         &self,
         es: &[Operand],
+        cur_sym: &str,
         local_types: &[Option<Type>],
     ) -> Result<Option<Type>, String> {
         if es.is_empty() {
-            return Err("empty array literal has no element type on the typed backend".into());
+            return Err(format!(
+                "the element type of an empty array literal in expression position is unknown: \
+                 bind it first with an annotated `let` (e.g. `let x: T[] = []`) (in `{cur_sym}`)"
+            ));
         }
         let mut tys = Vec::with_capacity(es.len());
         for e in es {
@@ -1802,349 +1839,6 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         } else {
             Ok(Some(Type::Tuple(tys)))
         }
-    }
-
-    /// The closure's parameter types from its own annotations, when every parameter
-    /// is annotated. This types an *escaping* closure (returned, so neither called
-    /// in-body nor passed to a function) -- e.g. `make_accumulator`'s returned
-    /// `(amount: int32) -> ...`. `None` if any parameter is unannotated.
-    /// The declared parameter types of record `ty`'s field `field` when the
-    /// field is annotated with a concrete function type -- the typing source for
-    /// a closure stored into that field.
-    fn record_field_fun_params(
-        &self,
-        module: &[String],
-        ty: &str,
-        field: &str,
-    ) -> Option<Vec<Type>> {
-        let info = self.program.resolve_type(module, ty)?;
-        let TypeKind::Record { fields, .. } = &info.kind else {
-            return None;
-        };
-        let f = fields.iter().find(|f| f.name == field)?;
-        match f.resolved_ty.as_ref() {
-            Some(Type::Fun(params, _)) if params.iter().all(prepoly_hir::is_fully_known) => {
-                Some(params.clone())
-            }
-            _ => None,
-        }
-    }
-
-    /// Derive an unannotated closure's parameter types from its OWN body: seed
-    /// the capture locals with their (already resolved) types, lightly infer the
-    /// body, and read what each parameter is CALLED with. An indirect call
-    /// through a typed capture (`(x) -> func(g(x))` where `g: (int32) -> int32`
-    /// is captured) pins `x` even though nothing outside the closure calls it.
-    /// `None` when any parameter stays unpinned.
-    fn closure_params_from_body(&self, id: ClosureId, capture_types: &[Type]) -> Option<Vec<Type>> {
-        let clo = self.by_closure.get(&id)?;
-        let body = &clo.body;
-        let mut seeded: Vec<Option<Type>> = vec![None; body.locals.len()];
-        for (cap, t) in clo.captures.iter().zip(capture_types) {
-            seeded[cap.index()] = Some(t.clone());
-        }
-        for p in &body.params {
-            if let Some(t) = body.locals[p.index()].ty.as_known() {
-                seeded[p.index()] = Some(t.clone());
-            }
-        }
-        let lt = self.probe_local_types(body, seeded);
-        let mut out: Vec<Option<Type>> =
-            body.params.iter().map(|p| lt[p.index()].clone()).collect();
-        for block in &body.blocks {
-            for stmt in &block.stmts {
-                let (MirStmt::Assign(_, rv) | MirStmt::Eval(rv)) = stmt else {
-                    continue;
-                };
-                if let Rvalue::Call(Callee::Indirect(Operand::Local(g)), args) = rv
-                    && let Some(Type::Fun(ps, _)) = lt[g.index()].as_ref()
-                {
-                    for (a, pty) in args.iter().zip(ps) {
-                        if let Operand::Local(al) = a
-                            && let Some(slot) = body.params.iter().position(|p| p == al)
-                            && out[slot].is_none()
-                            && prepoly_hir::is_fully_known(pty)
-                        {
-                            out[slot] = Some(pty.clone());
-                        }
-                    }
-                }
-            }
-        }
-        out.into_iter().collect()
-    }
-
-    fn closure_annotated_params(&self, id: ClosureId) -> Option<Vec<Type>> {
-        let clo = self.by_closure.get(&id)?;
-        clo.params
-            .iter()
-            .map(|p| clo.body.locals[p.index()].ty.as_known().cloned())
-            .collect()
-    }
-
-    /// Type a closure local: its captures come from the creation site and its
-    /// parameter types from how it is used -- an in-body call (direct-call
-    /// closures), being passed to a higher-order function (the callee's use of
-    /// that parameter, recovered by probing), initializing a record field with a
-    /// declared function type (the field's signature), or, for an escaping
-    /// closure, its own parameter annotations. Also instantiates the closure
-    /// body. `None` while any operand type is still unresolved.
-    #[allow(clippy::too_many_arguments)]
-    fn closure_local_type(
-        &mut self,
-        id: ClosureId,
-        captures: &[Operand],
-        local: LocalId,
-        module: &[String],
-        indirect_args: &HashMap<LocalId, Vec<Operand>>,
-        closure_passes: &HashMap<LocalId, (String, Vec<Operand>, usize)>,
-        record_field_closures: &HashMap<LocalId, (LocalId, String, String)>,
-        local_types: &[Option<Type>],
-    ) -> Result<Option<Type>, String> {
-        let mut capture_types = Vec::with_capacity(captures.len());
-        for c in captures {
-            match self.operand_type(c, local_types)? {
-                Some(t) => capture_types.push(t),
-                None => return Ok(None),
-            }
-        }
-        // Parameter types: from a direct in-body call, else from a higher-order
-        // callee's use of the parameter the closure is passed as.
-        let param_types = if let Some(call_args) = indirect_args.get(&local) {
-            let mut pt = Vec::with_capacity(call_args.len());
-            for a in call_args {
-                match self.operand_type(a, local_types)? {
-                    Some(t) => pt.push(t),
-                    None => return Ok(None),
-                }
-            }
-            pt
-        } else if let Some((base, pass_args, idx)) = closure_passes.get(&local) {
-            match self.probe_callee_param_types(base, pass_args, *idx, local_types)? {
-                Some(pt) => pt,
-                // The probe cannot answer (the receiver is still untyped, or
-                // the callee never calls the parameter directly -- e.g. it only
-                // re-captures it into another closure). A fully annotated
-                // closure falls back to its own signature, which the checker
-                // has already verified against every use; an unannotated one
-                // waits for a later pass.
-                None => match self.closure_annotated_params(id) {
-                    Some(annotated) => annotated,
-                    None => return Ok(None),
-                },
-            }
-        } else if let Some(pt) = record_field_closures
-            .get(&local)
-            .and_then(|(dest, ty, field)| {
-                // The closure initializes a record field: the call contract is the
-                // field's declared function signature, or -- for an unannotated
-                // field -- the constructed instance's substitution entry when the
-                // checker seeded the destination local (`Iter { trans: (x) -> .. }`
-                // takes `trans`'s per-instance type from the seed).
-                self.record_field_fun_params(module, ty, field).or_else(|| {
-                    match local_types[dest.index()].as_ref() {
-                        Some(Type::Record(n)) => match n.substitution.get(field) {
-                            Some(Type::Fun(params, _))
-                                if params.iter().all(prepoly_hir::is_fully_known) =>
-                            {
-                                Some(params.clone())
-                            }
-                            _ => None,
-                        },
-                        _ => None,
-                    }
-                })
-            })
-        {
-            pt
-        } else if let Some(annotated) = self.closure_annotated_params(id) {
-            // An escaping closure (returned): type it from its own parameter
-            // annotations rather than a call/pass site.
-            annotated
-        } else if let Some(pt) = self.closure_params_from_body(id, &capture_types) {
-            // Derived from the closure's OWN body: an indirect call through a
-            // typed capture pins the parameter it is called with.
-            pt
-        } else {
-            return Err(format!(
-                "closure _{} is neither called nor passed to a function nor fully \
-                 annotated; unsupported on the typed backend",
-                local.index()
-            ));
-        };
-        let ret = self.instantiate_closure(id, &capture_types, &param_types)?;
-        Ok(Some(Type::Fun(param_types, Box::new(ret))))
-    }
-
-    /// Recover the parameter types of a closure passed to free function `base` as
-    /// argument `idx`: seed the callee's other parameters from the call's
-    /// arguments, lightly infer its local types, and read what the closure
-    /// parameter is called with inside the callee. `None` if not yet resolvable.
-    fn probe_callee_param_types(
-        &self,
-        base: &str,
-        pass_args: &[Operand],
-        idx: usize,
-        caller_local_types: &[Option<Type>],
-    ) -> Result<Option<Vec<Type>>, String> {
-        // `base` is the callee name. For a stdlib primitive/array method passed a
-        // closure (`arr.map(f)`), its body lives under the class-qualified symbol;
-        // for a user METHOD (`iter.map_lazy(f)`) it lives in the method table
-        // keyed by the receiver's type symbol. Both are recovered from the
-        // receiver argument (the first call operand).
-        let body = match self.by_fn.get(base) {
-            Some(f) => &f.body,
-            None => {
-                let recv_ty = pass_args
-                    .first()
-                    .and_then(|a| self.operand_type(a, caller_local_types).ok().flatten());
-                let prim = recv_ty
-                    .as_ref()
-                    .and_then(|t| t.primitive_class())
-                    .and_then(|class| {
-                        self.program
-                            .primitive_methods
-                            .get(&(class.to_string(), base.to_string()))
-                    })
-                    .and_then(|s| self.by_fn.get(s.as_str()))
-                    .map(|f| &f.body);
-                let user = recv_ty
-                    .as_ref()
-                    .map(unwrap_nullable)
-                    .and_then(|t| match t {
-                        Type::Record(n) | Type::Sum(n) => self.program.type_by_id(n.id),
-                        _ => None,
-                    })
-                    .and_then(|info| self.by_method.get(&(info.symbol.as_str(), base)))
-                    .map(|m| &m.body);
-                match prim.or(user) {
-                    Some(b) => b,
-                    None => return Ok(None),
-                }
-            }
-        };
-        let mut seeded: Vec<Option<Type>> = vec![None; body.locals.len()];
-        for (i, p) in body.params.iter().enumerate() {
-            if i == idx {
-                continue;
-            }
-            if let Some(arg) = pass_args.get(i) {
-                seeded[p.index()] = self.operand_type(arg, caller_local_types)?;
-            }
-        }
-        let lt = self.probe_local_types(body, seeded);
-        let Some(p_local) = body.params.get(idx) else {
-            return Ok(None);
-        };
-        let indirect = collect_indirect_args(body);
-        let Some(call_args) = indirect.get(p_local) else {
-            return Ok(None);
-        };
-        let mut pt = Vec::with_capacity(call_args.len());
-        for a in call_args {
-            match self.operand_type(a, &lt)? {
-                Some(t) => pt.push(t),
-                None => return Ok(None),
-            }
-        }
-        Ok(Some(pt))
-    }
-
-    /// A lightweight, non-instantiating fixpoint that resolves local types from
-    /// simple rvalues (uses, binary ops, field/element loads). Used to probe a
-    /// callee body without the side effects of full instantiation.
-    fn probe_local_types(&self, body: &MirBody, seeded: Vec<Option<Type>>) -> Vec<Option<Type>> {
-        let mut lt = seeded;
-        loop {
-            let mut changed = false;
-            for block in &body.blocks {
-                for stmt in &block.stmts {
-                    if let MirStmt::Assign(local, rv) = stmt
-                        && lt[local.index()].is_none()
-                        && let Some(t) = self.probe_rvalue_type(rv, &lt)
-                    {
-                        lt[local.index()] = Some(t);
-                        changed = true;
-                    }
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        lt
-    }
-
-    /// The type of a simple rvalue during a probe (no calls/constructions).
-    fn probe_rvalue_type(&self, rv: &Rvalue, lt: &[Option<Type>]) -> Option<Type> {
-        match rv {
-            Rvalue::Use(op) => self.operand_type(op, lt).ok().flatten(),
-            Rvalue::Bin(op, a, _) if is_comparison(*op) => {
-                // A comparison's operands must be resolvable for the result bool
-                // to be meaningful here.
-                self.operand_type(a, lt).ok().flatten()?;
-                Some(Type::Bool)
-            }
-            Rvalue::Bin(_, a, b) => self.binary_operand_type(a, b, lt).ok().flatten(),
-            Rvalue::Load(place) => match place.proj.as_slice() {
-                [Projection::Field(field)] => {
-                    match unwrap_nullable(lt.get(place.local.index())?.as_ref()?) {
-                        Type::Record(n) => self.record_field_type(n, field).ok().flatten(),
-                        Type::Sum(n) => self.sum_field_type(n, field).ok().flatten(),
-                        _ => None,
-                    }
-                }
-                [Projection::Index(_)] => {
-                    match unwrap_nullable(lt.get(place.local.index())?.as_ref()?) {
-                        Type::Slice(elem) | Type::Array(elem, _) => Some((**elem).clone()),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    /// Instantiate a closure body for one (capture-types, param-types) tuple
-    /// (memoized), returning its return type.
-    fn instantiate_closure(
-        &mut self,
-        id: ClosureId,
-        capture_types: &[Type],
-        param_types: &[Type],
-    ) -> Result<Type, String> {
-        let clo = *self
-            .by_closure
-            .get(&id)
-            .ok_or_else(|| format!("unknown closure {}", id.index()))?;
-        let sym = closure_symbol(id, capture_types, param_types);
-        if let Some(inst) = self.instances.get(&sym) {
-            return Ok(inst.ret.clone());
-        }
-        if self.in_progress.contains_key(&sym) {
-            return Err("recursive closures are unsupported on the typed backend".into());
-        }
-        let capture_seed: Vec<(LocalId, Type)> = clo
-            .captures
-            .iter()
-            .copied()
-            .zip(capture_types.iter().cloned())
-            .collect();
-        let stored = self.type_and_store(
-            sym,
-            &clo.body,
-            &clo.module,
-            param_types.to_vec(),
-            None,
-            None,
-            None,
-            &capture_seed,
-            clo.captures.clone(),
-            true,
-            false,
-        )?;
-        Ok(self.instances[&stored].ret.clone())
     }
 
     /// The concrete type of field `field` of sum type `n`: a generic `Result`
@@ -2239,336 +1933,6 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         }
         Ok(())
     }
-}
-
-/// The declared return type of a record method, if concrete.
-/// Seed the locals that flow into a body's returned record/variant from the
-/// expected return's field types. Used so a constructor's empty array fields take
-/// their element type from the result the caller fixed (the witness-free
-/// `new()`). Only fills locals still untyped, with supported field types, so it
-/// never overrides an inference the body itself can make.
-///
-/// A field value usually arrives through a `let` binding (`let items = []; Self
-/// { items: items }`), which lowers to a temporary holding the empty array and a
-/// binding local copied from it. Seeding only the binding would leave the actual
-/// empty-array temporary untyped, so the seed is propagated backward along
-/// `Use`-copy chains to reach it.
-fn seed_returned_aggregate(body: &MirBody, ret_ty: &Type, local_types: &mut [Option<Type>]) {
-    let returned: Vec<LocalId> = body
-        .blocks
-        .iter()
-        .filter_map(|b| match &b.term {
-            Terminator::Return(Operand::Local(r)) => Some(*r),
-            _ => None,
-        })
-        .collect();
-    if returned.is_empty() {
-        return;
-    }
-    // `dest -> src` for every `dest = Use(src)` copy, so a seed on a binding can
-    // be carried back to the temporary it copied.
-    let mut copy_of: HashMap<LocalId, LocalId> = HashMap::new();
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            if let MirStmt::Assign(dest, Rvalue::Use(Operand::Local(src))) = stmt {
-                copy_of.insert(*dest, *src);
-            }
-        }
-    }
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            let MirStmt::Assign(dest, rv) = stmt else {
-                continue;
-            };
-            if !returned.contains(dest) {
-                continue;
-            }
-            let fields = match rv {
-                Rvalue::Record { fields, .. } | Rvalue::Variant { fields, .. } => fields,
-                _ => continue,
-            };
-            for (fname, op) in fields {
-                let Operand::Local(fl) = op else { continue };
-                let Some(fty) = aggregate_field_type(ret_ty, fname) else {
-                    continue;
-                };
-                if !is_supported(&fty) {
-                    continue;
-                }
-                // Seed the field operand and every temporary it was copied from.
-                let mut cur = *fl;
-                loop {
-                    if local_types[cur.index()].is_none() {
-                        local_types[cur.index()] = Some(fty.clone());
-                    }
-                    match copy_of.get(&cur) {
-                        Some(&src) => cur = src,
-                        None => break,
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// A field's resolved type from an aggregate's instance substitution (the
-/// checker-resolved record/variant carries each field's concrete type there).
-fn aggregate_field_type(ty: &Type, field: &str) -> Option<Type> {
-    match ty {
-        Type::Record(n) | Type::Sum(n) => n.substitution.get(field).cloned(),
-        _ => None,
-    }
-}
-
-fn method_ret_annotation(program: &Program, type_symbol: &str, method: &str) -> Option<Type> {
-    let info = program.types.get(type_symbol)?;
-    let m = match &info.kind {
-        TypeKind::Record { methods, .. } => methods.get(method)?,
-        // A whole-sum method lives (duplicated) in the variants' tables; the
-        // checker keeps the signatures consistent, so the first is canonical.
-        TypeKind::Sum { variants } => variants.iter().find_map(|v| v.methods.get(method))?,
-    };
-    // The RAW annotation (unfiltered): a fallible `T!` resolves to
-    // `Result<T, Unknown>` whose open error payload is unsupported, but the Ok
-    // payload `T` is still authoritative -- `resolve_callable` needs it to type
-    // a mutually recursive call, and separately filters for the provisional.
-    m.signature.ret_ty.clone()
-}
-
-pub fn is_comparison(op: BinOp) -> bool {
-    matches!(
-        op,
-        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge
-    )
-}
-
-/// The concrete type of an operand in a fully-typed body.
-pub fn operand_type_of(op: &Operand, local_types: &[Type]) -> Type {
-    match op {
-        Operand::Local(id) => local_types[id.index()].clone(),
-        Operand::Const(lit) => const_type(lit).unwrap_or(Type::Void),
-    }
-}
-
-/// The concrete (supported) Ok payload of a `Result` return type fixed by a `T!`
-/// annotation, or `None` if `t` is not such a `Result` or its Ok payload is not
-/// yet concrete. Authoritative for the fallible return's Ok payload.
-fn result_concrete_ok(t: &Type) -> Option<Type> {
-    match t {
-        Type::Sum(n) if n.id == RESULT_TYPE_ID => n
-            .result_payloads()
-            .map(|(ok, _)| ok.clone())
-            .filter(is_supported),
-        _ => None,
-    }
-}
-
-/// The error arms created by `expr!` return the original Result value unchanged.
-/// Those synthetic returns carry only the `Err` payload for the enclosing
-/// callable; their `Ok` payload belongs to the callee that produced the Result.
-fn propagated_result_returns(body: &MirBody) -> HashSet<(usize, LocalId)> {
-    let mut tested_results: HashMap<LocalId, LocalId> = HashMap::new();
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            if let MirStmt::Assign(test, Rvalue::Call(Callee::Builtin(name), args)) = stmt
-                && name == "result_is_ok"
-                && let Some(Operand::Local(result)) = args.first()
-            {
-                tested_results.insert(*test, *result);
-            }
-        }
-    }
-
-    let mut returns = HashSet::new();
-    for block in &body.blocks {
-        if let Terminator::CondBranch {
-            cond: Operand::Local(test),
-            els,
-            ..
-        } = &block.term
-            && let Some(result) = tested_results.get(test)
-            && let Terminator::Return(Operand::Local(returned)) = body.block(*els).term
-            && returned == *result
-        {
-            returns.insert((els.index(), *result));
-        }
-    }
-    returns
-}
-
-/// Whether a fallible body actually raises an error: an `error(...)` (an `Err`
-/// construction) or an `expr!` propagation (a `result_is_ok` test). A body with
-/// neither never produces an `Err`, so its `Result` error payload is free.
-fn body_has_error_source(body: &MirBody) -> bool {
-    body.blocks.iter().any(|b| {
-        b.stmts.iter().any(|s| match s {
-            MirStmt::Assign(_, Rvalue::Variant { ty, variant, .. }) => {
-                ty == "Result" && variant == "Err"
-            }
-            MirStmt::Assign(_, Rvalue::Call(Callee::Builtin(n), _)) => n == "result_is_ok",
-            _ => false,
-        })
-    })
-}
-
-/// Scan a body for indirect (closure) calls, mapping each *defining* closure
-/// local to the argument operands of its call site. Used to type direct-call
-/// closures, whose parameter types come from the call rather than the
-/// definition. A `let g = <closure>` binds through a `Use` copy, so callee
-/// locals are resolved back through `Use` aliases to the local actually holding
-/// the `Closure` rvalue.
-fn collect_indirect_args(body: &MirBody) -> HashMap<LocalId, Vec<Operand>> {
-    let alias = use_aliases(body);
-    let mut out: HashMap<LocalId, Vec<Operand>> = HashMap::new();
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            let (MirStmt::Assign(_, rv) | MirStmt::Eval(rv)) = stmt else {
-                continue;
-            };
-            if let Rvalue::Call(Callee::Indirect(Operand::Local(g)), args) = rv {
-                out.entry(resolve_alias(&alias, *g))
-                    .or_insert_with(|| args.clone());
-            }
-            // `spawn`/`with` call their closure argument: `spawn(f)` invokes a
-            // zero-argument `f`; `with(obj, f)` invokes `f(obj)`. Recording the
-            // call shape here types the closure through the same path as any other
-            // directly-called closure.
-            if let Rvalue::Call(Callee::Builtin(name), args) = rv {
-                match name.as_str() {
-                    "spawn" => {
-                        if let Some(Operand::Local(c)) = args.first() {
-                            out.entry(resolve_alias(&alias, *c)).or_default();
-                        }
-                    }
-                    "with" => {
-                        if let (Some(obj), Some(Operand::Local(c))) = (args.first(), args.get(1)) {
-                            out.entry(resolve_alias(&alias, *c))
-                                .or_insert_with(|| vec![obj.clone()]);
-                        }
-                    }
-                    // `_with_all(f, c0, ...)` invokes a zero-argument `f` (the
-                    // guarded body references the cowns as captures, not params).
-                    "_with_all" => {
-                        if let Some(Operand::Local(c)) = args.first() {
-                            out.entry(resolve_alias(&alias, *c)).or_default();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Scan a body for locals stored as record-literal field values, mapping each
-/// (alias-resolved) defining local to `(destination local, record type name,
-/// field name)`. Used to type a closure that initializes a function-typed
-/// field: it is neither called in the body nor passed to a function, so its
-/// parameter types come from the field's declared signature, or -- for an
-/// unannotated field -- from the constructed instance's checker-seeded
-/// substitution on the destination local. Non-closure locals also land in the
-/// map; only closure typing consults it, so the extra entries are inert.
-fn collect_record_field_closures(body: &MirBody) -> HashMap<LocalId, (LocalId, String, String)> {
-    let alias = use_aliases(body);
-    let mut out: HashMap<LocalId, (LocalId, String, String)> = HashMap::new();
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            let MirStmt::Assign(dest, Rvalue::Record { ty, fields }) = stmt else {
-                continue;
-            };
-            for (fname, op) in fields {
-                if let Operand::Local(l) = op {
-                    out.entry(resolve_alias(&alias, *l))
-                        .or_insert_with(|| (*dest, ty.clone(), fname.clone()));
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Scan a body for locals passed as arguments to free-function calls, mapping
-/// each to `(callee, all call args, its argument index)`. Used to type a closure
-/// that is *passed* to a higher-order function (rather than called in place): its
-/// parameter types are recovered from how the callee uses that parameter.
-#[allow(clippy::type_complexity)]
-fn collect_closure_passes(body: &MirBody) -> HashMap<LocalId, (String, Vec<Operand>, usize)> {
-    let alias = use_aliases(body);
-    let mut out: HashMap<LocalId, (String, Vec<Operand>, usize)> = HashMap::new();
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            let (MirStmt::Assign(_, rv) | MirStmt::Eval(rv)) = stmt else {
-                continue;
-            };
-            // A closure passed to a free function, or to a UFCS method call
-            // (`arr.map(closure)` resolves to the free function `map`); both recover
-            // the closure's parameter types from the callee's use of it.
-            if let Rvalue::Call(Callee::Free(base) | Callee::Method(base), args) = rv {
-                for (i, a) in args.iter().enumerate() {
-                    if let Operand::Local(g) = a {
-                        // Resolve back through `Use` copies to the local that
-                        // actually holds the `Closure` (`let g = <closure>`).
-                        out.entry(resolve_alias(&alias, *g))
-                            .or_insert_with(|| (base.clone(), args.clone(), i));
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-/// type of an empty array literal `[]` from how it is later filled.
-fn collect_array_pushes(body: &MirBody) -> HashMap<LocalId, Operand> {
-    let alias = use_aliases(body);
-    let mut out: HashMap<LocalId, Operand> = HashMap::new();
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            let (MirStmt::Assign(_, rv) | MirStmt::Eval(rv)) = stmt else {
-                continue;
-            };
-            if let Rvalue::Call(Callee::Method(name), args) = rv {
-                // `push(arr, elem)` and `insert(arr, idx, elem)` both reveal the
-                // element type of an otherwise-unconstrained `[]` literal; the
-                // element operand is the last argument in each.
-                let elem = match name.as_str() {
-                    "push" => args.get(1),
-                    "insert" => args.get(2),
-                    _ => None,
-                };
-                if let (Some(Operand::Local(g)), Some(elem)) = (args.first(), elem) {
-                    out.entry(resolve_alias(&alias, *g))
-                        .or_insert_with(|| elem.clone());
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Map each `dst` of an `Assign(dst, Use(Local(src)))` to `src`.
-fn use_aliases(body: &MirBody) -> HashMap<LocalId, LocalId> {
-    let mut alias: HashMap<LocalId, LocalId> = HashMap::new();
-    for block in &body.blocks {
-        for stmt in &block.stmts {
-            if let MirStmt::Assign(dst, Rvalue::Use(Operand::Local(src))) = stmt {
-                alias.insert(*dst, *src);
-            }
-        }
-    }
-    alias
-}
-
-/// Follow a `Use`-alias chain to its root local.
-fn resolve_alias(alias: &HashMap<LocalId, LocalId>, mut l: LocalId) -> LocalId {
-    for _ in 0..alias.len() + 1 {
-        match alias.get(&l) {
-            Some(&s) => l = s,
-            None => break,
-        }
-    }
-    l
 }
 
 #[cfg(test)]

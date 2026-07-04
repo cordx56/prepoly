@@ -209,7 +209,7 @@ pub fn infer_body<R: Resolver>(
             let ot = t.operand_type(op);
             let ot_resolved = t.solver.resolve(&ot);
             let target = match &ok_payload {
-                Some(ok) if !is_result(&ot_resolved) => ok.clone(),
+                Some(ok) if !ot_resolved.is_result_type() => ok.clone(),
                 _ => r.clone(),
             };
             // Skip an implicit/empty `return` (a void operand) in a value-
@@ -326,18 +326,12 @@ impl BodyTyper {
         self.errors.push(MirTypeError { message });
     }
 
-    /// Unify with value-flow leniency: a top-level nullable is stripped from each
-    /// side (`T` flows into `T?` and a guarded `T?` into `T`), and a slice/fixed
-    /// array reconcile by element type. This mirrors the AST checker's
-    /// `flow_unify`, so the JIT-time check does not reject a flow the front end
-    /// already accepted.
+    /// Unify with value-flow leniency, so the JIT-time check does not reject a
+    /// flow the front end already accepted. The rule itself is
+    /// `prepoly_typesys::flow_unify`, shared with the HM checker so the two
+    /// can never drift.
     fn flow_unify(&mut self, a: &Type, b: &Type) -> bool {
-        let a = strip_nullable(self.solver.resolve(a));
-        let b = strip_nullable(self.solver.resolve(b));
-        if let (Some(x), Some(y)) = (array_elem(&a), array_elem(&b)) {
-            return self.flow_unify(&x, &y);
-        }
-        self.solver.unify(&a, &b).is_ok()
+        prepoly_typesys::flow_unify(&mut self.solver, a, b)
     }
 
     fn fresh(&mut self) -> Type {
@@ -507,40 +501,20 @@ impl BodyTyper {
     }
 }
 
-fn is_comparison(op: BinOp) -> bool {
+/// Whether a binary operator is a comparison (its result is `bool`, whatever
+/// its operand types are). Shared by the constraint generator, the
+/// monomorphizer, and the back ends (re-exported as `prepoly_engine::is_comparison`).
+pub fn is_comparison(op: BinOp) -> bool {
     matches!(
         op,
         BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge
     )
 }
 
-/// Whether a (resolved) type is the built-in `Result`.
-fn is_result(ty: &Type) -> bool {
-    matches!(ty, Type::Sum(n) if n.is_result_type())
-}
-
 /// The `Ok` payload of a `Result<ok, err>` type, if `ty` is one.
 fn result_ok_payload(ty: &Type) -> Option<Type> {
     match ty {
         Type::Sum(n) => n.result_payloads().map(|(ok, _)| ok.clone()),
-        _ => None,
-    }
-}
-
-/// A nullable's element type (one level), else the type unchanged -- so value
-/// flow treats `T` and `T?` as compatible.
-fn strip_nullable(ty: Type) -> Type {
-    match ty {
-        Type::Nullable(inner) => *inner,
-        other => other,
-    }
-}
-
-/// The element type of a slice or fixed array, letting value flow reconcile
-/// slices, fixed arrays, and array literals by their elements.
-fn array_elem(ty: &Type) -> Option<Type> {
-    match ty {
-        Type::Slice(e) | Type::Array(e, _) => Some((**e).clone()),
         _ => None,
     }
 }

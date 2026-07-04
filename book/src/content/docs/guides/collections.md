@@ -76,7 +76,7 @@ count  = 3
 joined = alice | bob | carol
 upper  = HELLO
 trimmed = 'spaced'
-starts  = prepoly
+starts  = true
 replace = a+b+c
 ```
 

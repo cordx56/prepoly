@@ -693,7 +693,7 @@ pub trait Codegen {
                     let op_ty = operand_type_of(op, &f.local_types);
                     // A fallible callable implicitly wraps a bare (non-Result)
                     // return value as `Result.Ok { value: v }`.
-                    if f.fallible && !is_result_ty(&op_ty) {
+                    if f.fallible && !op_ty.is_result_type() {
                         let ok_ty = result_ok_type(&f.ret);
                         let v = self.codegen_operand(program, f, op, &ok_ty);
                         let ret = f.ret.clone();
@@ -1752,11 +1752,6 @@ pub trait Codegen {
             Literal::Null => self.const_null(),
         }
     }
-}
-
-/// Whether a type is a `Result` (its bare returns are implicitly `Ok`-wrapped).
-fn is_result_ty(ty: &Type) -> bool {
-    matches!(ty, Type::Sum(n) if n.id == prepoly_hir::RESULT_TYPE_ID)
 }
 
 /// The `Ok` payload type of a `Result` return type (`void` if not a `Result`).

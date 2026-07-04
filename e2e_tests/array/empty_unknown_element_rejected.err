@@ -1,0 +1,3 @@
+the element type of the empty array literal bound to `xs` is unknown
+annotate the binding
+in `main`

@@ -59,10 +59,36 @@ enum Mode {
     Repl,
 }
 
+/// Host stack for the worker thread `main` delegates to. The REPL interpreter
+/// recurses natively once per Prepoly call (plus expression nesting inside each
+/// body), so its call-depth guard (`prepoly_repl`'s 8000-call limit) is only
+/// reachable when the stack holds that many interpreter activation records; the
+/// default 8 MiB main stack overflows first and aborts the process instead of
+/// surfacing the guard's clean error. The reservation is virtual memory — pages
+/// are committed only as the stack actually grows.
+#[cfg(not(target_family = "wasm"))]
+const MAIN_STACK_BYTES: usize = 256 * 1024 * 1024;
+
 fn main() -> ExitCode {
     // Shared across the prepoly binaries: PREPOLY_LOG (EnvFilter syntax) and
     // PREPOLY_LOG_TYPE (comma-separated named log types) select the output.
     prepoly_utils::init_tracing();
+    #[cfg(not(target_family = "wasm"))]
+    {
+        std::thread::Builder::new()
+            .name("prepoly-main".into())
+            .stack_size(MAIN_STACK_BYTES)
+            .spawn(run_cli)
+            .expect("failed to start the driver thread")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+    // WebAssembly has no threads; run on the embedder's stack.
+    #[cfg(target_family = "wasm")]
+    run_cli()
+}
+
+fn run_cli() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         // A bare file argument is type-checked and run; with neither a file nor a
@@ -474,8 +500,12 @@ fn aggregate_result_types(
             // An array literal is seeded only when its element representation
             // (a nullable cell, a non-default numeric width) cannot be
             // re-derived from the bare element values, so the checked type must
-            // flow into lowering. Other literals stay inferred.
-            TypedExprKind::Array => is_seedable_array(&e.ty),
+            // flow into lowering. Other literals stay inferred. An EMPTY
+            // literal has no element values at all, so any fully-known checked
+            // type (an annotation, or inference from a later use) is seeded.
+            TypedExprKind::Array { empty } => {
+                is_seedable_array(&e.ty) || (empty && is_seedable_empty_array(&e.ty))
+            }
             _ => false,
         };
         if !relevant {
@@ -635,6 +665,17 @@ fn is_seedable_array(ty: &prepoly_hir::Type) -> bool {
         _ => false,
     };
     needs_pin && is_fully_known(ty)
+}
+
+/// Whether an *empty* array literal's checked type is worth seeding: any
+/// fully-known slice/array. With no element values to derive from, the checked
+/// type is the back end's only possible source for the element representation
+/// (`let xs: int32[] = []` read before any push would otherwise be refused).
+fn is_seedable_empty_array(ty: &prepoly_hir::Type) -> bool {
+    matches!(
+        ty,
+        prepoly_hir::Type::Slice(_) | prepoly_hir::Type::Array(..)
+    ) && is_fully_known(ty)
 }
 
 use prepoly_hir::is_fully_known;

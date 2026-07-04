@@ -109,3 +109,33 @@ fn e2e_cases_produce_expected_output() {
         }
     }
 }
+
+/// The interpreter's call-depth guard must fire before the host stack
+/// overflows: runaway recursion through `prepoly repl` ends in the guard's
+/// clean error, not a process abort. (The JIT intentionally uses the native
+/// stack, so only the interpreter path is pinned here.)
+#[test]
+fn repl_deep_recursion_hits_the_depth_guard() {
+    let bin = env!("CARGO_BIN_EXE_prepoly");
+    let pp = Path::new(env!("CARGO_TARGET_TMPDIR")).join("repl_deep_recursion.pp");
+    fs::write(
+        &pp,
+        "fun f(n: int64) -> int64 {\n    if n == 0 { return 0 }\n    return f(n - 1)\n}\nprintln(f(20000))\n",
+    )
+    .expect("write recursion case");
+    let out = Command::new(bin)
+        .arg("repl")
+        .arg(&pp)
+        .output()
+        .expect("spawn prepoly");
+    assert!(
+        !out.status.success(),
+        "deep recursion was expected to fail cleanly\nstdout:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("call stack depth exceeded"),
+        "stderr did not contain the depth-guard error:\n{stderr}"
+    );
+}

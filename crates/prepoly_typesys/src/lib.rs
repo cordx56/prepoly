@@ -13,6 +13,7 @@ pub mod flow;
 pub mod rows;
 pub mod specialize;
 pub mod structural;
+pub mod valueflow;
 
 pub use convert::{InferFrom, infer_from};
 pub use defaults::default_constructible;
@@ -25,3 +26,4 @@ pub use structural::{
     record_satisfies, record_satisfies_fields, signature_satisfies, types_compatible,
     types_invariant,
 };
+pub use valueflow::{flow_unify, strip_nullable};

@@ -279,10 +279,17 @@ impl NominalType {
     }
 }
 
-impl fmt::Display for NominalType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl NominalType {
+    /// Render this reference with inference variables printed by `unknown`;
+    /// see [`Type::display_with`] for the contract shared with the language
+    /// server's hover renderer.
+    pub fn display_with(&self, unknown: &mut dyn FnMut(u32) -> String) -> String {
         if let Some((ok, err)) = self.result_payloads() {
-            return write!(f, "Result<{}, {}>", ok.display(), err.display());
+            return format!(
+                "Result<{}, {}>",
+                ok.display_with(unknown),
+                err.display_with(unknown)
+            );
         }
         // A structural/anonymous record has no declared name; render it as the
         // `anonymous { field: Type, ... }` form the programmer writes, so a
@@ -292,21 +299,27 @@ impl fmt::Display for NominalType {
             let fields = self
                 .substitution
                 .iter()
-                .map(|(key, ty)| format!("{key}: {}", ty.display()))
+                .map(|(key, ty)| format!("{key}: {}", ty.display_with(unknown)))
                 .collect::<Vec<_>>()
                 .join(", ");
-            return write!(f, "anonymous {{ {fields} }}");
+            return format!("anonymous {{ {fields} }}");
         }
         if self.substitution.is_empty() {
-            return f.write_str(&self.name);
+            return self.name.clone();
         }
         let entries = self
             .substitution
             .iter()
-            .map(|(key, ty)| format!("{key}={}", ty.display()))
+            .map(|(key, ty)| format!("{key}={}", ty.display_with(unknown)))
             .collect::<Vec<_>>()
             .join(", ");
-        write!(f, "{}<{entries}>", self.name)
+        format!("{}<{entries}>", self.name)
+    }
+}
+
+impl fmt::Display for NominalType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.display_with(&mut |_| "?".into()))
     }
 }
 
@@ -427,6 +440,15 @@ impl Type {
     }
 
     pub fn display(&self) -> String {
+        self.display_with(&mut |_| "?".into())
+    }
+
+    /// Render this type with inference variables printed by `unknown`. This is
+    /// the single source of type syntax for user-facing output: compiler
+    /// diagnostics print every variable as `?` (via [`Self::display`]), while
+    /// the language server numbers them `unknown_N` for hover. Everything else
+    /// renders identically for both, so diagnostics and hover agree.
+    pub fn display_with(&self, unknown: &mut dyn FnMut(u32) -> String) -> String {
         match self {
             Type::Bool => "bool".into(),
             Type::Int(k) => k.name().into(),
@@ -434,29 +456,29 @@ impl Type {
             Type::Str => "string".into(),
             Type::Void => "void".into(),
             Type::Never => "never".into(),
-            Type::Record(n) | Type::Sum(n) => n.to_string(),
-            Type::Array(t, n) => format!("{}[{}]", t.display(), n),
-            Type::Slice(t) => format!("{}[]", t.display()),
+            Type::Record(n) | Type::Sum(n) => n.display_with(unknown),
+            Type::Array(t, n) => format!("{}[{}]", t.display_with(unknown), n),
+            Type::Slice(t) => format!("{}[]", t.display_with(unknown)),
             Type::Tuple(ts) => format!(
                 "[{}]",
                 ts.iter()
-                    .map(|t| t.display())
+                    .map(|t| t.display_with(unknown))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
             Type::Fun(ps, r) => format!(
                 "({}) -> {}",
                 ps.iter()
-                    .map(|p| p.display())
+                    .map(|p| p.display_with(unknown))
                     .collect::<Vec<_>>()
                     .join(", "),
-                r.display()
+                r.display_with(unknown)
             ),
-            Type::Nullable(t) => format!("{}?", t.display()),
-            Type::ConstOf(t) => format!("const {}", t.display()),
-            Type::Mut(t) => format!("mut({})", t.display()),
-            Type::Ref(t) => format!("ref({})", t.display()),
-            Type::Unknown(_) => "?".into(),
+            Type::Nullable(t) => format!("{}?", t.display_with(unknown)),
+            Type::ConstOf(t) => format!("const {}", t.display_with(unknown)),
+            Type::Mut(t) => format!("mut({})", t.display_with(unknown)),
+            Type::Ref(t) => format!("ref({})", t.display_with(unknown)),
+            Type::Unknown(id) => unknown(*id),
             Type::SelfType => "Self".into(),
         }
     }

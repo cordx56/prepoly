@@ -332,7 +332,7 @@ type Map = {
 fields) of a record, yielding a concrete instance. Written as the right-hand
 side of an alias declaration it gives that instance a name:
 
-```prepoly
+```prepoly norun
 type StringInts = Map { key: string, value: int64 }
 ```
 

@@ -117,11 +117,13 @@ fn is_supported_rec(ty: &Type, visiting: &mut HashSet<i32>) -> bool {
             // A bare reference (empty substitution -- a field's declared nominal
             // type, or a sum variant binding) is a supported heap pointer; its own
             // field concreteness is validated when the record is monomorphized as a
-            // value. A substituted (constructed/generic) record additionally
-            // requires every field type to be supported. This mirrors how a `Sum`
-            // is trusted as a pointer below.
-            let ok = !n.substitution.is_empty()
-                && n.substitution
+            // value. A fieldless record (`type Empty = {}`) also lands here: its
+            // substitution is empty even when constructed, and an empty layout is
+            // trivially supported. A substituted (constructed/generic) record
+            // additionally requires every field type to be supported. This mirrors
+            // how a `Sum` is trusted as a pointer below.
+            let ok = n.substitution.is_empty()
+                || n.substitution
                     .iter()
                     .all(|(_, t)| is_supported_rec(t, visiting));
             visiting.remove(&n.id);
