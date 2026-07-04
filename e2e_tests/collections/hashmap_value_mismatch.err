@@ -1,1 +1,1 @@
-call to `set` here does not match the receiver's type
+cannot use `int32` where `string` is required

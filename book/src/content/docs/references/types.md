@@ -33,6 +33,11 @@ is not writable in source.
   is fine, `let b: int8 = 300` is a compile error (never a silent wrap). A
   float literal adapts to either float width; an integer literal in a float
   context becomes a float.
+- The required type can also come from a container the value flows into: a
+  bare integer literal passed to a method of a map whose value type is pinned
+  to `int64` (by a first store or a refinement annotation) is checked against
+  `int64`, so it types as `int64` rather than defaulting to `int32` (and an
+  `int32` value widens at the call).
 - `INT64_MIN` cannot be written as one literal (`-9223372036854775808`
   overflows before the minus applies); the prelude constant exists instead.
 
@@ -338,6 +343,11 @@ type StringInts = Map { key: string, value: int64 }
 - The alias is not a new nominal — it unifies with any matching instance, so a
   witness-free value built by the container's constructor is accepted where the
   refined type is annotated.
+- Annotating a binding with the alias pins the container's types up front, so
+  `let m: Counts = HashMap.new()` (with `type Counts = HashMap { key: string,
+  value: int64 }`) is a usable `string -> int64` map: subsequent stores are
+  checked against the pinned value type, so a bare integer literal or an int32
+  value stores as int64.
 
 Field types are resolved like Hindley–Milner inference: each field and slot is
 assigned a type variable and `Self.field` resolves to it. A field whose type

@@ -220,9 +220,12 @@ fn resolve_annotations(program: &Program) -> Vec<TypeError> {
         // A `type Alias = ..` name validates as its target's nominal kind (the
         // pure resolver only needs to know the name denotes some type; the
         // checker's `resolve_named` expands the alias to its full instance).
-        if let Some(alias) =
-            prepoly_hir::resolve_qualified(&program.type_aliases, &program.import_origins, module, name)
-        {
+        if let Some(alias) = prepoly_hir::resolve_qualified(
+            &program.type_aliases,
+            &program.import_origins,
+            module,
+            name,
+        ) {
             return match &alias.ty {
                 prepoly_hir::Type::Record(n) => Some(NominalInfo::record(n.id)),
                 prepoly_hir::Type::Sum(n) => Some(NominalInfo::sum(n.id)),

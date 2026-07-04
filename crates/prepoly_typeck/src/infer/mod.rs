@@ -46,6 +46,13 @@ struct MethodCall<'a> {
     declared_ret: Option<Type>,
     fallback_ret: Type,
     arg_types: &'a [Type],
+    /// For each non-`self` parameter, the type it instantiates to for this
+    /// receiver instance (from the type's scheme), when fully known. An
+    /// unannotated parameter takes this over the argument's own type, so the
+    /// body sees the receiver-pinned type (a `string -> int64` map's `set`
+    /// value is `int64`, not the `int32` a bare literal argument would default
+    /// to) and the argument widens at the call boundary.
+    scheme_params: &'a [Option<Type>],
 }
 
 #[derive(Clone)]
@@ -813,9 +820,9 @@ impl<'a> Checker<'a> {
             }
             // `Self.field` names a field's type; it is meaningful only inside a
             // type declaration, resolved during lowering, not in a value position.
-            TypeExpr::SelfField(field, _) => {
-                Err(format!("`Self.{field}` is only valid inside a type declaration"))
-            }
+            TypeExpr::SelfField(field, _) => Err(format!(
+                "`Self.{field}` is only valid inside a type declaration"
+            )),
         }
     }
 
@@ -836,7 +843,9 @@ impl<'a> Checker<'a> {
             .resolve_type(&self.current_module, bname)
             .ok_or_else(|| format!("unknown type `{bname}` in refinement"))?;
         let TypeKind::Record { fields, .. } = &info.kind else {
-            return Err(format!("`{bname}` is not a record type and cannot be refined"));
+            return Err(format!(
+                "`{bname}` is not a record type and cannot be refined"
+            ));
         };
         let (id, name) = (info.id, info.name.clone());
         let slots = info.slots.clone();
@@ -845,7 +854,8 @@ impl<'a> Checker<'a> {
             .map(|f| (f.name.clone(), f.resolved_ty.clone()))
             .collect();
         // Pin each entry to a resolved type: a slot variable, or a field override.
-        let mut slot_pins: std::collections::BTreeMap<u32, Type> = std::collections::BTreeMap::new();
+        let mut slot_pins: std::collections::BTreeMap<u32, Type> =
+            std::collections::BTreeMap::new();
         let mut field_pins: std::collections::HashMap<String, Type> =
             std::collections::HashMap::new();
         for (fname, fte) in entries {
@@ -873,7 +883,15 @@ impl<'a> Checker<'a> {
         // Every slot variable maps to its pin, or a fresh unknown when omitted.
         let slot_map: std::collections::BTreeMap<u32, Type> = slots
             .iter()
-            .map(|(_, v)| (*v, slot_pins.get(v).cloned().unwrap_or_else(|| self.fresh_unknown())))
+            .map(|(_, v)| {
+                (
+                    *v,
+                    slot_pins
+                        .get(v)
+                        .cloned()
+                        .unwrap_or_else(|| self.fresh_unknown()),
+                )
+            })
             .collect();
         let mut subst = Substitution::empty();
         for (fname, declared) in base_fields {
@@ -886,7 +904,9 @@ impl<'a> Checker<'a> {
             };
             subst.insert(fname, ty);
         }
-        Ok(Type::Record(NominalType::with_substitution(id, name, subst)))
+        Ok(Type::Record(NominalType::with_substitution(
+            id, name, subst,
+        )))
     }
 
     fn resolve_named(&mut self, name: &str) -> Result<Type, String> {
@@ -1107,6 +1127,21 @@ impl<'a> Checker<'a> {
                     match self.resolve_annotation_scoped(te, scopes) {
                         Ok(annotated) => {
                             let got = self.check_expr_against(value, &annotated, scopes);
+                            // Pin an open constructor result to the annotation, so
+                            // the back end seeds the concrete instance: `let m: SI =
+                            // HashMap.new()` fixes the witness-free map's key/value
+                            // from `SI` (its inferred fields would otherwise stay
+                            // open and its slot array read as `never`). Same-nominal
+                            // only, rolled back on a genuine mismatch (already
+                            // reported by `check_expr_against`).
+                            let g = self.resolve(&got);
+                            let a = self.resolve(&annotated);
+                            if same_nominal_instance(&g, &a) {
+                                let snap = self.solver.snapshot();
+                                if self.solver.unify(&got, &annotated).is_err() {
+                                    self.solver.rollback(snap);
+                                }
+                            }
                             self.instantiate_annotated_type(&annotated, &got)
                         }
                         Err(message) => {
@@ -3150,7 +3185,20 @@ impl<'a> Checker<'a> {
             first_signature.params.clone()
         };
         self.check_arg_count(method, signature_params.len(), args.len(), span);
-        let arg_types = self.check_signature_args_collect(&signature_params, args, scopes);
+        // The types this receiver instance pins each parameter to (its scheme):
+        // a witness-free `string -> int64` map's `set` value is `int64`. Checking
+        // arguments against these lets a bare literal take the pinned width.
+        let scheme_params = if skip_self {
+            self.scheme_method_param_types(recv_ty, method)
+        } else {
+            Vec::new()
+        };
+        let arg_types = self.check_signature_args_collect_expected(
+            &signature_params,
+            args,
+            &scheme_params,
+            scopes,
+        );
         // A method defined in another module (e.g. the stdlib) is checked by
         // re-elaborating its body with this call's concrete types. When the
         // call's argument types are inconsistent with the receiver's
@@ -3189,6 +3237,7 @@ impl<'a> Checker<'a> {
                 declared_ret,
                 fallback_ret,
                 arg_types: &arg_types,
+                scheme_params: &scheme_params,
             }));
         }
         if self.errors.len() > before {
@@ -3459,6 +3508,8 @@ impl<'a> Checker<'a> {
                 declared_ret,
                 fallback_ret,
                 arg_types: &arg_types,
+                // A static call has no receiver instance to pin parameters.
+                scheme_params: &[],
             });
         }
         args.iter().for_each(|a| {
@@ -3597,11 +3648,31 @@ impl<'a> Checker<'a> {
         args: &[Arg],
         scopes: &mut ScopeStack,
     ) -> Vec<Type> {
+        self.check_signature_args_collect_expected(params, args, &[], scopes)
+    }
+
+    /// Check a call's arguments, preferring the receiver-instantiated parameter
+    /// type from the type's scheme (`scheme_params`) over the parameter's own
+    /// annotation. This lets an argument to a witness-free container method take
+    /// the receiver's pinned type: a bare integer literal `set` into a
+    /// `string -> int64` map is checked against `int64` (so it types as int64
+    /// rather than defaulting to int32), and an int32 argument widens at the
+    /// call boundary.
+    fn check_signature_args_collect_expected(
+        &mut self,
+        params: &[ParamInfo],
+        args: &[Arg],
+        scheme_params: &[Option<Type>],
+        scopes: &mut ScopeStack,
+    ) -> Vec<Type> {
         let mut arg_types = Vec::with_capacity(args.len());
         for (idx, arg) in args.iter().enumerate() {
-            let want = params.get(idx).and_then(param_expected_type);
-            let got = if let Some(want) = want {
-                self.check_expr_against(&arg.expr, want, scopes)
+            let want = scheme_params
+                .get(idx)
+                .and_then(|o| o.as_ref())
+                .or_else(|| params.get(idx).and_then(param_expected_type));
+            let got = if let Some(want) = want.cloned() {
+                self.check_expr_against(&arg.expr, &want, scopes)
             } else {
                 self.check_expr(&arg.expr, scopes)
             };
@@ -4629,7 +4700,9 @@ fn contains_typeof(te: &TypeExpr) -> bool {
         TypeExpr::Tuple(es, _) => es.iter().any(contains_typeof),
         TypeExpr::Fun(ps, r, _) => ps.iter().any(contains_typeof) || contains_typeof(r),
         TypeExpr::Anonymous(fs, _) => fs.iter().any(|(_, t)| contains_typeof(t)),
-        TypeExpr::Refine(b, fs, _) => contains_typeof(b) || fs.iter().any(|(_, t)| contains_typeof(t)),
+        TypeExpr::Refine(b, fs, _) => {
+            contains_typeof(b) || fs.iter().any(|(_, t)| contains_typeof(t))
+        }
         TypeExpr::Named(..) | TypeExpr::TypeSlot(..) | TypeExpr::SelfField(..) => false,
     }
 }
@@ -4639,6 +4712,18 @@ fn is_concrete_primitive(ty: &Type) -> bool {
         ty,
         Type::Int(_) | Type::Float(_) | Type::Bool | Type::Str | Type::Void
     )
+}
+
+/// Whether two types are records (or sums) of the same declared nominal -- so
+/// unifying them only reconciles their shared field types (pinning one's open
+/// fields from the other) rather than relating unrelated types.
+fn same_nominal_instance(a: &Type, b: &Type) -> bool {
+    match (a, b) {
+        (Type::Record(x), Type::Record(y)) | (Type::Sum(x), Type::Sum(y)) => {
+            x.id == y.id && (x.id >= 0 || x.name == y.name)
+        }
+        _ => false,
+    }
 }
 
 /// Whether a (resolved) type is fully concrete: it contains no inference

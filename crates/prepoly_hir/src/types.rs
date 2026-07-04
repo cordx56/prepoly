@@ -549,15 +549,17 @@ fn resolve_inner(
         TypeExpr::TypeSlot(_) => {
             Err("`type` may only appear as a field's whole declared type".into())
         }
-        TypeExpr::SelfField(field, _) => {
-            Err(format!("`Self.{field}` may only appear inside a type declaration"))
-        }
+        TypeExpr::SelfField(field, _) => Err(format!(
+            "`Self.{field}` may only appear inside a type declaration"
+        )),
         TypeExpr::Refine(base, _, _) => {
             let base = match base.as_ref() {
                 TypeExpr::Named(n, _) => n.clone(),
                 _ => "<type>".into(),
             };
-            Err(format!("a `{base} {{ .. }}` refinement is resolved only in a type declaration"))
+            Err(format!(
+                "a `{base} {{ .. }}` refinement is resolved only in a type declaration"
+            ))
         }
     }
 }

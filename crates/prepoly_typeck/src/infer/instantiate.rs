@@ -34,7 +34,8 @@ impl<'a> Checker<'a> {
         // Re-check the callee body in its own module so its internal names
         // resolve under that module's visibility, not the caller's.
         let saved_module = std::mem::replace(&mut self.current_module, module.to_vec());
-        let frame = self.signature_call_frame(params, arg_types, None);
+        // A free function has no receiver instance, so no scheme parameters.
+        let frame = self.signature_call_frame(params, arg_types, &[], None);
         let mut scopes = vec![frame.clone()];
         let full_ret = self.check_block_root(body, &mut scopes, declared_ret.as_ref());
         let ret = match declared_ret {
@@ -73,6 +74,47 @@ impl<'a> Checker<'a> {
     /// still has an open parameter the instance did not pin (a parameter that only
     /// flows through `==`, never a store or field read) -- the caller then keeps
     /// the re-elaborated return.
+    /// For a method call on a scheme'd record receiver, the type each non-`self`
+    /// parameter instantiates to for this receiver instance -- the map's `set`
+    /// value parameter becomes `int64` for a `string -> int64` map. `Some(t)`
+    /// only when the receiver pins the parameter to a fully-known type; a
+    /// parameter the instance leaves open (or a non-record/non-scheme receiver)
+    /// yields `None`, so the caller falls back to the argument's own type. The
+    /// result is aligned with the call's arguments (the receiver's `self` is not
+    /// included).
+    pub(super) fn scheme_method_param_types(
+        &self,
+        recv_ty: &Type,
+        method: &str,
+    ) -> Vec<Option<Type>> {
+        let mut t = self.resolve(recv_ty);
+        while let Type::Ref(i) | Type::Mut(i) | Type::ConstOf(i) | Type::Nullable(i) = t {
+            t = *i;
+        }
+        let Type::Record(nominal) = t else {
+            return Vec::new();
+        };
+        let Some(info) = self.program.type_by_id(nominal.id) else {
+            return Vec::new();
+        };
+        let Some(scheme) = self.schemes.get(&info.name) else {
+            return Vec::new();
+        };
+        let Some(scheme_method) = scheme.methods.get(method) else {
+            return Vec::new();
+        };
+        let map = scheme_instance_map(scheme, &nominal);
+        scheme_method
+            .params
+            .iter()
+            .filter(|(name, _)| name != "self")
+            .map(|(_, ty)| {
+                let inst = apply_scheme_param_map(ty, &map);
+                self.solver.free_vars(&inst).is_empty().then_some(inst)
+            })
+            .collect()
+    }
+
     pub(super) fn scheme_method_return(&self, recv_ty: &Type, method: &str) -> Option<Type> {
         let mut t = self.resolve(recv_ty);
         while let Type::Ref(i) | Type::Mut(i) | Type::ConstOf(i) | Type::Nullable(i) = t {
@@ -103,6 +145,7 @@ impl<'a> Checker<'a> {
             declared_ret,
             fallback_ret,
             arg_types,
+            scheme_params,
         } = call;
         let has_self = signature_params.first().is_some_and(|p| p.name == "self");
         if signature_params.len().saturating_sub(usize::from(has_self)) != arg_types.len() {
@@ -121,7 +164,8 @@ impl<'a> Checker<'a> {
         let owner_type = self_type.to_string();
         let saved_module =
             self.swap_module_for(|p| p.types.get(&owner_type).map(|t| t.module.clone()));
-        let frame = self.signature_call_frame(signature_params, arg_types, receiver_ty);
+        let frame =
+            self.signature_call_frame(signature_params, arg_types, scheme_params, receiver_ty);
         let full_ret = if let Some(body) = &method.body {
             let mut scopes = vec![frame.clone()];
             self.check_block_root(body, &mut scopes, declared_ret.as_ref())
@@ -144,6 +188,7 @@ impl<'a> Checker<'a> {
         &mut self,
         params: &[ParamInfo],
         arg_types: &[Type],
+        scheme_params: &[Option<Type>],
         receiver_ty: Option<Type>,
     ) -> HashMap<String, Type> {
         // Re-checking a callee body sees top-level globals; signature
@@ -171,9 +216,14 @@ impl<'a> Checker<'a> {
                 arg_idx += 1;
                 ty
             } else {
-                let ty = arg_types
+                // An unannotated parameter takes the receiver-instantiated type
+                // (from the scheme) when the instance pins it, so the body sees
+                // the map's actual value type rather than an argument's default;
+                // otherwise it takes the argument's own type.
+                let ty = scheme_params
                     .get(arg_idx)
-                    .cloned()
+                    .and_then(|o| o.clone())
+                    .or_else(|| arg_types.get(arg_idx).cloned())
                     .or_else(|| param.resolved_ty.clone())
                     .unwrap_or_else(|| self.fresh_unknown());
                 arg_idx += 1;

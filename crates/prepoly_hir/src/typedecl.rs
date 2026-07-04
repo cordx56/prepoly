@@ -24,8 +24,8 @@ use std::collections::BTreeMap;
 
 use crate::hir::{Program, TypeAlias, TypeKind};
 use crate::types::{
-    INFER_VAR, NominalInfo, NominalType, Substitution, Type, freshen_infer, is_fully_known, resolve,
-    substitute_vars,
+    INFER_VAR, NominalInfo, NominalType, Substitution, Type, freshen_infer, is_fully_known,
+    resolve, substitute_vars,
 };
 
 /// Static metadata about one type, gathered before resolution so a refinement
@@ -70,15 +70,18 @@ pub(crate) fn resolve_type_decls(
     type FieldDecls = Vec<(String, Option<TypeExpr>)>;
     let mut meta: HashMap<String, TypeMeta> = HashMap::new();
     for (symbol, info) in program.types.iter() {
-        let (is_record, slot_names, field_texprs): (bool, Vec<String>, FieldDecls) = match &info.kind
-        {
-            TypeKind::Record { fields, .. } => (
-                true,
-                info.slots.iter().map(|(n, _)| n.clone()).collect(),
-                fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect(),
-            ),
-            TypeKind::Sum { .. } => (false, Vec::new(), Vec::new()),
-        };
+        let (is_record, slot_names, field_texprs): (bool, Vec<String>, FieldDecls) =
+            match &info.kind {
+                TypeKind::Record { fields, .. } => (
+                    true,
+                    info.slots.iter().map(|(n, _)| n.clone()).collect(),
+                    fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect(),
+                ),
+                TypeKind::Sum { .. } => (false, Vec::new(), Vec::new()),
+            };
         let slots = slot_names
             .into_iter()
             .map(|n| {
@@ -126,8 +129,7 @@ pub(crate) fn resolve_type_decls(
         .collect();
     let mut field_results: HashMap<(String, String), Type> = HashMap::new();
     for sym in &record_syms {
-        let field_names: Vec<String> =
-            meta[sym].fields.iter().map(|(n, _, _)| n.clone()).collect();
+        let field_names: Vec<String> = meta[sym].fields.iter().map(|(n, _, _)| n.clone()).collect();
         for fname in field_names {
             let ty = resolver.resolve_field(sym, &fname);
             field_results.insert((sym.clone(), fname), ty);
@@ -263,16 +265,27 @@ impl Resolver<'_> {
             TypeExpr::Nullable(inner, _) => {
                 Type::Nullable(Box::new(self.resolve_texpr(owner, module, inner)))
             }
-            TypeExpr::Fallible(inner, _) => {
-                Type::result(self.resolve_texpr(owner, module, inner), Type::Unknown(INFER_VAR))
+            TypeExpr::Fallible(inner, _) => Type::result(
+                self.resolve_texpr(owner, module, inner),
+                Type::Unknown(INFER_VAR),
+            ),
+            TypeExpr::Mut(inner, _) => {
+                Type::Mut(Box::new(self.resolve_texpr(owner, module, inner)))
             }
-            TypeExpr::Mut(inner, _) => Type::Mut(Box::new(self.resolve_texpr(owner, module, inner))),
-            TypeExpr::Ref(inner, _) => Type::Ref(Box::new(self.resolve_texpr(owner, module, inner))),
+            TypeExpr::Ref(inner, _) => {
+                Type::Ref(Box::new(self.resolve_texpr(owner, module, inner)))
+            }
             TypeExpr::Tuple(elems, _) => Type::Tuple(
-                elems.iter().map(|e| self.resolve_texpr(owner, module, e)).collect(),
+                elems
+                    .iter()
+                    .map(|e| self.resolve_texpr(owner, module, e))
+                    .collect(),
             ),
             TypeExpr::Fun(params, ret, _) => Type::Fun(
-                params.iter().map(|p| self.resolve_texpr(owner, module, p)).collect(),
+                params
+                    .iter()
+                    .map(|p| self.resolve_texpr(owner, module, p))
+                    .collect(),
                 Box::new(self.resolve_texpr(owner, module, ret)),
             ),
             TypeExpr::Anonymous(fields, _) => {
@@ -324,7 +337,10 @@ impl Resolver<'_> {
             return self.resolve_field(&sym, field);
         }
         self.errors.push(crate::lower::LowerError {
-            message: format!("`Self.{field}` names no field or slot of `{}`", self.meta[&sym].name),
+            message: format!(
+                "`Self.{field}` names no field or slot of `{}`",
+                self.meta[&sym].name
+            ),
             span,
         });
         Type::Unknown(self.fresh())
@@ -407,7 +423,10 @@ impl Resolver<'_> {
             .map(|(_, v)| {
                 (
                     *v,
-                    slot_pins.get(v).cloned().unwrap_or(Type::Unknown(INFER_VAR)),
+                    slot_pins
+                        .get(v)
+                        .cloned()
+                        .unwrap_or(Type::Unknown(INFER_VAR)),
                 )
             })
             .collect();
@@ -431,4 +450,3 @@ impl Resolver<'_> {
         Type::Record(NominalType::with_substitution(id, name, subst))
     }
 }
-
