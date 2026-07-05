@@ -770,6 +770,7 @@ fn drive(mode: Mode, file: &str) -> Result<(), u8> {
 /// Returns the checked program or the rendered diagnostics. Shared by file
 /// execution and the interactive REPL, so both report identical errors.
 fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec<String>> {
+    let packages = prepoly_resolve::parse_packages_env();
     let mut sources = prepoly_resolve::SourceMap::default();
     #[allow(unused_mut)]
     let mut modules: Vec<LoadedModule> =
@@ -780,9 +781,6 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         main_label.to_string(),
         main_src.to_string(),
     );
-    // Parse with recovery so one syntax error does not hide the rest; a file
-    // with any syntax error is still rejected before checking (a best-effort
-    // AST would drown the report in cascading name/type errors).
     let (mut main_ast, parse_errors) = prepoly_parser::parse_recovering(main_src, base);
     if !parse_errors.is_empty() {
         let rendered: Vec<(String, Span)> = parse_errors
@@ -796,9 +794,9 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
     let mut stack = HashSet::new();
     let mut deps = Vec::new();
     let mut load_errors = Vec::new();
-    // The main file's imports resolve relative to its own directory (`root`), so
-    // its canonical base is empty.
-    for (target, span) in prepoly_resolve::canonicalize_imports(&[], root, &mut main_ast.imports) {
+    for (target, span) in
+        prepoly_resolve::canonicalize_imports(&[], root, &mut main_ast.imports, &packages)
+    {
         prepoly_resolve::load_module(
             &target,
             root,
@@ -808,6 +806,7 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
             &mut deps,
             span,
             &mut load_errors,
+            &packages,
         );
     }
     // A broken module graph aborts before lowering: analyzing a partial graph

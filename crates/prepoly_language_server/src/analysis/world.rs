@@ -65,6 +65,7 @@ pub struct World {
 /// `parse_errors` (with the recovered AST in `main_ast`), and dependency
 /// problems into `load_errors`, so the rest of the file still checks.
 pub fn build(main_path: &Path, main_src: &str) -> World {
+    let packages = prepoly_resolve::parse_packages_env();
     let cache = stdlib_cache();
     let mut sources = cache.sources.clone();
     let mut context_modules = cache.modules.clone();
@@ -75,8 +76,6 @@ pub fn build(main_path: &Path, main_src: &str) -> World {
         main_src.to_string(),
     );
     let (mut main_ast, parse_errors) = parse_recovering(main_src, main_base);
-    // The same message the driver renders for this source, so the editor and
-    // the command line can never disagree about what is wrong.
     let parse_errors: Vec<(String, Span)> = parse_errors
         .into_iter()
         .map(|e| (format!("syntax error: {}", e.message), e.span))
@@ -86,7 +85,9 @@ pub fn build(main_path: &Path, main_src: &str) -> World {
     let mut load_errors = Vec::new();
     let mut visited = HashSet::new();
     let mut stack = HashSet::new();
-    for (target, span) in prepoly_resolve::canonicalize_imports(&[], &root, &mut main_ast.imports) {
+    for (target, span) in
+        prepoly_resolve::canonicalize_imports(&[], &root, &mut main_ast.imports, &packages)
+    {
         prepoly_resolve::load_module(
             &target,
             &root,
@@ -96,6 +97,7 @@ pub fn build(main_path: &Path, main_src: &str) -> World {
             &mut context_modules,
             span,
             &mut load_errors,
+            &packages,
         );
     }
 

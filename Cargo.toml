@@ -14,9 +14,10 @@ members = [
     "crates/prepoly_engine",
     "crates/prepoly_repl",
     "crates/prepoly_driver",
-    "crates/prepoly_formatter",
     "bootstrap",
     "crates/prepoly_language_server",
+    "crates/prepoly_formatter",
+    "crates/prepoly_package_manager",
 ]
 # The default set includes the command-line driver. On native targets the driver
 # enables its `jit` feature by default, so a plain `cargo build` may need LLVM;
@@ -37,7 +38,6 @@ default-members = [
     "crates/prepoly_engine",
     "crates/prepoly_repl",
     "crates/prepoly_driver",
-    "crates/prepoly_formatter",
 ]
 
 [workspace.package]

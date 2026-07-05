@@ -58,6 +58,7 @@ export default defineConfig({
         {
           label: "Installation",
           items: [
+            { label: "Quick start", slug: "installation/quick" },
             { label: "The interpreter", slug: "installation/interpreter" },
             { label: "The LSP server", slug: "installation/lsp" },
           ],

@@ -9,7 +9,7 @@
 //! [`LoadError`]s (attributed to the triggering import's span in the entry
 //! file) and lets each caller decide.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use prepoly_hir::LoadedModule;
@@ -186,6 +186,26 @@ pub struct LoadError {
     pub span: Span,
 }
 
+/// Mapping from external package name to its root directory on disk. Populated
+/// from the `PREPOLY_PACKAGES` environment variable set by the package manager.
+pub type PackageMap = HashMap<String, PathBuf>;
+
+/// Parse the `PREPOLY_PACKAGES` environment variable into a [`PackageMap`].
+/// The format is `name1=/path/to/pkg1:name2=/path/to/pkg2:...`.
+/// Returns an empty map when the variable is unset or empty.
+pub fn parse_packages_env() -> PackageMap {
+    let val = std::env::var("PREPOLY_PACKAGES").unwrap_or_default();
+    if val.is_empty() {
+        return PackageMap::new();
+    }
+    val.split(':')
+        .filter_map(|entry| {
+            let (name, path) = entry.split_once('=')?;
+            Some((name.to_string(), PathBuf::from(path)))
+        })
+        .collect()
+}
+
 /// Parse the embedded prelude into `sources`, returning its modules. The
 /// prelude is known-good, so a parse failure is a build bug reported as the
 /// rendered message.
@@ -211,9 +231,20 @@ pub fn parse_stdlib(sources: &mut SourceMap) -> Result<Vec<LoadedModule>, String
 /// refers to `modules/b.pp`. A `std.*` path or a bare prelude module is global
 /// rather than file-relative and returns `None`, so the caller leaves it
 /// untouched and does not load it from disk.
-fn relativize(base: &[String], imp_path: &[String]) -> Option<Vec<String>> {
+///
+/// When the first segment of the import matches an external package in
+/// `packages`, the path is already canonical (rooted at the package name) and
+/// the `base` prefix is NOT prepended.
+fn relativize(base: &[String], imp_path: &[String], packages: &PackageMap) -> Option<Vec<String>> {
     if imp_path.first().map(|s| s == "std").unwrap_or(false) || is_prelude_path(imp_path) {
         return None;
+    }
+    // Package-rooted imports are already canonical.
+    if imp_path
+        .first()
+        .is_some_and(|s| packages.contains_key(s.as_str()))
+    {
+        return Some(imp_path.to_vec());
     }
     let mut canonical = base.to_vec();
     canonical.extend_from_slice(imp_path);
@@ -228,7 +259,7 @@ fn relativize(base: &[String], imp_path: &[String]) -> Option<Vec<String>> {
 /// name imported from the enclosing module (`import geometry.vec.dot` ==
 /// `import geometry.vec.{ dot }`). A path that names neither stays a module
 /// import so the load step reports the missing module at this import.
-fn classify_bare(base: &[String], root: &Path, imp: &mut ImportDecl) {
+fn classify_bare(base: &[String], root: &Path, imp: &mut ImportDecl, packages: &PackageMap) {
     let module_exists = |path: &[String]| -> bool {
         if is_prelude_path(path) {
             return true;
@@ -237,10 +268,24 @@ fn classify_bare(base: &[String], root: &Path, imp: &mut ImportDecl) {
             return STDLIB_NESTED.iter().any(|(k, _)| *k == key);
         }
         if path.first().is_some_and(|s| s == "std") {
-            return false; // `std.*` modules exist only as embedded sources
+            return false;
         }
-        let mut file = root.to_path_buf();
-        for seg in base.iter().chain(path.iter()) {
+        // Build the full canonical path to decide which root to check.
+        let full: Vec<&str> = if path
+            .first()
+            .is_some_and(|s| packages.contains_key(s.as_str()))
+        {
+            path.iter().map(|s| s.as_str()).collect()
+        } else {
+            base.iter().chain(path.iter()).map(|s| s.as_str()).collect()
+        };
+        let effective_root = if let Some(pkg_root) = full.first().and_then(|s| packages.get(*s)) {
+            pkg_root.as_path()
+        } else {
+            root
+        };
+        let mut file = effective_root.to_path_buf();
+        for seg in &full {
             file.push(seg);
         }
         file.set_extension("pp");
@@ -287,13 +332,14 @@ pub fn canonicalize_imports(
     base: &[String],
     root: &Path,
     imports: &mut [ImportDecl],
+    packages: &PackageMap,
 ) -> Vec<(Vec<String>, Span)> {
     let mut targets = Vec::new();
     for imp in imports.iter_mut() {
         if imp.bare {
-            classify_bare(base, root, imp);
+            classify_bare(base, root, imp, packages);
         }
-        if let Some(canonical) = relativize(base, &imp.path) {
+        if let Some(canonical) = relativize(base, &imp.path, packages) {
             imp.path = canonical.clone();
             targets.push((canonical, imp.span));
         }
@@ -309,6 +355,10 @@ pub fn canonicalize_imports(
 /// a dependency's own syntax errors keep their in-file spans. `std`/prelude
 /// paths never arrive here (they are filtered out as non-file modules during
 /// canonicalization).
+///
+/// When the first segment of `path` matches an external package in `packages`,
+/// the file is resolved relative to that package's root directory instead of
+/// the local project `root`.
 #[allow(clippy::too_many_arguments)]
 pub fn load_module(
     path: &[String],
@@ -319,10 +369,9 @@ pub fn load_module(
     out: &mut Vec<LoadedModule>,
     trigger_span: Span,
     errors: &mut Vec<LoadError>,
+    packages: &PackageMap,
 ) {
     let key = path.join(".");
-    // A module file whose name begins with `_` is private and cannot be
-    // imported from another module.
     if crate::is_private_module(path) {
         errors.push(LoadError {
             message: format!("cannot import private module `{key}`"),
@@ -341,7 +390,13 @@ pub fn load_module(
         return;
     }
 
-    let mut file = root.to_path_buf();
+    let effective_root = path
+        .first()
+        .and_then(|s| packages.get(s.as_str()))
+        .map(|p| p.as_path())
+        .unwrap_or(root);
+
+    let mut file = effective_root.to_path_buf();
     for seg in path {
         file.push(seg);
     }
@@ -360,10 +415,6 @@ pub fn load_module(
     };
     let label = file.display().to_string();
     let base = sources.add(Some(file), label, src.clone());
-    // Parse with recovery: every syntax error in the dependency is reported at
-    // its own span (so it renders at the imported file's line/column, not at
-    // the import statement), and the module is dropped -- a best-effort AST
-    // would cascade into misleading name errors at every use site.
     let (ast, parse_errors) = prepoly_parser::parse_recovering(&src, base);
     if !parse_errors.is_empty() {
         for e in parse_errors {
@@ -377,9 +428,8 @@ pub fn load_module(
         return;
     }
     let mut ast = ast;
-    // This module's imports resolve relative to its own directory.
     let dir = path[..path.len() - 1].to_vec();
-    for (target, _) in canonicalize_imports(&dir, root, &mut ast.imports) {
+    for (target, _) in canonicalize_imports(&dir, root, &mut ast.imports, packages) {
         load_module(
             &target,
             root,
@@ -389,6 +439,7 @@ pub fn load_module(
             out,
             trigger_span,
             errors,
+            packages,
         );
     }
     stack.remove(&key);

@@ -1,5 +1,5 @@
 ---
-title: "Quick installing prepoly"
+title: "Quick start"
 description: "Download and install the prepoly toolchain."
 ---
 
