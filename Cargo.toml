@@ -14,6 +14,7 @@ members = [
     "crates/prepoly_engine",
     "crates/prepoly_repl",
     "crates/prepoly_driver",
+    "crates/prepoly_formatter",
     "bootstrap",
     "crates/prepoly_language_server",
 ]
@@ -36,6 +37,7 @@ default-members = [
     "crates/prepoly_engine",
     "crates/prepoly_repl",
     "crates/prepoly_driver",
+    "crates/prepoly_formatter",
 ]
 
 [workspace.package]
@@ -57,6 +59,7 @@ prepoly_runtime = { path = "crates/prepoly_runtime" }
 prepoly_jit_llvm = { path = "crates/prepoly_jit_llvm" }
 prepoly_engine = { path = "crates/prepoly_engine" }
 prepoly_repl = { path = "crates/prepoly_repl" }
+prepoly_formatter = { path = "crates/prepoly_formatter" }
 
 # LLVM bindings. Native builds link the local LLVM 22.1.0 statically.
 inkwell = { version = "0.9", features = ["llvm22-1"] }

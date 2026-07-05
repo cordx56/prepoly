@@ -1,0 +1,13 @@
+[package]
+name = "prepoly_formatter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "prepoly-fmt"
+path = "src/main.rs"
+
+[dependencies]
+prepoly_parser.workspace = true

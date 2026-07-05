@@ -4,7 +4,7 @@
 //! functions directly), this spawns the built server and exchanges real
 //! `Content-Length`-framed JSON-RPC, exercising the whole path: capability
 //! advertisement, document sync, pushed diagnostics, hover, go-to-definition,
-//! and completion.
+//! completion, and formatting.
 //!
 //! The LSP lifecycle is honoured -- `initialize` is awaited before any request,
 //! and each request's response is read before the next is sent -- because
@@ -36,6 +36,10 @@ const SRC: &str = concat!(
 );
 
 const URI: &str = "file:///tmp/prepoly_e2e/main.pp";
+
+/// A second, badly laid-out document for the formatting request.
+const FMT_SRC: &str = "fun f( )   {\n  let x=1+2\n}\n";
+const FMT_URI: &str = "file:///tmp/prepoly_e2e/fmt.pp";
 
 #[test]
 fn server_answers_hover_definition_completion_and_diagnostics() {
@@ -93,9 +97,21 @@ fn server_answers_hover_definition_completion_and_diagnostics() {
 
         send(
             &mut stdin,
-            &json!({"jsonrpc":"2.0","id":5,"method":"shutdown","params":{}}),
+            &json!({"jsonrpc":"2.0","method":"textDocument/didOpen",
+            "params":{"textDocument":{"uri":FMT_URI,"languageId":"prepoly","version":1,"text":FMT_SRC}}}),
+        );
+        send(
+            &mut stdin,
+            &json!({"jsonrpc":"2.0","id":5,"method":"textDocument/formatting",
+            "params":{"textDocument":{"uri":FMT_URI},"options":{"tabSize":4,"insertSpaces":true}}}),
         );
         read_until(&mut reader, &mut seen, 5);
+
+        send(
+            &mut stdin,
+            &json!({"jsonrpc":"2.0","id":6,"method":"shutdown","params":{}}),
+        );
+        read_until(&mut reader, &mut seen, 6);
         send(
             &mut stdin,
             &json!({"jsonrpc":"2.0","method":"exit","params":{}}),
@@ -154,6 +170,20 @@ fn server_answers_hover_definition_completion_and_diagnostics() {
             "completion {want}: {labels:?}"
         );
     }
+
+    // formatting replaces the badly laid-out document in one whole-file edit.
+    let edits = response(&seen, 5);
+    let edits = edits.as_array().expect("formatting returns an edit array");
+    assert_eq!(edits.len(), 1, "one whole-document edit: {edits:?}");
+    assert_eq!(
+        edits[0]["newText"],
+        json!("fun f() {\n    let x = 1 + 2\n}\n"),
+        "formatted text: {edits:?}"
+    );
+    assert_eq!(
+        edits[0]["range"]["start"],
+        json!({"line": 0, "character": 0})
+    );
 }
 
 /// Write one `Content-Length`-framed JSON-RPC message.

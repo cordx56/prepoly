@@ -13,12 +13,13 @@ use tower_lsp_server::ls_types::{
     CompletionOptions, CompletionParams, CompletionResponse, Diagnostic,
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DocumentDiagnosticParams, DocumentDiagnosticReport, DocumentDiagnosticReportResult,
-    FullDocumentDiagnosticReport, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
-    InitializeParams, InitializeResult, InitializedParams, MessageType, OneOf,
-    RelatedFullDocumentDiagnosticReport, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Uri, WorkDoneProgressOptions,
+    DocumentFormattingParams, FullDocumentDiagnosticReport, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverParams, InitializeParams, InitializeResult,
+    InitializedParams, MessageType, OneOf, Position, Range, RelatedFullDocumentDiagnosticReport,
+    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    Uri, WorkDoneProgressOptions,
 };
 // Advertised only on wasm, where the browser transport pulls diagnostics rather
 // than receiving server-pushed ones.
@@ -97,6 +98,7 @@ impl LanguageServer for Backend {
                 )),
                 hover_provider: Some(true.into()),
                 definition_provider: Some(OneOf::Left(true)),
+                document_formatting_provider: Some(OneOf::Left(true)),
                 // `.` continues an import path (`import math.`) and member
                 // access; `{` opens an import's name list. Identifier typing
                 // triggers completion automatically without a trigger char.
@@ -236,6 +238,32 @@ impl LanguageServer for Backend {
         let path = uri_to_path(&uri);
         let items = features::completion::completion(&entry.document, &entry.analyzer, &path, pos);
         Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    /// Whole-document formatting. A document with syntax errors returns no
+    /// edits (the formatter refuses to rewrite code it cannot fully parse; the
+    /// user sees the syntax diagnostics instead), as does an already-formatted
+    /// one. Otherwise the reply is a single edit replacing the full text --
+    /// simpler than a diff and rendered atomically by clients.
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let Some(entry) = self.docs.get(&params.text_document.uri) else {
+            return Ok(None);
+        };
+        let text = &entry.document.text;
+        let Ok(formatted) = prepoly_formatter::format_source(text) else {
+            return Ok(None);
+        };
+        if formatted == *text {
+            return Ok(Some(Vec::new()));
+        }
+        let range = Range {
+            start: Position::new(0, 0),
+            end: entry.document.position_at(text.len()),
+        };
+        Ok(Some(vec![TextEdit {
+            range,
+            new_text: formatted,
+        }]))
     }
 
     async fn semantic_tokens_full(
