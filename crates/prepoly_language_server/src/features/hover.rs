@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use prepoly_hir::{CallableSignature, NominalType, Type, TypeKind, TypeScheme, TypedExprKind};
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use tower_lsp_server::ls_types::{
     Hover, HoverContents, MarkupContent, MarkupKind, Position, Range,
 };

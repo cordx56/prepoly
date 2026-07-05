@@ -6,7 +6,7 @@
 use super::*;
 
 impl<'a> Checker<'a> {
-    pub(super) fn report_nullable_use(&mut self, span: prepoly_lexer::Span) {
+    pub(super) fn report_nullable_use(&mut self, span: prepoly_parser::Span) {
         self.errors.push(TypeError {
             message: "nullable value must be checked for null before use".to_string(),
             span,

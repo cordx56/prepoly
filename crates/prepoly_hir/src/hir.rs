@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::{FunDecl, Method, Module, Param, Stmt, TypeExpr};
 
 use crate::types::{NominalType, Type};

@@ -331,7 +331,7 @@ impl ConstChecker<'_> {
     fn check_mutating_const_call(
         &mut self,
         callee: &Expr,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &ConstScopes,
     ) {
         let Expr::Field(receiver, method, _) = callee else {

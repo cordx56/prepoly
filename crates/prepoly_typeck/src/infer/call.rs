@@ -11,7 +11,7 @@ impl<'a> Checker<'a> {
         &mut self,
         callee: &Expr,
         args: &[Arg],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) -> Type {
         // Consume the caller's expectation (a keyed `-> infer!` method reads it);
@@ -384,7 +384,7 @@ impl<'a> Checker<'a> {
         recv_ty: &Type,
         method: &str,
         args: &[Arg],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) -> Option<Type> {
         // Mode wrappers are peeled so a `ref(string)` / `mut(T[])` receiver still
@@ -409,7 +409,7 @@ impl<'a> Checker<'a> {
         func: &ReceiverCall,
         method: &str,
         args: &[Arg],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) -> Type {
         let signature_params = &func.signature_params;
@@ -453,7 +453,7 @@ impl<'a> Checker<'a> {
         &mut self,
         callee_ty: Type,
         args: &[Arg],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) -> Type {
         self.apply_callable(callee_ty, args, span, scopes)
@@ -476,7 +476,7 @@ impl<'a> Checker<'a> {
         recv_ty: &Type,
         method: &str,
         args: &[Arg],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         expected: Option<&Type>,
         scopes: &mut ScopeStack,
     ) -> Type {
@@ -516,8 +516,8 @@ impl<'a> Checker<'a> {
         recv_ty: &Type,
         method: &str,
         args: &[Arg],
-        span: prepoly_lexer::Span,
-        reattribute_to: Option<prepoly_lexer::Span>,
+        span: prepoly_parser::Span,
+        reattribute_to: Option<prepoly_parser::Span>,
         scopes: &mut ScopeStack,
     ) -> Type {
         self.check_common_method_signatures(&methods, method, span);
@@ -728,7 +728,7 @@ impl<'a> Checker<'a> {
         &mut self,
         callee_ty: Type,
         args: &[Arg],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) -> Type {
         match self.resolve(&callee_ty) {
@@ -800,7 +800,7 @@ impl<'a> Checker<'a> {
         qualifier: &str,
         method: &str,
         args: &[Arg],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) -> Type {
         // `T.from(v)`: a *fallible* structural conversion to record type `T`. The
@@ -1045,7 +1045,7 @@ impl<'a> Checker<'a> {
         &mut self,
         before: usize,
         method: &str,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
     ) {
         self.reattribute_errors(
             before,
@@ -1058,7 +1058,7 @@ impl<'a> Checker<'a> {
     /// `frame` (deduplicated -- one inconsistency can surface at several body
     /// sites). Used to point a callee-body re-elaboration failure at the
     /// caller's value instead of a span inside the callee.
-    fn reattribute_errors(&mut self, before: usize, frame: &str, span: prepoly_lexer::Span) {
+    fn reattribute_errors(&mut self, before: usize, frame: &str, span: prepoly_parser::Span) {
         let mut seen: HashSet<String> = HashSet::new();
         let kept: Vec<TypeError> = self
             .errors
@@ -1078,7 +1078,7 @@ impl<'a> Checker<'a> {
         name: &str,
         want: usize,
         got: usize,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
     ) {
         if want != got {
             self.errors.push(TypeError {
@@ -1096,7 +1096,7 @@ impl<'a> Checker<'a> {
         name: &str,
         params: &[ParamInfo],
         got: usize,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
     ) {
         let min = required_arg_count(params);
         let max = params.len();

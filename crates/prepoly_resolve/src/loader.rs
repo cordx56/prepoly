@@ -13,9 +13,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use prepoly_hir::LoadedModule;
-use prepoly_lexer::{Span, line_col};
 use prepoly_parser::ast::ImportDecl;
 use prepoly_parser::parse_with_base;
+use prepoly_parser::{Span, line_col};
 
 /// Embedded prelude modules: the DIRECT children of `std`, always in scope with
 /// no import needed. Only these are the implicit prelude; deeper modules
@@ -241,10 +241,12 @@ pub fn canonicalize_imports(
 
 /// Load the module at canonical (root-relative) `path` and, transitively, every
 /// module it imports, pushing each onto `out`. Problems are collected into
-/// `errors` against `trigger_span` (the entry-file import that asked for this
-/// subgraph) rather than aborting, so one bad dependency does not hide the
-/// rest. `std`/prelude paths never arrive here (they are filtered out as
-/// non-file modules during canonicalization).
+/// `errors` rather than aborting, so one bad dependency does not hide the
+/// rest: graph-level problems (missing file, privacy, cycle) are attributed to
+/// `trigger_span` (the entry-file import that asked for this subgraph), while
+/// a dependency's own syntax errors keep their in-file spans. `std`/prelude
+/// paths never arrive here (they are filtered out as non-file modules during
+/// canonicalization).
 #[allow(clippy::too_many_arguments)]
 pub fn load_module(
     path: &[String],
@@ -296,22 +298,23 @@ pub fn load_module(
     };
     let label = file.display().to_string();
     let base = sources.add(Some(file), label, src.clone());
-    let mut ast = match parse_with_base(&src, base) {
-        Ok(ast) => ast,
-        Err(e) => {
-            let (line, _) = line_col(&src, e.span.lo - base);
+    // Parse with recovery: every syntax error in the dependency is reported at
+    // its own span (so it renders at the imported file's line/column, not at
+    // the import statement), and the module is dropped -- a best-effort AST
+    // would cascade into misleading name errors at every use site.
+    let (ast, parse_errors) = prepoly_parser::parse_recovering(&src, base);
+    if !parse_errors.is_empty() {
+        for e in parse_errors {
             errors.push(LoadError {
-                message: format!(
-                    "module `{key}` has a parse error at line {line}: {}",
-                    e.message
-                ),
-                span: trigger_span,
+                message: format!("syntax error: {}", e.message),
+                span: e.span,
             });
-            stack.remove(&key);
-            visited.insert(key);
-            return;
         }
-    };
+        stack.remove(&key);
+        visited.insert(key);
+        return;
+    }
+    let mut ast = ast;
     // This module's imports resolve relative to its own directory.
     let dir = path[..path.len() - 1].to_vec();
     for (target, _) in canonicalize_imports(&dir, &mut ast.imports) {

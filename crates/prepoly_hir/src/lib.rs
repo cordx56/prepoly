@@ -33,4 +33,4 @@ pub use types::{
 
 /// Re-exported so back ends can name source spans (e.g. typed-literal codegen
 /// keyed by span) without depending on the lexer crate directly.
-pub use prepoly_lexer::Span;
+pub use prepoly_parser::Span;

@@ -13,9 +13,9 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use prepoly_hir::LoadedModule;
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::Module;
-use prepoly_parser::{ParseError, parse_with_base};
+use prepoly_parser::parse_recovering;
 
 pub use prepoly_resolve::{SourceMap, prelude_module_names, prelude_source};
 
@@ -49,17 +49,22 @@ pub struct World {
     /// The parsed active document, kept separate so the incremental layer can
     /// re-check a subset of its items.
     pub main_ast: Module,
-    /// Non-fatal module-graph errors (missing import, dependency parse failure,
-    /// circular import), attributed to the offending import's span in the main
-    /// file as `(message, span)`.
+    /// Non-fatal module-graph errors (missing import, dependency syntax
+    /// errors, circular import) as `(message, span)`. Graph-level problems
+    /// are attributed to the offending import in the main file; a
+    /// dependency's syntax errors keep their in-file spans.
     pub load_errors: Vec<(String, Span)>,
+    /// The active document's own syntax errors (global spans), in source
+    /// order. Non-empty means `main_ast` is the recovered best-effort AST:
+    /// good enough for editor features, not for checking.
+    pub parse_errors: Vec<(String, Span)>,
 }
 
 /// Build the module graph for `main_src` (the active document at `main_path`).
-/// Returns the active document's parse error (with a global span) when the
-/// document itself does not parse; dependency problems are collected as
-/// `load_errors` rather than aborting, so the rest of the file still checks.
-pub fn build(main_path: &Path, main_src: &str) -> Result<World, (String, Span)> {
+/// Never fails: the active document's syntax errors are collected into
+/// `parse_errors` (with the recovered AST in `main_ast`), and dependency
+/// problems into `load_errors`, so the rest of the file still checks.
+pub fn build(main_path: &Path, main_src: &str) -> World {
     let cache = stdlib_cache();
     let mut sources = cache.sources.clone();
     let mut context_modules = cache.modules.clone();
@@ -69,10 +74,13 @@ pub fn build(main_path: &Path, main_src: &str) -> Result<World, (String, Span)> 
         main_path.display().to_string(),
         main_src.to_string(),
     );
-    let mut main_ast = parse_with_base(main_src, main_base).map_err(|e: ParseError| {
-        // Place the cursor at the document-local error position for the caller.
-        (e.message, e.span)
-    })?;
+    let (mut main_ast, parse_errors) = parse_recovering(main_src, main_base);
+    // The same message the driver renders for this source, so the editor and
+    // the command line can never disagree about what is wrong.
+    let parse_errors: Vec<(String, Span)> = parse_errors
+        .into_iter()
+        .map(|e| (format!("syntax error: {}", e.message), e.span))
+        .collect();
 
     let root = main_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let mut load_errors = Vec::new();
@@ -102,7 +110,7 @@ pub fn build(main_path: &Path, main_src: &str) -> Result<World, (String, Span)> 
     let nested = prepoly_resolve::load_std_nested(&context_modules, &extra, &mut sources);
     context_modules.extend(nested);
 
-    Ok(World {
+    World {
         sources,
         main_base,
         context_modules,
@@ -111,5 +119,6 @@ pub fn build(main_path: &Path, main_src: &str) -> Result<World, (String, Span)> 
             .into_iter()
             .map(|e| (e.message, e.span))
             .collect(),
-    })
+        parse_errors,
+    }
 }

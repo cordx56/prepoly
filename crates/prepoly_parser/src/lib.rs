@@ -1,10 +1,16 @@
-//! Parser for the Prepoly language: tokens -> AST.
+//! Parser for the Prepoly language: source text -> tokens -> AST.
+//!
+//! The lexer lives here as [`lexer`]; its core types (`Span`, `Token`) are
+//! re-exported at the crate root, so downstream crates name one parser crate
+//! for the whole surface syntax.
 
 pub mod ast;
+pub mod lexer;
 pub mod newline;
 mod parser;
 
-pub use parser::{ParseError, parse, parse_with_base};
+pub use lexer::{LexError, Span, StrPart, Token, TokenKind, keyword_or_ident, lex, line_col};
+pub use parser::{ParseError, parse, parse_recovering, parse_with_base};
 
 #[cfg(test)]
 mod tests {
@@ -312,5 +318,53 @@ mod tests {
             }
             other => panic!("expected a tuple type, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn recovery_collects_multiple_statement_errors() {
+        // Two bad statements in one body: both are reported at the offending
+        // token, and the rest of the body (and file) still parses.
+        let src = "fun f() -> int32 {\n    let x = )\n    let y = ]\n    return 0\n}\nfun g() -> int32 {\n    return 1\n}\n";
+        let (m, errors) = crate::parse_recovering(src, 0);
+        assert_eq!(errors.len(), 2, "errors: {errors:?}");
+        // Spans point at the offending tokens, not at the statement head.
+        assert_eq!(errors[0].span.lo, src.find("= )").unwrap() + 2);
+        assert_eq!(errors[1].span.lo, src.find("= ]").unwrap() + 2);
+        // Both functions survive; f keeps its good trailing statement.
+        assert_eq!(m.items.len(), 2);
+        let TopLevel::Fun(f) = &m.items[0] else {
+            panic!("expected a function");
+        };
+        assert_eq!(f.body.stmts.len(), 1);
+    }
+
+    #[test]
+    fn recovery_resyncs_at_the_next_top_level_declaration() {
+        // A broken declaration does not hide the ones after it.
+        let src = "type Broken = {\n    x:\n}\nfun ok() -> int32 {\n    return 3\n}\n";
+        let (m, errors) = crate::parse_recovering(src, 0);
+        assert!(!errors.is_empty(), "expected at least one error");
+        assert!(
+            m.items
+                .iter()
+                .any(|i| matches!(i, TopLevel::Fun(f) if f.name == "ok")),
+            "the following declaration should still parse: {:?}",
+            m.items.len()
+        );
+    }
+
+    #[test]
+    fn recovery_is_capped() {
+        // A pathological file stops at the error cap instead of flooding.
+        let src = "let a = )\n".repeat(100);
+        let (_m, errors) = crate::parse_recovering(&src, 0);
+        assert_eq!(errors.len(), 20);
+    }
+
+    #[test]
+    fn parse_reports_the_first_error_for_compatibility() {
+        let src = "fun f() {\n    let x = )\n    let y = ]\n}\n";
+        let e = crate::parse(src).unwrap_err();
+        assert_eq!(e.span.lo, src.find("= )").unwrap() + 2);
     }
 }

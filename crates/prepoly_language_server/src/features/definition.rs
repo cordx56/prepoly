@@ -7,7 +7,7 @@
 //! symbol tables so a local shadowing a function jumps to the local.
 
 use prepoly_hir::Type;
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::{Block, Expr, FieldPat, Pattern, Stmt, StrSeg};
 use tower_lsp_server::ls_types::{Location, Position};
 

@@ -9,7 +9,7 @@ impl<'a> Checker<'a> {
         &mut self,
         name: &str,
         args: &[Arg],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) -> Option<Type> {
         // `len` is a runtime primitive usable as a free
@@ -86,7 +86,7 @@ impl<'a> Checker<'a> {
         &mut self,
         name: &str,
         args: &[Arg],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) -> Option<Type> {
         let i64_ty = Type::Int(IntKind::I64);
@@ -161,7 +161,7 @@ impl<'a> Checker<'a> {
         &mut self,
         name: &str,
         args: &[Arg],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) -> Option<Type> {
         match name {
@@ -309,7 +309,7 @@ impl<'a> Checker<'a> {
         &mut self,
         name: &str,
         args: &[Arg],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) -> Option<Type> {
         match name {
@@ -451,7 +451,7 @@ impl<'a> Checker<'a> {
         &mut self,
         name: &str,
         args: &[Arg],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) -> Option<Type> {
         if name == "_string_find" {
@@ -481,7 +481,7 @@ impl<'a> Checker<'a> {
         name: &str,
         args: &[Arg],
         params: &[Type],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) {
         self.check_arg_count(name, params.len(), args.len(), span);
@@ -499,7 +499,7 @@ impl<'a> Checker<'a> {
         method: &str,
         args: &[Arg],
         scopes: &mut ScopeStack,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
     ) -> Option<Type> {
         if let Some(ret) = self.array_method_type(recv_ty, method, args, scopes, span) {
             return Some(ret);
@@ -527,7 +527,7 @@ impl<'a> Checker<'a> {
         method: &str,
         args: &[Arg],
         scopes: &mut ScopeStack,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
     ) -> Option<Type> {
         let resolved = self.resolve(recv_ty);
         // `ref(..)`/`mut(..)` are transparent wrappers, so a method on
@@ -624,7 +624,7 @@ impl<'a> Checker<'a> {
         args: &[Arg],
         arity: usize,
         scopes: &mut ScopeStack,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
     ) {
         for arg in args.iter().skip(arity) {
             self.check_expr(&arg.expr, scopes);

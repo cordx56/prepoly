@@ -13,7 +13,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use prepoly_hir::{Program, TypeInfo, TypeKind};
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::*;
 
 use crate::TypeError;

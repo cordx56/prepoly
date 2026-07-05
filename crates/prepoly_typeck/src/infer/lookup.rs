@@ -94,7 +94,7 @@ impl<'a> Checker<'a> {
         &mut self,
         methods: &[ResolvedMethod],
         method: &str,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
     ) {
         let Some((first, rest)) = methods.split_first() else {
             return;
@@ -316,7 +316,7 @@ impl<'a> Checker<'a> {
         &mut self,
         var: &Type,
         got: &Type,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
     ) {
         let Type::Unknown(id) = self.resolve(var) else {
             return;

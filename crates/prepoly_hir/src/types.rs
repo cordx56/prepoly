@@ -843,7 +843,7 @@ fn nominal_key(tag: &str, n: &NominalType) -> String {
 
 #[cfg(test)]
 mod tests {
-    use prepoly_lexer::Span;
+    use prepoly_parser::Span;
     use prepoly_parser::ast::TypeExpr;
 
     use super::{IntKind, NominalInfo, NominalType, Substitution, Type, resolve};

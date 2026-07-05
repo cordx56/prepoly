@@ -4,7 +4,7 @@
 //! items (type/function declarations and statements). Records and sum types
 //! share the single `TypeDecl` node.
 
-use prepoly_lexer::Span;
+use crate::lexer::Span;
 
 /// One parsed source file.
 #[derive(Clone, Debug)]

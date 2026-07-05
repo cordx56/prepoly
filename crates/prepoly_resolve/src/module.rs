@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use prepoly_hir::LoadedModule;
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::TopLevel;
 
 use crate::visibility::is_public;

@@ -1,7 +1,7 @@
 //! Convert the front end's `(message, span)` diagnostics into LSP diagnostics
 //! ranged in the active document.
 
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use tower_lsp_server::ls_types::{Diagnostic, DiagnosticSeverity};
 
 use crate::document::Document;

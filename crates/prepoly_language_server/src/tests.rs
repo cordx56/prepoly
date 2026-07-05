@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 
 use crate::analysis::{DocAnalyzer, FullAnalysis};
 use crate::document::Document;
@@ -858,4 +858,34 @@ fn hover_infers_element_through_collection_building_call() {
     let (doc, pos) = position(src, "elem)", false); // the use in println(elem)
     let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover elem"));
     assert!(text.contains("elem: int32"), "elem should be int32: {text}");
+}
+
+/// A document with several syntax errors reports each one, at the offending
+/// token's document-local span, with the same message text the driver renders
+/// -- the editor and the command line can never disagree.
+#[test]
+fn syntax_errors_are_all_reported_at_their_tokens() {
+    let src = "fun f() -> int32 {\n    let x = )\n    let y = ]\n    return 0\n}\n";
+    let diags = sorted(DocAnalyzer::new(path()).diagnostics(src));
+    assert_eq!(diags.len(), 2, "diags: {diags:?}");
+    assert_eq!(diags[0].0, "syntax error: unexpected token `)`");
+    assert_eq!(diags[0].1.lo, src.find("= )").unwrap() + 2);
+    assert_eq!(diags[1].0, "syntax error: unexpected token `]`");
+    assert_eq!(diags[1].1.lo, src.find("= ]").unwrap() + 2);
+}
+
+/// Hover still works on the healthy parts of a document that has a syntax
+/// error elsewhere: analysis runs on the recovered AST.
+#[test]
+fn hover_survives_a_syntax_error_elsewhere() {
+    let src = "fun ok(a: int32) -> int32 {\n    return a\n}\nfun broken() {\n    let x = )\n}\n";
+    let analysis = DocAnalyzer::new(path())
+        .analyze_full(src)
+        .expect("recovered AST should still analyze");
+    let (doc, pos) = position(src, "ok", false);
+    let h = hover::hover(&doc, &analysis, pos);
+    assert!(
+        h.is_some(),
+        "expected hover on `ok` despite the later error"
+    );
 }

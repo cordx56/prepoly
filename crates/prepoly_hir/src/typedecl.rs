@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::{TypeBody, TypeDecl, TypeExpr};
 
 use std::collections::BTreeMap;

@@ -9,7 +9,7 @@ impl<'a> Checker<'a> {
         &mut self,
         op: UnaryOp,
         ty: &Type,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
     ) -> Type {
         match self.resolve(ty) {
             Type::Nullable(_) => {
@@ -43,7 +43,7 @@ impl<'a> Checker<'a> {
         op: BinOp,
         left: &Type,
         right: &Type,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
     ) -> Type {
         self.check_binary_core(op, None, left, None, right, span)
     }
@@ -55,7 +55,7 @@ impl<'a> Checker<'a> {
         left: &Type,
         right_expr: &Expr,
         right: &Type,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
     ) -> Type {
         self.check_binary_core(op, Some(left_expr), left, Some(right_expr), right, span)
     }
@@ -67,7 +67,7 @@ impl<'a> Checker<'a> {
         left: &Type,
         right_expr: Option<&Expr>,
         right: &Type,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
     ) -> Type {
         // See through reference/mutability wrappers: an operand read through a
         // reference (e.g. a `ref(mut(int32))` array element bound by a `for` loop)
@@ -161,7 +161,7 @@ impl<'a> Checker<'a> {
         op: BinOp,
         left: &Type,
         right: &Type,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
     ) -> Type {
         self.errors.push(TypeError {
             message: format!(
@@ -185,7 +185,12 @@ impl<'a> Checker<'a> {
         self.expect_assignable(got, want, expr.span());
     }
 
-    pub(super) fn expect_assignable(&mut self, got: &Type, want: &Type, span: prepoly_lexer::Span) {
+    pub(super) fn expect_assignable(
+        &mut self,
+        got: &Type,
+        want: &Type,
+        span: prepoly_parser::Span,
+    ) {
         let got = self.resolve(got);
         let want = self.resolve(want);
         // An unconstrained inference variable whose type cannot be inferred
@@ -369,7 +374,7 @@ impl<'a> Checker<'a> {
             || crate::structural::types_invariant(self.program, got, want)
     }
 
-    fn report_element_mismatch(&mut self, got: &Type, want: &Type, span: prepoly_lexer::Span) {
+    fn report_element_mismatch(&mut self, got: &Type, want: &Type, span: prepoly_parser::Span) {
         self.errors.push(TypeError {
             message: format!(
                 "cannot use `{}` where `{}` is required",

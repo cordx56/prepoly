@@ -13,7 +13,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::{
     Arg, Block, Expr, FieldPat, Member, Module, Param, Pattern, Stmt, StrSeg, TopLevel, TypeBody,
     TypeDecl, TypeExpr,

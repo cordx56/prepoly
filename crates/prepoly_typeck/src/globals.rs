@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 
 use prepoly_hir::Program;
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::*;
 
 use crate::TypeError;

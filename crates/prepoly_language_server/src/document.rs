@@ -4,10 +4,10 @@
 //!
 //! LSP `Position` columns are UTF-16 code units (the protocol default), which
 //! differ from both byte offsets and `char` counts, so the conversions here own
-//! that encoding rather than reusing `prepoly_lexer::line_col` (which counts
+//! that encoding rather than reusing `prepoly_parser::line_col` (which counts
 //! Unicode scalar values for human-facing diagnostics).
 
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use tower_lsp_server::ls_types::{Position, Range};
 
 /// A source document and a precomputed index of its line boundaries.

@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::{Member, TopLevel, TypeBody, TypeDecl};
 
 use crate::hir::*;

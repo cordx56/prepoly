@@ -13,7 +13,7 @@
 //! copies; a shifted span is mapped back to its source position with
 //! [`unshift_span`] when it surfaces in a diagnostic.
 
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::*;
 
 /// The per-iteration span-shift unit. Real source offsets stay below this, so

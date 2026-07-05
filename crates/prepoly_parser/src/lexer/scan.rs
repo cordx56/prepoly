@@ -4,7 +4,7 @@
 //! `Newline` tokens (a run of blank lines collapses to one); the parser
 //! decides whether each one terminates a statement.
 
-use crate::token::{Span, StrPart, Token, TokenKind, keyword_or_ident};
+use super::token::{Span, StrPart, Token, TokenKind, keyword_or_ident};
 
 /// A lexing error with the offending source span.
 #[derive(Clone, Debug, PartialEq)]

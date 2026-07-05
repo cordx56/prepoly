@@ -177,7 +177,7 @@ impl<'a> Checker<'a> {
         ty
     }
 
-    fn check_error_propagation_return_context(&mut self, span: prepoly_lexer::Span) {
+    fn check_error_propagation_return_context(&mut self, span: prepoly_parser::Span) {
         match self.return_contexts.last() {
             Some(ReturnContext::Inferred) => {}
             Some(ReturnContext::Explicit(ret)) if is_result_return_type(&self.resolve(ret)) => {}
@@ -576,7 +576,7 @@ impl<'a> Checker<'a> {
         context: &str,
         left: Type,
         right: Type,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
     ) -> Type {
         if let Some(nullable) = common_nullable_type(&left, &right) {
             return nullable;
@@ -634,7 +634,7 @@ impl<'a> Checker<'a> {
     fn then_branch_return_conflicts(
         &mut self,
         then: &Block,
-        probe_returns: &[(Type, prepoly_lexer::Span)],
+        probe_returns: &[(Type, prepoly_parser::Span)],
     ) -> bool {
         let Some(ReturnContext::Explicit(want)) = self.return_contexts.last().cloned() else {
             return false;
@@ -827,7 +827,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn expect_int_index(&mut self, ty: &Type, span: prepoly_lexer::Span) {
+    fn expect_int_index(&mut self, ty: &Type, span: prepoly_parser::Span) {
         match self.resolve(ty) {
             Type::Int(_) | Type::Unknown(_) => {}
             other => self.errors.push(TypeError {

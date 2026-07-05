@@ -8,7 +8,6 @@ path = "src/lib.rs"
 
 [dependencies]
 tracing.workspace = true
-prepoly_lexer.workspace = true
 prepoly_parser.workspace = true
 prepoly_hir.workspace = true
 prepoly_mir.workspace = true

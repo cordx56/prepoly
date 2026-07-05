@@ -24,7 +24,7 @@ pub use prepoly_solver::{solver, unify};
 use std::collections::HashMap;
 
 use prepoly_hir::{MethodInfo, NominalInfo, Program, TypeKind, TypedProgram, resolve};
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::*;
 
 #[derive(Clone, Debug, PartialEq)]

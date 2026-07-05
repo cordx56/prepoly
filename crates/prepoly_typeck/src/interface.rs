@@ -90,7 +90,7 @@ fn check_parent_field_conflicts(
     who: &str,
     interfaces: &[String],
     program: &Program,
-    span: prepoly_lexer::Span,
+    span: prepoly_parser::Span,
     errors: &mut Vec<TypeError>,
 ) {
     // field name -> (parent interface name, resolved field type)
@@ -140,7 +140,7 @@ fn report(
     ifields: &[FieldInfo],
     imethods: &HashMap<String, MethodInfo>,
     program: &Program,
-    span: prepoly_lexer::Span,
+    span: prepoly_parser::Span,
     report_missing: bool,
     errors: &mut Vec<TypeError>,
 ) {

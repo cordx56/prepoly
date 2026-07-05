@@ -8,7 +8,7 @@
 //! the AST-walking codegen so the two stay behaviorally equivalent.
 
 use prepoly_hir::Type;
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::{Arg, BinOp, Block, Expr, Param, Stmt, StrSeg};
 
 use crate::analysis::free_vars_of;
@@ -140,7 +140,7 @@ impl<'a, 'p> FnLower<'a, 'p> {
     /// monomorphizer and both back ends already handle.
     fn lower_fn_value(&mut self, name: &str, arity: usize) -> Operand {
         use prepoly_parser::ast::{Arg, Param};
-        let span = prepoly_lexer::Span::new(0, 0);
+        let span = prepoly_parser::Span::new(0, 0);
         let names: Vec<String> = (0..arity).map(|i| format!("__eta{i}")).collect();
         let params: Vec<Param> = names
             .iter()

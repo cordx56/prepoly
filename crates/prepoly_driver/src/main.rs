@@ -22,9 +22,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use prepoly_hir::{LoadedModule, Program, lower};
-use prepoly_lexer::{Span, line_col};
-use prepoly_parser::ast::{Module, Stmt, TopLevel};
-use prepoly_parser::{ParseError, parse, parse_with_base};
+use prepoly_parser::ast::{Stmt, TopLevel};
+use prepoly_parser::parse;
+use prepoly_parser::{Span, line_col};
 
 /// The Prepoly toolchain driver.
 ///
@@ -212,7 +212,7 @@ fn auto_acquire_modules(modules: &mut [LoadedModule]) -> Vec<(String, Span)> {
             }
             bodies.push(Block {
                 stmts: top,
-                span: prepoly_lexer::Span::new(0, 0),
+                span: prepoly_parser::Span::new(0, 0),
             });
         }
         let mut mutated: HashSet<String> = HashSet::new();
@@ -767,7 +767,17 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         main_label.to_string(),
         main_src.to_string(),
     );
-    let mut main_ast = parse_module(main_src, main_label, base).map_err(|m| vec![m])?;
+    // Parse with recovery so one syntax error does not hide the rest; a file
+    // with any syntax error is still rejected before checking (a best-effort
+    // AST would drown the report in cascading name/type errors).
+    let (mut main_ast, parse_errors) = prepoly_parser::parse_recovering(main_src, base);
+    if !parse_errors.is_empty() {
+        let rendered: Vec<(String, Span)> = parse_errors
+            .into_iter()
+            .map(|e| (format!("syntax error: {}", e.message), e.span))
+            .collect();
+        return Err(render_errors(&rendered, &sources));
+    }
 
     let mut visited = HashSet::new();
     let mut stack = HashSet::new();
@@ -1054,15 +1064,6 @@ fn rewrite_calls_expr(
         Expr::Closure(_, b, _) => rewrite_calls_expr(b, renames),
         _ => {}
     }
-}
-
-/// Parse `src` (labelled `name`) at byte-offset `base`, rendering a parse error
-/// with the file-local line/column.
-fn parse_module(src: &str, name: &str, base: usize) -> Result<Module, String> {
-    parse_with_base(src, base).map_err(|e: ParseError| {
-        let (line, col) = line_col(src, e.span.lo - base);
-        format!("{name}:{line}:{col}: parse error: {}", e.message)
-    })
 }
 
 /// Render each `(message, span)` diagnostic as `path:line:col: error: message`,

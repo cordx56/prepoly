@@ -23,7 +23,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use prepoly_hir::{Program, Type, TypeKind};
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::{AssignOp, BinOp, Block, Param};
 
 use crate::analysis::fallible_block;

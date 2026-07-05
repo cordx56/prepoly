@@ -26,7 +26,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

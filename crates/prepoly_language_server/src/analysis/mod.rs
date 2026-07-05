@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use prepoly_hir::{LoadedModule, Program, TypedProgram, lower};
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::{Module, TopLevel};
 
 use items::{Diag, Item, ItemCache, ItemKind};
@@ -62,15 +62,15 @@ impl DocAnalyzer {
     /// Returns `(message, global span)` pairs; map spans through the active
     /// document to publish them.
     pub fn diagnostics(&mut self, text: &str) -> Vec<(String, Span)> {
-        let world = match world::build(&self.path, text) {
-            Ok(w) => w,
-            Err((message, span)) => {
-                // The document itself does not parse: report just that, and drop
-                // the cache so the next good parse re-checks from scratch.
-                self.cache = ItemCache::default();
-                return vec![(message, span)];
-            }
-        };
+        let world = world::build(&self.path, text);
+        if !world.parse_errors.is_empty() {
+            // The document has syntax errors: report all of them and nothing
+            // else -- checking the recovered AST would bury them under
+            // cascading name/type errors -- and drop the cache so the next
+            // clean parse re-checks from scratch.
+            self.cache = ItemCache::default();
+            return localize(world.parse_errors, world.main_base, text.len());
+        }
 
         let mut new_items = items::split(&world.main_ast, text, world.main_base);
         let d = items::diff(&self.cache, &new_items);
@@ -122,9 +122,10 @@ impl DocAnalyzer {
     /// Compute a full analysis of `text` for hover/definition. Returns an owned
     /// result -- the `Rc`-bearing `Program` is `!Send`, so it must not be stored
     /// in the shared document map; the caller uses it synchronously and drops it.
-    /// Returns `None` only when the document does not parse.
+    /// A document with syntax errors is analyzed from its recovered AST, so
+    /// hover/definition keep working on the parts that parse.
     pub fn analyze_full(&self, text: &str) -> Option<FullAnalysis> {
-        let world = world::build(&self.path, text).ok()?;
+        let world = world::build(&self.path, text);
         let main = world.main_ast.clone();
         let (program, typed, schemes, _diags) = run_pipeline(&world.context_modules, main);
         Some(FullAnalysis {

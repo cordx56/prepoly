@@ -6,7 +6,7 @@
 //! chain, or before an `else`. The parser tracks bracket depth itself; the
 //! lookahead predicates that peek past newlines live here.
 
-use prepoly_lexer::{Token, TokenKind};
+use crate::lexer::{Token, TokenKind};
 
 fn kind_at(tokens: &[Token], i: usize) -> &TokenKind {
     &tokens[i.min(tokens.len() - 1)].kind

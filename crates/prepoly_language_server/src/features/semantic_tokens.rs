@@ -9,9 +9,9 @@
 
 use std::collections::HashSet;
 
-use prepoly_lexer::{Span, TokenKind, lex};
 use prepoly_parser::ast::{Member, Module, TopLevel, TypeBody};
 use prepoly_parser::parse;
+use prepoly_parser::{Span, TokenKind, lex};
 use tower_lsp_server::ls_types::{SemanticToken, SemanticTokenModifier, SemanticTokenType};
 
 /// The token-type legend, reported in the server capabilities. A token's

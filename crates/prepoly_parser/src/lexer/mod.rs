@@ -2,10 +2,10 @@
 //!
 //! Produces a token stream with explicit `Newline` tokens that the parser
 //! uses to delimit statements, with parser-side whitespace fallback.
-mod lexer;
+mod scan;
 mod token;
 
-pub use lexer::{LexError, lex};
+pub use scan::{LexError, lex};
 pub use token::{Span, StrPart, Token, TokenKind, keyword_or_ident};
 
 /// Compute a 1-based (line, column) for a byte offset in `src`, for error

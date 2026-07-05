@@ -564,7 +564,7 @@ impl FnLower<'_, '_> {
         var: &str,
         lo: &Expr,
         hi: &Expr,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         body: &Block,
     ) {
         let elem = self.range_elem_type(span);

@@ -5,10 +5,10 @@
 use std::collections::{HashMap, HashSet};
 
 use prepoly_hir::{FunInfo, Type, TypedExpr, TypedExprKind};
-use prepoly_lexer::{Span, TokenKind, lex};
 use prepoly_parser::ast::{
     Block, Expr, Member, Module, Param, Pattern, Stmt, StrSeg, TopLevel, TypeBody,
 };
+use prepoly_parser::{Span, TokenKind, lex};
 use tower_lsp_server::ls_types::{Location, Uri};
 
 use crate::analysis::FullAnalysis;

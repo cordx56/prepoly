@@ -10,7 +10,7 @@ impl<'a> Checker<'a> {
         &mut self,
         name: &str,
         fields: &[(String, Expr)],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) -> Type {
         // Anonymous structure literal `{ f: v, ... }`: a structural record whose
@@ -45,7 +45,7 @@ impl<'a> Checker<'a> {
         t: &str,
         variant: &str,
         fields: &[(String, Expr)],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) -> Type {
         let tn = self.resolve_self_name(t);
@@ -76,7 +76,7 @@ impl<'a> Checker<'a> {
         variant: Option<&str>,
         declared: &[prepoly_hir::FieldInfo],
         fields: &[(String, Expr)],
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) -> Substitution {
         let mut substitution = Substitution::empty();
@@ -189,7 +189,7 @@ impl<'a> Checker<'a> {
         &mut self,
         base: &Expr,
         name: &str,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) -> Type {
         if let Some(ty) = self.unit_variant_type(base, name, self.is_in_scope(base, scopes)) {

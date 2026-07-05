@@ -5,7 +5,7 @@
 //! expression can be represented by its source span, inferred type, and
 //! constness until expression kinds are fully lowered into HIR-owned nodes.
 
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::{BinOp, Expr, UnaryOp};
 
 use crate::Type;

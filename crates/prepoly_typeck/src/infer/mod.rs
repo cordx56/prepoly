@@ -16,7 +16,7 @@ use prepoly_hir::{
     SchemeMethod, Substitution, Type, TypeInfo, TypeKind, TypeScheme, TypedProgram,
     int_literal_kind,
 };
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::*;
 use prepoly_typesys::{common_numeric_type, numeric_flows_into};
 
@@ -261,7 +261,7 @@ struct Checker<'a> {
     /// and pushes a body performs, so its inferred return is more precise than the
     /// light pass -- a witness-free constructor's nullable slot element resolves
     /// here. Consumed by `check_block_root` for an inferred-return body.
-    return_values: Vec<Vec<(Type, prepoly_lexer::Span)>>,
+    return_values: Vec<Vec<(Type, prepoly_parser::Span)>>,
     global_scope: HashMap<String, Type>,
     function_returns: HashMap<String, Type>,
     /// (method qualifier, method name) -> return type.
@@ -498,7 +498,7 @@ impl<'a> Checker<'a> {
     fn check_return(
         &mut self,
         value: Option<&Expr>,
-        span: prepoly_lexer::Span,
+        span: prepoly_parser::Span,
         scopes: &mut ScopeStack,
     ) {
         let returned = match self.return_contexts.last().cloned() {

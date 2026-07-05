@@ -7,5 +7,4 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-prepoly_lexer.workspace = true
 prepoly_parser.workspace = true

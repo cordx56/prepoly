@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/prepoly_utils",
     "crates/prepoly_typesys",
-    "crates/prepoly_lexer",
     "crates/prepoly_parser",
     "crates/prepoly_hir",
     "crates/prepoly_mir",
@@ -28,7 +27,6 @@ members = [
 default-members = [
     "crates/prepoly_utils",
     "crates/prepoly_typesys",
-    "crates/prepoly_lexer",
     "crates/prepoly_parser",
     "crates/prepoly_hir",
     "crates/prepoly_mir",
@@ -49,7 +47,6 @@ authors = ["Yuki Okamoto <cord@x56.cx>"]
 [workspace.dependencies]
 prepoly_utils = { path = "crates/prepoly_utils" }
 prepoly_typesys = { path = "crates/prepoly_typesys" }
-prepoly_lexer = { path = "crates/prepoly_lexer" }
 prepoly_parser = { path = "crates/prepoly_parser" }
 prepoly_hir = { path = "crates/prepoly_hir" }
 prepoly_mir = { path = "crates/prepoly_mir" }

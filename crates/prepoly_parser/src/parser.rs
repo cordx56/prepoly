@@ -11,7 +11,7 @@
 //! Statement blocks reset to `depth == 0` so newlines separate their
 //! statements even when the block is nested inside brackets (closure bodies).
 
-use prepoly_lexer::{Span, StrPart, Token, TokenKind, lex};
+use crate::lexer::{Span, StrPart, Token, TokenKind, lex};
 
 use crate::ast::*;
 
@@ -21,7 +21,8 @@ pub struct ParseError {
     pub span: Span,
 }
 
-/// Parse one source file into a `Module`.
+/// Parse one source file into a `Module`. Fails on the first syntax error;
+/// use [`parse_recovering`] to collect every error with a best-effort AST.
 pub fn parse(src: &str) -> Result<Module, ParseError> {
     parse_with_base(src, 0)
 }
@@ -34,15 +35,43 @@ pub fn parse(src: &str) -> Result<Module, ParseError> {
 /// interpolation sub-expression, re-lexed from its fragment, stays
 /// fragment-relative, which is a pre-existing limitation unaffected here.
 pub fn parse_with_base(src: &str, base: usize) -> Result<Module, ParseError> {
-    let mut tokens = lex(src).map_err(|e| ParseError {
-        message: e.message,
-        span: Span::new(e.span.lo + base, e.span.hi + base),
-    })?;
+    let (module, mut errors) = parse_recovering(src, base);
+    match errors.is_empty() {
+        true => Ok(module),
+        false => Err(errors.remove(0)),
+    }
+}
+
+/// Parse with error recovery: on a syntax error the parser records it and
+/// resynchronizes -- to the next statement boundary inside a block, or to the
+/// next plausible declaration at the top level -- and keeps going. Returns
+/// everything that parsed plus every error, in source order, each at the span
+/// of the offending token. An empty error list means the module is complete;
+/// with errors the module is best-effort (the erroneous constructs are
+/// dropped), suitable for diagnostics and editor features but not execution.
+pub fn parse_recovering(src: &str, base: usize) -> (Module, Vec<ParseError>) {
+    let empty = Module {
+        imports: Vec::new(),
+        items: Vec::new(),
+    };
+    // A lexing error is unrecoverable (the token stream ends there); report it
+    // alone with whatever an empty module gives the caller.
+    let mut tokens = match lex(src) {
+        Ok(t) => t,
+        Err(e) => {
+            let err = ParseError {
+                message: e.message,
+                span: Span::new(e.span.lo + base, e.span.hi + base),
+            };
+            return (empty, vec![err]);
+        }
+    };
     for t in &mut tokens {
         t.span = Span::new(t.span.lo + base, t.span.hi + base);
     }
     let mut p = Parser::new(tokens, base);
-    p.parse_module()
+    let module = p.parse_module();
+    (module, p.errors)
 }
 
 struct Parser {
@@ -61,9 +90,17 @@ struct Parser {
     no_struct: bool,
     /// Saved `no_struct` values for bracket scopes.
     ns_save: Vec<bool>,
+    /// Syntax errors recovered from so far, in source order; bounded by
+    /// [`MAX_PARSE_ERRORS`].
+    errors: Vec<ParseError>,
 }
 
 type PResult<T> = Result<T, ParseError>;
+
+/// Cap on recovered syntax errors per file. Past the first few, errors are
+/// usually cascades of one real mistake; stopping keeps the report readable
+/// and bounds the work on adversarial input.
+const MAX_PARSE_ERRORS: usize = 20;
 
 /// Maximum expression nesting the recursive-descent parser accepts. Deep enough
 /// for any hand-written program; bounded so adversarial input gets a diagnostic
@@ -82,6 +119,7 @@ impl Parser {
             depth: 0,
             no_struct: false,
             ns_save: Vec::new(),
+            errors: Vec::new(),
         }
     }
 
@@ -205,19 +243,99 @@ impl Parser {
 
     // ----- top level -----
 
-    fn parse_module(&mut self) -> PResult<Module> {
+    fn parse_module(&mut self) -> Module {
         let mut imports = Vec::new();
         let mut items = Vec::new();
         self.eat_newlines();
         while !self.at_p(TokenKind::Eof) {
-            if self.at_p(TokenKind::Import) {
-                imports.push(self.parse_import()?);
+            let r = if self.at_p(TokenKind::Import) {
+                self.parse_import().map(|i| imports.push(i))
             } else {
-                items.push(self.parse_top_level()?);
+                self.parse_top_level().map(|t| items.push(t))
+            };
+            if let Err(e) = r {
+                if !self.record_error(e) {
+                    break;
+                }
+                self.recover_to_top_level();
             }
             self.eat_newlines();
         }
-        Ok(Module { imports, items })
+        Module { imports, items }
+    }
+
+    /// Record a recovered syntax error, keeping source order. At the cap the
+    /// error is dropped and false is returned: the caller stops parsing
+    /// (further errors are almost certainly cascades of the ones already
+    /// reported), and a propagated copy is not double-recorded on the way out.
+    fn record_error(&mut self, e: ParseError) -> bool {
+        if self.errors.len() >= MAX_PARSE_ERRORS {
+            return false;
+        }
+        self.errors.push(e);
+        true
+    }
+
+    /// Reset the bracket bookkeeping a half-parsed top-level construct left
+    /// behind (an `open()` whose `close()` never ran). `expr_depth` is NOT
+    /// reset: `parse_expr` re-balances it even when an error propagates, and
+    /// live enclosing frames still decrement it on their way out.
+    fn reset_nesting(&mut self) {
+        self.depth = 0;
+        self.no_struct = false;
+        self.ns_save.clear();
+    }
+
+    /// Panic-mode resynchronization to the next plausible top-level
+    /// declaration: a `fun`/`type`/`import` keyword (which cannot occur inside
+    /// an expression, so it is a safe restart anchor even when the skip began
+    /// mid-construct), or a newline once at least as many brackets have closed
+    /// as opened since the error. Always consumes at least one token so
+    /// recovery makes progress.
+    fn recover_to_top_level(&mut self) {
+        self.reset_nesting();
+        let mut depth: i64 = 0;
+        let mut first = true;
+        loop {
+            match self.peek() {
+                TokenKind::Eof => return,
+                TokenKind::Fun | TokenKind::Type | TokenKind::Import if !first && depth <= 0 => {
+                    return;
+                }
+                TokenKind::Newline if depth <= 0 => {
+                    self.eat_newlines();
+                    return;
+                }
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => depth -= 1,
+                _ => {}
+            }
+            self.pos += 1;
+            first = false;
+        }
+    }
+
+    /// Panic-mode resynchronization to the next statement boundary inside a
+    /// block: a newline at bracket depth zero (relative to the error point),
+    /// or a closing `}` once brackets balance -- left unconsumed so the block
+    /// loop closes normally. The caller restores the block's own nesting
+    /// state; this only skips tokens.
+    fn recover_to_stmt_boundary(&mut self) {
+        let mut depth: i64 = 0;
+        loop {
+            match self.peek() {
+                TokenKind::Eof => return,
+                TokenKind::Newline if depth <= 0 => {
+                    self.eat_newlines();
+                    return;
+                }
+                TokenKind::RBrace if depth <= 0 => return,
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => depth -= 1,
+                _ => {}
+            }
+            self.pos += 1;
+        }
     }
 
     /// `import a.b.{ Name, Name }`
@@ -491,13 +609,31 @@ impl Parser {
     fn parse_block(&mut self) -> PResult<Block> {
         let saved_depth = self.depth;
         let saved_ns = self.no_struct;
+        let saved_ns_len = self.ns_save.len();
         let lo = self.expect(TokenKind::LBrace, "'{'")?.span;
         self.depth = 0;
         self.no_struct = false;
         self.eat_newlines();
         let mut stmts = Vec::new();
         while !self.at_p(TokenKind::RBrace) && !self.at_p(TokenKind::Eof) {
-            stmts.push(self.parse_stmt()?);
+            match self.parse_stmt() {
+                Ok(s) => stmts.push(s),
+                // Record and resynchronize to the next statement in this
+                // block, so one bad statement does not hide the rest of the
+                // body (or the rest of the file). The failed statement may
+                // have left `open()`s unclosed; restore this block's resting
+                // state before continuing. At the error cap the error
+                // propagates instead, unwinding the whole parse.
+                Err(e) => {
+                    if !self.record_error(e.clone()) {
+                        return Err(e);
+                    }
+                    self.depth = 0;
+                    self.no_struct = false;
+                    self.ns_save.truncate(saved_ns_len);
+                    self.recover_to_stmt_boundary();
+                }
+            }
             self.eat_newlines();
         }
         let hi = self.expect(TokenKind::RBrace, "'}'")?.span;
@@ -1436,13 +1572,72 @@ fn bin(op: BinOp, lhs: Expr, rhs: Expr) -> Expr {
 
 /// Human-readable token name for error messages.
 fn describe(k: &TokenKind) -> String {
-    match k {
-        TokenKind::Eof => "end of input".into(),
-        TokenKind::Newline => "newline".into(),
-        TokenKind::Ident(s) => format!("`{s}`"),
-        TokenKind::Int(v) => format!("`{v}`"),
-        TokenKind::Float(v) => format!("`{v}`"),
-        TokenKind::Str(_) => "string literal".into(),
-        other => format!("{other:?}"),
-    }
+    use TokenKind::*;
+    let sym = match k {
+        Eof => return "end of input".into(),
+        Newline => return "newline".into(),
+        Ident(s) => return format!("`{s}`"),
+        Int(v) => return format!("`{v}`"),
+        Float(v) => return format!("`{v}`"),
+        Str(_) => return "string literal".into(),
+        True => "true",
+        False => "false",
+        Null => "null",
+        Type => "type",
+        Fun => "fun",
+        Let => "let",
+        Const => "const",
+        If => "if",
+        Else => "else",
+        Match => "match",
+        For => "for",
+        While => "while",
+        In => "in",
+        Return => "return",
+        Break => "break",
+        Continue => "continue",
+        SelfLower => "self",
+        SelfUpper => "Self",
+        Import => "import",
+        Plus => "+",
+        Minus => "-",
+        Star => "*",
+        Slash => "/",
+        Percent => "%",
+        EqEq => "==",
+        NotEq => "!=",
+        Lt => "<",
+        Gt => ">",
+        LtEq => "<=",
+        GtEq => ">=",
+        AmpAmp => "&&",
+        PipePipe => "||",
+        Bang => "!",
+        Amp => "&",
+        Pipe => "|",
+        Caret => "^",
+        Tilde => "~",
+        Shl => "<<",
+        Shr => ">>",
+        Eq => "=",
+        PlusEq => "+=",
+        MinusEq => "-=",
+        StarEq => "*=",
+        SlashEq => "/=",
+        PercentEq => "%=",
+        Arrow => "->",
+        FatArrow => "=>",
+        Question => "?",
+        Dot => ".",
+        DotDot => "..",
+        Comma => ",",
+        Colon => ":",
+        LParen => "(",
+        RParen => ")",
+        LBracket => "[",
+        RBracket => "]",
+        LBrace => "{",
+        RBrace => "}",
+    };
+    format!("`{sym}`")
 }

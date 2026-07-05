@@ -66,7 +66,7 @@ impl<'a> Checker<'a> {
     fn report_duplicate_param_names<'p>(
         &mut self,
         owner: &str,
-        params: impl IntoIterator<Item = (&'p str, prepoly_lexer::Span)>,
+        params: impl IntoIterator<Item = (&'p str, prepoly_parser::Span)>,
     ) {
         let mut seen = HashSet::new();
         for (name, span) in params {

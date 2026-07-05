@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 use prepoly_hir::{
     FloatKind, FunInfo, IntKind, MethodInfo, Program, Type, TypeInfo, TypeKind, int_literal_kind,
 };
-use prepoly_lexer::Span;
+use prepoly_parser::Span;
 use prepoly_parser::ast::{BinOp, Block, Expr, Pattern, Stmt, StrSeg, UnaryOp};
 use prepoly_typesys::{numeric_flows_into, strip_nullable};
 
