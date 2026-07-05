@@ -32,7 +32,7 @@ jobs:
       matrix:
         host:
           - ubuntu-22.04
-          - ubuntu-22.04-arm64
+          - ubuntu-22.04-arm
           - macos-latest
     steps:
       - uses: actions/checkout@v7
