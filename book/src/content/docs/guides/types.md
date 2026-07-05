@@ -27,16 +27,16 @@ type Account = {
 }
 
 // A static method has no `self` parameter.
-fun Account.open(owner: string) -> Account {
+fun Account.open(owner) -> Account {
     return Self { owner: owner, balance: 0 }
 }
 
 // Instance methods take `self` first.
-fun Account.deposit(self, amount: int32) {
+fun Account.deposit(self, amount) {
     self.balance += amount
 }
 
-fun Account.describe(self) -> string {
+fun Account.describe(self) {
     return "{self.owner}: {self.balance}"
 }
 
@@ -52,8 +52,9 @@ Records have reference semantics: `acc.deposit(100)` mutates the account the
 caller sees, because `self` is always a reference. A method is in scope
 wherever the type is, with no separate import.
 
-Method return types are inferred like function return types, so `Account.open`
-could omit its `-> Account` annotation.
+Method parameter and return types are inferred like function ones — `deposit`
+and `describe` above carry no annotations at all, and `Account.open` could
+omit its `-> Account` too.
 
 ## Fields without a type
 
@@ -93,7 +94,7 @@ type Shape =
     | Rectangle { width: float64, height: float64 }
     | Point
 
-fun area(s: Shape) -> float64 {
+fun area(s) {
     return match s {
         Circle { radius } => 3.14159 * radius * radius,
         Rectangle { width, height } => width * height,
@@ -112,7 +113,7 @@ type Expr =
     | Num { value: int32 }
     | BinOp { op: string, left: Expr, right: Expr }
 
-fun eval(e: Expr) -> int32 {
+fun eval(e) {
     return match e {
         Num { value } => value,
         BinOp { op, left, right } => {
@@ -186,7 +187,7 @@ type ConsoleLogger = {
     prefix: string
 }
 
-fun ConsoleLogger.log(self, msg: string) {
+fun ConsoleLogger.log(self, msg) {
     println("[{self.prefix}] {msg}")
 }
 
@@ -195,12 +196,12 @@ type TaggedLogger = {
     tag: string
 }
 
-fun TaggedLogger.log(self, msg: string) {
+fun TaggedLogger.log(self, msg) {
     println("[{self.prefix}/{self.tag}] {msg}")
 }
 
 // No constraint on `logger` other than "has a log method".
-fun run_with(logger, task: string) {
+fun run_with(logger, task) {
     logger.log("starting {task}")
     logger.log("done {task}")
 }

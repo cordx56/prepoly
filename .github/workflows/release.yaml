@@ -38,6 +38,9 @@ jobs:
       - uses: actions/checkout@v7
       - name: Build All
         run: |
+          if [[ "$(uname)" == "Darwin" ]]; then
+            export CARGO_PROFILE_RELEASE_LTO=false
+          fi
           ./x cargo install --root . --path crates/prepoly_driver
           ./x cargo install --root . --path crates/prepoly_language_server
           ./x cargo install --root . --path crates/prepoly_formatter

@@ -36,7 +36,7 @@ builds a record without naming its fields:
 ```prepoly
 type Point = { x: int64, y: int64 }
 
-fun doubled(p: Point) -> Point {
+fun doubled(p: Point) {
     let ret: Point                    // uninitialized
     for field in fields(ret) {
         ret[field] = p[field] * 2     // assigns every field

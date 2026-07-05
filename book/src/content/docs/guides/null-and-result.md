@@ -13,7 +13,7 @@ prepoly has no exceptions. "May be absent" is expressed with the nullable type
 
 ```prepoly
 // Returns the first even number, or null if there is none.
-fun first_even(nums: int32[]) -> int32? {
+fun first_even(nums) -> int32? {
     for n in nums {
         if n % 2 == 0 {
             return n
@@ -46,7 +46,7 @@ Call `error(x)` to produce an error; returning a plain value where a `Result`
 is expected wraps it as `Ok` automatically:
 
 ```prepoly
-fun parse_positive(s: string) {
+fun parse_positive(s) {
     let n = int32.parse(s)!          // `!` returns early on a parse error
     if n < 0 {
         return error("negative number: {n}")
@@ -97,7 +97,7 @@ Conversions that can fail return a Result. `intN.from(x)` range-checks,
 and `T.parse(s)` parses a string:
 
 ```prepoly
-let small: uint8 = uint8.from(42)!  // ok
+let small = uint8.from(42)!         // ok
 let too_big = uint8.from(300)       // Result.Err: out of range
 println(too_big)
 
@@ -121,7 +121,7 @@ returns **null itself** from the enclosing function, so that function's
 return type gains an outer `?`:
 
 ```prepoly
-fun first_even(nums: int32[]) -> int32? {
+fun first_even(nums) -> int32? {
     for n in nums {
         if n % 2 == 0 {
             return n
@@ -132,7 +132,7 @@ fun first_even(nums: int32[]) -> int32? {
 
 // first_even's null flows straight out of `!`, so double_first_even
 // is inferred as (int32[]) -> int32? -- no Result involved.
-fun double_first_even(nums: int32[]) {
+fun double_first_even(nums) {
     let n = first_even(nums)!   // int32? -> int32, or return null now
     return n * 2
 }
@@ -184,7 +184,7 @@ value does not have — becomes `null` instead of a compile error. This lets a
 structurally typed function probe for optional fields:
 
 ```prepoly
-fun get_name(person) -> string {
+fun get_name(person) {
     if person.name {
         return person.name
     } else {

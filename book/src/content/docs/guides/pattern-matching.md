@@ -14,7 +14,7 @@ type Shape =
     | Rectangle { width: float64, height: float64 }
     | Point
 
-fun describe(s: Shape) -> string {
+fun describe(s) {
     return match s {
         Circle { radius } => "circle r={radius}",
         Rectangle { width, height } => "rect {width}x{height}",
@@ -39,7 +39,7 @@ type Holder =
     | Full { data: int32, tag: int32 }
     | Empty
 
-fun first(h: Holder) -> int32 {
+fun first(h) {
     return match h {
         Holder.Full { data, .. } => data,
         Holder.Empty => 0,
@@ -56,7 +56,7 @@ Patterns also include literals (integers, floats, strings, `true`/`false`,
 `null`) and the wildcard `_`, which matches anything:
 
 ```prepoly
-fun classify(n: int32) -> string {
+fun classify(n) {
     return match n {
         0 => "zero",
         1 => "one",
@@ -83,7 +83,7 @@ type Shape =
     | Rectangle { width: float64, height: float64 }
     | Point
 
-fun radius_of(s: Shape) -> float64? {
+fun radius_of(s) {
     if let Circle { radius } = s {
         return radius
     }

@@ -14,19 +14,19 @@ type Vec2 = {
     y: float64
 }
 
-fun Vec2.new(x: float64, y: float64) {
+fun Vec2.new(x, y) {
     return Self { x: x, y: y }
 }
 
-fun Vec2.add(self, other: Vec2) -> Vec2 {
+fun Vec2.add(self, other) {
     return Self { x: self.x + other.x, y: self.y + other.y }
 }
 
-fun Vec2.length(self) -> float64 {
+fun Vec2.length(self) {
     return sqrt(self.x * self.x + self.y * self.y)
 }
 
-fun dot(a: Vec2, b: Vec2) -> float64 {
+fun dot(a, b) {
     return a.x * b.x + a.y * b.y
 }
 

@@ -11,7 +11,7 @@ value.
 ## `if` is an expression
 
 ```prepoly
-fun grade(score: int32) -> string {
+fun grade(score) {
     let result = if score >= 60 { "pass" } else { "fail" }
     return result
 }
@@ -23,7 +23,7 @@ println(grade(31))   // fail
 `else if` chains work as you would expect:
 
 ```prepoly
-fun size_of(n: int32) -> string {
+fun size_of(n) {
     if n < 10 {
         return "small"
     } else if n < 100 {
@@ -39,7 +39,7 @@ fun size_of(n: int32) -> string {
 Here is the Collatz step counter — `while` runs as long as the condition holds:
 
 ```prepoly
-fun collatz_steps(n: int32) -> int32 {
+fun collatz_steps(n) {
     let count = 0
     let x = n
     while x != 1 {

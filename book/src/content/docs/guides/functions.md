@@ -45,7 +45,7 @@ Closures capture their environment **by reference**, so captured variables stay
 shared and mutable across calls:
 
 ```prepoly
-fun make_accumulator(initial: int32) {
+fun make_accumulator(initial) {
     let total = initial
     return (amount: int32) -> {
         total += amount

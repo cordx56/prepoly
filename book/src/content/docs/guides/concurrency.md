@@ -24,7 +24,7 @@ type Counter = {
     total: int32
 }
 
-fun Counter.add(self, n: int32) {
+fun Counter.add(self, n) {
     self.count += 1
     self.total += n
 }
