@@ -2,7 +2,7 @@
 
 if [ -z "$PREPOLY_VERSION" ]; then
     # release version
-    PREPOLY_VERSION="0.1.0"
+    PREPOLY_VERSION="v0.1.0"
 fi
 PREPOLY_REPO_BASE_URL="https://github.com/cordx56/prepoly"
 
