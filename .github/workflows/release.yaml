@@ -39,7 +39,7 @@ jobs:
       - name: Build All
         run: |
           if [[ "$(uname)" == "Darwin" ]]; then
-            export CARGO_PROFILE_RELEASE_LTO=false
+              brew install llvm@22
           fi
           ./x cargo install --root . --path crates/prepoly_driver
           ./x cargo install --root . --path crates/prepoly_language_server
@@ -59,12 +59,10 @@ jobs:
       - build
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
       - name: Generate Release Notes
         run: |
           npx changelogithub@latest --contributors --output release.md

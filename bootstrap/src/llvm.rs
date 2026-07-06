@@ -1,6 +1,10 @@
 use anyhow::{Context as _, bail};
 use sha2::{Digest, Sha256};
-use std::{env, ffi::OsString, fs, path::Path, process::Command};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process,
+};
 use tar::Archive;
 use xz::read::XzDecoder;
 
@@ -38,41 +42,24 @@ pub async fn download_llvm(dest: impl AsRef<Path>) -> anyhow::Result<()> {
     extract(&data, dest)
 }
 
-/// Configure child processes so release builds link the downloaded LLVM with a
-/// matching LTO plugin. The official macOS LLVM 22 archives contain bitcode
-/// members in their static libraries; when Cargo's release profile enables LTO,
-/// Apple's default linker otherwise asks Xcode's older `libLTO.dylib` to read
-/// those members and fails before the final executable is produced.
-pub fn configure_linker(cmd: &mut Command, llvm_path: &Path) {
-    if cfg!(target_os = "macos") {
-        let lto = llvm_path.join("lib").join("libLTO.dylib");
-        if lto.is_file() {
-            append_rustflag(
-                cmd,
-                format!("-Clink-arg=-Wl,-lto_library,{}", lto.display()),
-            );
-        }
-    }
-}
-
-fn append_rustflag(cmd: &mut Command, flag: String) {
-    if env::var_os("CARGO_ENCODED_RUSTFLAGS").is_some() {
-        cmd.env(
-            "CARGO_ENCODED_RUSTFLAGS",
-            appended_env("CARGO_ENCODED_RUSTFLAGS", "\x1f", &flag),
-        );
+pub async fn setup_llvm_path() -> PathBuf {
+    if cfg!(target_os = "macos")
+        && let Ok(brew) = process::Command::new("brew")
+            .args(["--prefix", "llvm@22"])
+            .stdout(process::Stdio::piped())
+            .spawn()
+        && let Ok(output) = brew.wait_with_output()
+    {
+        PathBuf::from(String::from_utf8(output.stdout).expect("non UTF-8 chars in path"))
     } else {
-        cmd.env("RUSTFLAGS", appended_env("RUSTFLAGS", " ", &flag));
+        let llvm_path = env::current_dir().unwrap().join("llvm");
+        if !llvm_path.is_dir() {
+            download_llvm(&llvm_path)
+                .await
+                .expect("failed to download LLVM");
+        }
+        llvm_path
     }
-}
-
-fn appended_env(name: &str, separator: &str, value: &str) -> OsString {
-    let mut values = env::var_os(name).unwrap_or_default();
-    if !values.is_empty() {
-        values.push(separator);
-    }
-    values.push(value);
-    values
 }
 
 /// The release archive file name for the host OS/architecture.
