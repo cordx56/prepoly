@@ -44,6 +44,7 @@ jobs:
           ./x cargo install --root . --path crates/prepoly_driver
           ./x cargo install --root . --path crates/prepoly_language_server
           ./x cargo install --root . --path crates/prepoly_formatter
+          ./x cargo install --root . --path crates/prepoly_package_manager
           tar czf prepoly-"$(rustc --print=host-tuple)".tar.gz bin
       - name: Upload Artifacts
         uses: actions/upload-artifact@v7
