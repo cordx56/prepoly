@@ -58,6 +58,15 @@ Both commands read `package.toml`, fetch any missing dependencies, set the
 `PREPOLY_PACKAGES` environment variable, and invoke `prepoly` on the root
 file (`<package-name>.pp`).
 
+## The language server in a project
+
+`ppm lsp` starts `prepoly-lsp` with the same dependency resolution, so editor
+diagnostics, hover, and completion see the project's dependencies. Point your
+editor's LSP command at `ppm lsp` instead of `prepoly-lsp` (see
+[Installing the LSP server](/installation/lsp/)). In a directory without a
+`package.toml` it simply starts the plain server, so the one editor
+configuration works for projects and loose `.pp` files alike.
+
 ## Adding dependencies
 
 A dependency is either a Git repository pinned to a commit hash, or a local

@@ -33,7 +33,10 @@ with `prepoly check file.pp`.
 
 ## Lexical rules
 
-- Comments: `// line` and `/* block, which may nest */`.
+- Comments: `// line`, `# line` (so a leading `#!/usr/bin/env prepoly`
+  shebang is valid), and `/* block, which may nest */`. A `/** doc comment */`
+  written directly above a `fun` or `type` declaration documents it (shown by
+  editor tooling); use one per public declaration.
 - Newlines separate statements. A line continues onto the next when it ends
   with a binary operator, or when the next line begins with `.` (method chain).
 - Commas between type fields/members and between match arms are optional;
@@ -395,6 +398,12 @@ import geometry.vec as g
   `get_or(k, default)`, `contains_key(k)`, `delete(k)`, `size()`,
   `is_empty()`, `keys()`, `values()`, `pairs()`, `clear()`, and
   `HashMap.from_pairs([[k, v], ...])`.
+- JSON: also nested -- `import std.data.json.{ JsonValue, parse, stringify }`.
+  `parse(text) -> JsonValue!`; accessors `get(key)`, `at(index)`, `as_bool()`,
+  `as_number()`, `as_string()` (each fallible), `is_null()`; `stringify(v)` is
+  a FREE function (`stringify(v)`, not `v.stringify()`). `j.into()!` decodes a
+  JSON value into the record type the call site expects
+  (`const u: User = j.into()!`).
 - `assert(cond, msg?)` aborts when `cond` is false (`msg` is optional).
 - Identifiers beginning with `_` (e.g. `_string_bytes`, `_panic`) are runtime
   internals -- do not call them directly; use the prelude wrappers above.
