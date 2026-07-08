@@ -17,11 +17,13 @@ ppm new myapp
 
 This creates a new directory with the following layout:
 
-| Path                | Purpose                                        |
-| ------------------- | ---------------------------------------------- |
-| `myapp/myapp/`      | Source directory for sub-modules               |
-| `myapp/myapp.pp`    | Package root file (your program's entry point) |
-| `myapp/package.toml`| Package manifest                               |
+| Path                | Purpose                                                                      |
+| ------------------- | ---------------------------------------------------------------------------- |
+| `myapp/myapp/`      | Source directory for sub-modules                                             |
+| `myapp/myapp.pp`    | Package root file (your program's entry point)                               |
+| `myapp/package.toml`| Package manifest                                                             |
+| `myapp/AGENTS.md`   | Instructions teaching LLM agents prepoly (see [LLM agents](/guides/llm/))    |
+| `myapp/CLAUDE.md`   | Symlink to `AGENTS.md`, so Claude Code reads the same instructions           |
 
 To initialize a project in the current directory instead, use `ppm init`:
 

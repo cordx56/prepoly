@@ -3,12 +3,25 @@ title: "Type system"
 description: "The type system in full: literals, conversions, parameter passing, structural typing, nullable, Result, and inference."
 ---
 
-prepoly is statically typed with Hindley-Milner type inference. The whole
-program is checked before anything runs; annotations constrain, they are never
-required for safety. Polymorphic functions are checked again at each call site
-with the actual argument types and compiled per concrete instantiation
-(monomorphization), which is what lets most code omit annotations without
-losing precision.
+prepoly is statically typed with flexible type inference. The whole program
+is checked before anything runs; annotations constrain, they are never
+required for safety.
+
+The inference is Hindley-Milner-**style** — unification over type variables —
+but deliberately not textbook HM, deviating where a scripting language
+benefits:
+
+- A polymorphic function is not generalized once into a principal type
+  scheme; it is checked again at each call site with the actual argument
+  types and compiled per concrete instantiation (monomorphization). This is
+  what lets most code omit annotations without losing precision.
+- Structural typing feeds inference: an unannotated parameter is constrained
+  by the members the body actually uses, not by a nominal signature.
+- Numeric literals default by magnitude and _adapt_ to the context they flow
+  into, and value-preserving numeric conversions are inserted implicitly at
+  flow points (see [Literals](#literals) and
+  [conversions](#explicit-conversions)) — textbook HM would reject these
+  mixed-type uses instead of converting.
 
 ## Primitive types
 

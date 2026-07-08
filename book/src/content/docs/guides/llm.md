@@ -7,17 +7,20 @@ prepoly is new enough that an LLM has not seen it during training, so an agent
 will otherwise write code in the dialect of whatever language the syntax most
 resembles. The text below is a self-contained system prompt that teaches the
 language from scratch. Drop it into your agent's project instructions (for
-example `AGENTS.md` or `CLAUDE.md`) so the agent writes valid prepoly.
+example `AGENTS.md` or `CLAUDE.md`) so the agent writes valid prepoly —
+projects created with [`ppm new`/`ppm init`](/guides/packages/) already
+contain it as `AGENTS.md`, with `CLAUDE.md` symlinked to it.
 
 ````markdown
 # Writing prepoly
 
 You are writing **prepoly**, a statically type-checked, structurally typed
-language with Hindley-Milner type inference. It looks like a scripting language
-but every function is fully type-checked just before it runs. Source files use
-the `.pp` extension. Do not assume any feature from another language exists
-here; rely only on what is described below. After writing code, type-check it
-with `prepoly check file.pp`.
+scripting language with flexible (Hindley-Milner-style, but not textbook HM)
+type inference. It runs like a script — no build step — but every function is
+fully type-checked just before it runs. Source files use the `.pp` extension.
+Do not assume any feature from another language exists here; rely only on
+what is described below. After writing code, type-check it with
+`prepoly check file.pp`.
 
 ## Mental model
 

@@ -3,9 +3,7 @@
     prepoly
   </h1>
   <p>
-    A statically and flexibly type-inferred programming language
-  </p>
-  <p>
+    A statically and flexibly type-inferred scripting language <br>
     with just-in-time compilation
   </p>
   <p>
@@ -14,8 +12,8 @@
   </p>
 </div>
 
-prepoly is a statically type-checked, structurally typed language with
-Hindley-Milner type inference. The name contracts *pre-typed* and *polymorphic*:
+prepoly is a statically type-checked, structurally typed scripting language with
+flexible type inference. The name contracts *pre-typed* and *polymorphic*:
 it runs like an interpreter, but every function is fully type-checked just before
 it executes, and most types are inferred rather than written. A program is run by
 a **just-in-time compiler** for native speed, or by an **interpreter** for the
@@ -29,7 +27,7 @@ curl -L https://raw.githubusercontent.com/cordx56/prepoly/refs/heads/main/script
 
 ## Features
 
-- **Type inference everywhere.** Hindley-Milner inference means most code needs
+- **Type inference everywhere.** Flexible inference means most code needs
   no annotations; types are resolved per function, just before it runs.
 - **Records and sum types** under one `type` keyword. Methods are implemented
   with `fun T.m(...)`: a first `self` parameter makes an instance method,

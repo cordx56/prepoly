@@ -46,6 +46,11 @@ fn main() -> ExitCode {
     }
 }
 
+/// The LLM-agent system prompt scaffolded into new projects as `AGENTS.md`:
+/// the fenced prompt block of the documentation's "LLM agents" page,
+/// extracted by build.rs so the page stays the single source of truth.
+const AGENTS_MD: &str = include_str!(concat!(env!("OUT_DIR"), "/agents.md"));
+
 /// `ppm new <name>`: create a new directory and scaffold the project inside it.
 fn cmd_new(name: &str) -> ExitCode {
     let dir = PathBuf::from(name);
@@ -56,7 +61,8 @@ fn cmd_new(name: &str) -> ExitCode {
     scaffold_project(&dir, name)
 }
 
-/// Write the source directory, root file, and `package.toml` under `dir`.
+/// Write the source directory, root file, `package.toml`, and the agent
+/// instructions (`AGENTS.md` + a `CLAUDE.md` symlink) under `dir`.
 fn scaffold_project(dir: &Path, name: &str) -> ExitCode {
     let src_dir = dir.join(name);
     if let Err(e) = std::fs::create_dir_all(&src_dir) {
@@ -94,8 +100,40 @@ license = "MIT"
         }
     }
 
+    // Agent instructions: AGENTS.md carries the prepoly-teaching prompt, and
+    // CLAUDE.md points at it so both agent conventions read the same file.
+    let agents_path = dir.join("AGENTS.md");
+    if !agents_path.exists()
+        && let Err(e) = std::fs::write(&agents_path, AGENTS_MD)
+    {
+        eprintln!("error: cannot write `{}`: {e}", agents_path.display());
+        return ExitCode::FAILURE;
+    }
+    let claude_path = dir.join("CLAUDE.md");
+    // `symlink_metadata` (not `exists`, which follows links) so an existing
+    // dangling symlink is left alone rather than failed on.
+    if claude_path.symlink_metadata().is_err()
+        && let Err(e) = link_or_copy_agents(&claude_path)
+    {
+        eprintln!("error: cannot create `{}`: {e}", claude_path.display());
+        return ExitCode::FAILURE;
+    }
+
     println!("created project `{name}`");
     ExitCode::SUCCESS
+}
+
+/// Create `CLAUDE.md` as a relative symlink to `AGENTS.md`; on platforms
+/// without symlinks the content is written as a plain copy instead.
+fn link_or_copy_agents(claude_path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("AGENTS.md", claude_path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(claude_path, AGENTS_MD)
+    }
 }
 
 /// Read `package.toml`, fetch dependencies, and return the `PREPOLY_PACKAGES`
