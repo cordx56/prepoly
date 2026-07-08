@@ -9,19 +9,26 @@ compilation/execution with a handful of commands.
 
 ## Creating a project
 
-`ppm new` scaffolds a new project:
+`ppm new` creates a new directory and scaffolds a project inside it:
 
 ```bash
 ppm new myapp
 ```
 
-This creates three things in the current directory:
+This creates a new directory with the following layout:
 
-| Path           | Purpose                                        |
-| -------------- | ---------------------------------------------- |
-| `myapp/`       | Source directory for sub-modules               |
-| `myapp.pp`     | Package root file (your program's entry point) |
-| `package.toml` | Package manifest                               |
+| Path                | Purpose                                        |
+| ------------------- | ---------------------------------------------- |
+| `myapp/myapp/`      | Source directory for sub-modules               |
+| `myapp/myapp.pp`    | Package root file (your program's entry point) |
+| `myapp/package.toml`| Package manifest                               |
+
+To initialize a project in the current directory instead, use `ppm init`:
+
+```bash
+mkdir myapp && cd myapp
+ppm init myapp
+```
 
 The generated `package.toml` looks like this:
 

@@ -17,8 +17,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Create a new prepoly project.
+    /// Create a new prepoly project in a new directory.
     New {
+        /// The package name.
+        name: String,
+    },
+    /// Initialize a prepoly project in the current directory.
+    Init {
         /// The package name.
         name: String,
     },
@@ -34,18 +39,26 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Cmd::New { name } => cmd_new(&name),
+        Cmd::Init { name } => scaffold_project(Path::new("."), &name),
         Cmd::Check => cmd_drive("check"),
         Cmd::Run => cmd_drive("run"),
         Cmd::Lsp => cmd_lsp(),
     }
 }
 
-/// `ppm new <name>`: scaffold a project directory with source dir, root file,
-/// and `package.toml`.
+/// `ppm new <name>`: create a new directory and scaffold the project inside it.
 fn cmd_new(name: &str) -> ExitCode {
-    let root = Path::new(".");
+    let dir = PathBuf::from(name);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("error: cannot create directory `{}`: {e}", dir.display());
+        return ExitCode::FAILURE;
+    }
+    scaffold_project(&dir, name)
+}
 
-    let src_dir = root.join(name);
+/// Write the source directory, root file, and `package.toml` under `dir`.
+fn scaffold_project(dir: &Path, name: &str) -> ExitCode {
+    let src_dir = dir.join(name);
     if let Err(e) = std::fs::create_dir_all(&src_dir) {
         eprintln!(
             "error: cannot create source directory `{}/`: {e}",
@@ -54,7 +67,7 @@ fn cmd_new(name: &str) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let root_file = root.join(format!("{name}.pp"));
+    let root_file = dir.join(format!("{name}.pp"));
     if !root_file.exists()
         && let Err(e) = std::fs::write(&root_file, "")
     {
@@ -62,7 +75,7 @@ fn cmd_new(name: &str) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let manifest_path = root.join("package.toml");
+    let manifest_path = dir.join("package.toml");
     if !manifest_path.exists() {
         let content = format!(
             "[package]\nname = \"{name}\"\nauthor = \"\"\nlicense = \"MIT\"\n\n[dependencies]\n"

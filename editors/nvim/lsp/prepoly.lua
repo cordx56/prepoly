@@ -8,7 +8,7 @@
 --   vim.lsp.config("prepoly", { cmd = { "/path/to/target/debug/prepoly-lsp" } })
 
 return {
-  cmd = { "prepoly-lsp" },
+  cmd = { "ppm", "lsp" },
   filetypes = { "prepoly" },
   -- Imports resolve relative to each file's own directory, so a project root is
   -- optional; with no marker found the server still attaches as a single file.
