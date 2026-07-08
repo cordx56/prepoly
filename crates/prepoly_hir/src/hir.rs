@@ -220,6 +220,8 @@ pub struct TypeInfo {
     /// fields' resolved types wherever they wrote `Self.slot`, and a refinement
     /// (`Base { slot: T }`) or use fills it. Empty for a type without slots.
     pub slots: Vec<(String, u32)>,
+    /// Doc comment from the `type` declaration, shown by editor tooling.
+    pub doc: Option<String>,
 }
 
 impl TypeInfo {

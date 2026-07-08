@@ -20,6 +20,14 @@ type _Entry = {
     value
 }
 
+/**
+ * A hash map from keys to values. Keys may be of any type that renders to a
+ * stable string and compares with `==` (integers, strings, records, ...);
+ * values may be of any type. Construct with `HashMap.new()` or
+ * `HashMap.from_pairs(...)`; the key/value types are inferred from the first
+ * stored pair, or pinned by a refinement such as
+ * `type StringCount = HashMap { key: string, value: int32 }`.
+ */
 type HashMap = {
     // `key`/`value` are type SLOTS -- the map's key and value types -- declared
     // with the `type` marker. They have no runtime storage; they name the type
@@ -47,8 +55,8 @@ type HashMap = {
     tombs: int64
 }
 
-// An empty map. The slot array is sized with `null`; the key/value types are
-// inferred from the values stored later (see the module comment).
+/** An empty map. The key/value types are inferred from the values stored later. */
+// The slot array is sized with `null` (see the module comment).
 fun HashMap.new() {
     let cap: int64 = 8
     let zero: int64 = 0
@@ -63,7 +71,7 @@ fun HashMap.new() {
     return Self { entries: entries, _states: states, cap: cap, count: zero, tombs: zero }
 }
 
-// A map built from an array of `[key, value]` pairs.
+/** A map built from an array of `[key, value]` pairs. */
 fun HashMap.from_pairs(pairs) {
     let m = Self.new()
     for p in pairs {
@@ -165,7 +173,7 @@ fun HashMap._grow(self, new_cap) {
     }
 }
 
-// Insert `key`/`value`, or overwrite the value if `key` is already present.
+/** Insert `key`/`value`, or overwrite the value if `key` is already present. */
 // `self` is mutated (it stores into the slot arrays), so it is inferred as a
 // mutable reference `ref(mut(Self))` -- like every other mutating method here.
 fun HashMap.set(self, key, value) {
@@ -186,7 +194,7 @@ fun HashMap.set(self, key, value) {
     self._insert(key, value)
 }
 
-// The value for `key`, or `null` if absent.
+/** The value for `key`, or `null` if absent. */
 fun HashMap.get(self, key) {
     let idx = self._find(key)
     if idx >= 0 {
@@ -197,8 +205,10 @@ fun HashMap.get(self, key) {
     return null
 }
 
-// The value for `key`, or `dflt` if absent. Unlike `get` this never returns a
-// nullable, so the result is usable without a null check.
+/**
+ * The value for `key`, or `dflt` if absent. Unlike `get` this never returns
+ * a nullable, so the result is usable without a null check.
+ */
 fun HashMap.get_or(self, key, dflt) {
     let idx = self._find(key)
     if idx >= 0 {
@@ -209,12 +219,14 @@ fun HashMap.get_or(self, key, dflt) {
     return dflt
 }
 
+/** Whether `key` is present. */
 fun HashMap.contains_key(self, key) -> bool {
     return self._find(key) >= 0
 }
 
-// Remove `key`, returning whether it was present. The slot becomes a tombstone
-// so probes for other keys still reach past it; tombstones are cleared on grow.
+/** Remove `key`, returning whether it was present. */
+// The slot becomes a tombstone so probes for other keys still reach past it;
+// tombstones are cleared on grow.
 fun HashMap.delete(self, key) -> bool {
     let one: int64 = 1
     let idx = self._find(key)
@@ -227,15 +239,17 @@ fun HashMap.delete(self, key) -> bool {
     return true
 }
 
+/** The number of live pairs. */
 fun HashMap.size(self) -> int64 {
     return self.count
 }
 
+/** Whether the map holds no pairs. */
 fun HashMap.is_empty(self) -> bool {
     return self.count == 0
 }
 
-// The live keys, in unspecified (slot) order.
+/** The live keys, in unspecified (slot) order. */
 fun HashMap.keys(self) {
     let result = []
     let i: int64 = 0
@@ -250,7 +264,7 @@ fun HashMap.keys(self) {
     return result
 }
 
-// The live values, in the same order as `keys`.
+/** The live values, in the same order as `keys`. */
 fun HashMap.values(self) {
     let result = []
     let i: int64 = 0
@@ -265,7 +279,7 @@ fun HashMap.values(self) {
     return result
 }
 
-// The live pairs as `[key, value]` tuples, in the same order as `keys`.
+/** The live pairs as `[key, value]` tuples, in the same order as `keys`. */
 fun HashMap.pairs(self) {
     let result = []
     let i: int64 = 0
@@ -280,7 +294,7 @@ fun HashMap.pairs(self) {
     return result
 }
 
-// Remove every pair, keeping the current capacity and key/value types.
+/** Remove every pair, keeping the current capacity and key/value types. */
 fun HashMap.clear(self) {
     let zero: int64 = 0
     let i: int64 = 0

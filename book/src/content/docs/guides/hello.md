@@ -47,6 +47,27 @@ prepoly check hello.pp
 It prints `ok` when the program is well-typed, or the type errors otherwise.
 Running `prepoly` with no arguments starts an interactive REPL.
 
+## Running as a script
+
+`#` starts a line comment, so a source file may begin with a **shebang** line.
+That lets you run a prepoly file directly, like a shell script:
+
+```prepoly
+#!/usr/bin/env prepoly
+println("Hello from a script!")
+```
+
+Mark the file executable once, then run it by name:
+
+```bash
+chmod +x hello.pp
+./hello.pp
+```
+
+The shebang line is ordinary comment syntax, so the same file still works with
+`prepoly hello.pp`, `prepoly check hello.pp`, and on systems that do not use
+shebangs at all.
+
 ## GCD: Greatest Common Divisor
 
 Next, let's write a practical example.

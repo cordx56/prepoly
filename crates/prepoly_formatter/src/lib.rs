@@ -147,6 +147,18 @@ mod tests {
         );
     }
 
+    // `#` comments survive formatting like `//` ones, and a shebang stays on
+    // the first line.
+    #[test]
+    fn hash_comments_and_shebang_are_preserved() {
+        let src =
+            "#!/usr/bin/env prepoly\n\nfun main() {\n    # before\n    let x = 1 # trailing\n}\n";
+        assert_eq!(
+            roundtrip(src),
+            "#!/usr/bin/env prepoly\n\nfun main() {\n    # before\n    let x = 1 # trailing\n}\n"
+        );
+    }
+
     #[test]
     fn blank_lines_collapse_to_one() {
         let src = "fun a() {\n}\n\n\n\nfun b() {\n}\n";

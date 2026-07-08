@@ -308,10 +308,11 @@ fn value_member_items(full: &FullAnalysis, ty: &Type) -> Vec<CompletionItem> {
         && let TypeKind::Record { methods, .. } = &info.kind
     {
         for (name, m) in methods {
-            items.push(item(
+            items.push(doc_item(
                 name.clone(),
                 CompletionItemKind::METHOD,
                 Some(render_signature(&m.signature)),
+                m.decl.doc.as_deref(),
             ));
         }
     }
@@ -322,12 +323,13 @@ fn value_member_items(full: &FullAnalysis, ty: &Type) -> Vec<CompletionItem> {
     if let Some(class) = base.primitive_class() {
         for ((c, name), symbol) in &full.program.primitive_methods {
             if c == class {
-                let sig = full
-                    .program
-                    .functions
-                    .get(symbol)
-                    .map(|f| render_signature(&f.signature));
-                items.push(item(name.clone(), CompletionItemKind::METHOD, sig));
+                let f = full.program.functions.get(symbol);
+                items.push(doc_item(
+                    name.clone(),
+                    CompletionItemKind::METHOD,
+                    f.map(|f| render_signature(&f.signature)),
+                    f.and_then(|f| f.decl.doc.as_deref()),
+                ));
             }
         }
     }
@@ -368,10 +370,11 @@ fn type_qualified_items(
         }
         TypeKind::Record { methods, .. } => {
             for (n, m) in methods {
-                items.push(item(
+                items.push(doc_item(
                     n.clone(),
                     CompletionItemKind::METHOD,
                     Some(render_signature(&m.signature)),
+                    m.decl.doc.as_deref(),
                 ));
             }
         }
@@ -460,10 +463,11 @@ fn program_symbols(full: &FullAnalysis) -> Vec<CompletionItem> {
     let mut items = Vec::new();
     for f in full.program.functions.values() {
         if visible(&f.module, &f.signature.name) {
-            items.push(item(
+            items.push(doc_item(
                 f.signature.name.clone(),
                 CompletionItemKind::FUNCTION,
                 Some(render_signature(&f.signature)),
+                f.decl.doc.as_deref(),
             ));
         }
     }
@@ -473,7 +477,12 @@ fn program_symbols(full: &FullAnalysis) -> Vec<CompletionItem> {
                 TypeKind::Record { .. } => CompletionItemKind::STRUCT,
                 TypeKind::Sum { .. } => CompletionItemKind::ENUM,
             };
-            items.push(item(t.name.clone(), kind, Some(format!("type {}", t.name))));
+            items.push(doc_item(
+                t.name.clone(),
+                kind,
+                Some(format!("type {}", t.name)),
+                t.doc.as_deref(),
+            ));
         }
     }
     items
@@ -550,4 +559,23 @@ fn item(label: String, kind: CompletionItemKind, detail: Option<String>) -> Comp
         detail,
         ..Default::default()
     }
+}
+
+/// [`item`] plus the declaration's doc comment, rendered as markdown in the
+/// completion detail popup.
+fn doc_item(
+    label: String,
+    kind: CompletionItemKind,
+    detail: Option<String>,
+    doc: Option<&str>,
+) -> CompletionItem {
+    use tower_lsp_server::ls_types::{Documentation, MarkupContent, MarkupKind};
+    let mut it = item(label, kind, detail);
+    it.documentation = doc.map(|d| {
+        Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: d.to_string(),
+        })
+    });
+    it
 }

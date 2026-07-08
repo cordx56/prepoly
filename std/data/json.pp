@@ -10,6 +10,11 @@
 // small, so an association list is the practical representation here (a
 // `HashMap` remains available to user code via `import std.collections.hashmap`).
 
+/**
+ * A parsed JSON value, one variant per JSON kind. Obtain one with `parse`,
+ * inspect it with the accessors (`get`, `at`, `as_*`), decode it into a typed
+ * structure with `into`, and render it back to text with `stringify`.
+ */
 type JsonValue =
     | Null
     | Bool { value: bool }
@@ -20,6 +25,7 @@ type JsonValue =
 
 // ----- accessors -----
 
+/** The boolean inside a `Bool`, or an error for any other kind. */
 fun JsonValue.as_bool(self) -> bool! {
     match self {
         JsonValue.Bool { value } => { return value }
@@ -28,6 +34,7 @@ fun JsonValue.as_bool(self) -> bool! {
     return error("expected a JSON boolean")
 }
 
+/** The number inside a `Number`, or an error for any other kind. */
 fun JsonValue.as_number(self) -> float64! {
     match self {
         JsonValue.Number { value } => { return value }
@@ -36,6 +43,7 @@ fun JsonValue.as_number(self) -> float64! {
     return error("expected a JSON number")
 }
 
+/** The string inside a `String`, or an error for any other kind. */
 fun JsonValue.as_string(self) -> string! {
     match self {
         JsonValue.String { value } => { return value }
@@ -44,6 +52,7 @@ fun JsonValue.as_string(self) -> string! {
     return error("expected a JSON string")
 }
 
+/** Whether this value is JSON `null`. */
 fun JsonValue.is_null(self) -> bool {
     match self {
         JsonValue.Null => { return true }
@@ -52,7 +61,7 @@ fun JsonValue.is_null(self) -> bool {
     return false
 }
 
-// The value of object field `key`, or an error naming the missing field.
+/** The value of object field `key`, or an error naming the missing field. */
 fun JsonValue.get(self, key: string) -> JsonValue! {
     match self {
         JsonValue.Object { keys, vals } => {
@@ -68,7 +77,7 @@ fun JsonValue.get(self, key: string) -> JsonValue! {
     return error("expected a JSON object")
 }
 
-// The element at `index` of an array, or an error when out of range.
+/** The element at `index` of an array, or an error when out of range. */
 fun JsonValue.at(self, index: int64) -> JsonValue! {
     match self {
         JsonValue.Array { value } => {
@@ -83,12 +92,14 @@ fun JsonValue.at(self, index: int64) -> JsonValue! {
 }
 
 // ----- reflective decoding -----
-//
-// `j.into()` decodes `j` into the type the call site expects, driven entirely
-// by that target type: `const u: User = j.into()!`. A scalar target reads the
-// matching JSON scalar; a record target walks its own fields (each decoded
-// recursively); a nullable target accepts JSON null. A JSON value of the wrong
-// kind for the target is a runtime decode error.
+
+/**
+ * Decode `self` into the type the call site expects, driven entirely by that
+ * target type: `const u: User = j.into()!`. A scalar target reads the
+ * matching JSON scalar; a record target walks its own fields (each decoded
+ * recursively); a nullable target accepts JSON null. A JSON value of the
+ * wrong kind for the target is a runtime decode error.
+ */
 fun JsonValue.into(self) -> infer! {
     match self {
         JsonValue.Number { value } => { return infer.from(value) }
@@ -115,6 +126,7 @@ fun JsonValue.into(self) -> infer! {
 // sum with six or more variants (a free function recurses fine), so `stringify`
 // is called as `stringify(value)` rather than `value.stringify()`.
 
+/** Render a `JsonValue` back to compact JSON text (no added whitespace). */
 fun stringify(value: JsonValue) -> string {
     match value {
         JsonValue.Null => { return "null" }
@@ -185,6 +197,10 @@ type _Cursor = {
     pos: int64
 }
 
+/**
+ * Parse `text` as one JSON value. The whole input must be consumed: trailing
+ * content is an error.
+ */
 fun parse(text: string) -> JsonValue! {
     let cur = _Cursor { text: text, pos: 0 }
     cur._skip_ws()

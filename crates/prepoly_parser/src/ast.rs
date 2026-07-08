@@ -69,6 +69,9 @@ pub struct TypeDecl {
     pub interfaces: Vec<String>,
     pub body: TypeBody,
     pub span: Span,
+    /// Cleaned text of the `/** ... */` comment directly above the
+    /// declaration, if any. Editor tooling shows it; execution ignores it.
+    pub doc: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -110,6 +113,9 @@ pub struct Method {
     /// `None` for an interface method declaration (signature only, no body).
     pub body: Option<Block>,
     pub span: Span,
+    /// Doc text inherited from the `fun T.m` declaration that implements this
+    /// method (see [`FunDecl::doc`]); in-type signatures carry none.
+    pub doc: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -123,6 +129,9 @@ pub struct FunDecl {
     pub ret: Option<TypeExpr>,
     pub body: Block,
     pub span: Span,
+    /// Cleaned text of the `/** ... */` comment directly above the
+    /// declaration, if any. Editor tooling shows it; execution ignores it.
+    pub doc: Option<String>,
 }
 
 #[derive(Clone, Debug)]

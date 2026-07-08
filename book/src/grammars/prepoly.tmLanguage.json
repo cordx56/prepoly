@@ -19,8 +19,19 @@
           "name": "comment.line.double-slash.prepoly",
           "match": "//.*$"
         },
+        {
+          "name": "comment.line.number-sign.prepoly",
+          "match": "#.*$"
+        },
+        { "include": "#doc-comment" },
         { "include": "#block-comment" }
       ]
+    },
+    "doc-comment": {
+      "name": "comment.block.documentation.prepoly",
+      "begin": "/\\*\\*(?!/)",
+      "end": "\\*/",
+      "patterns": [{ "include": "#block-comment" }]
     },
     "block-comment": {
       "name": "comment.block.prepoly",

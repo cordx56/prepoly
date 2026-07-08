@@ -289,6 +289,7 @@ fn inject_method_impls(
                 ret: f.ret.clone(),
                 body: f.body.clone(),
                 span: f.span,
+                doc: f.doc.clone(),
             };
             functions.insert(
                 symbol.clone(),
@@ -330,6 +331,7 @@ fn inject_method_impls(
             ret: f.ret.clone(),
             body: Some(f.body.clone()),
             span: f.span,
+            doc: f.doc.clone(),
         };
         let info = types.get_mut(&symbol).expect("symbol just resolved");
         inject_nominal_method(info, method, errors);
@@ -467,6 +469,7 @@ fn type_info(
         span: td.span,
         symbol,
         slots,
+        doc: td.doc.clone(),
     }
 }
 
@@ -559,6 +562,7 @@ fn result_type() -> TypeInfo {
         span: Span::new(0, 0),
         symbol: "Result".into(),
         slots: Vec::new(),
+        doc: None,
     }
 }
 

@@ -12,6 +12,7 @@ This chapter describes the surface syntax exhaustively. Source files use the
 
 ```prepoly
 // a line comment, to the end of the line
+#  a line comment as well
 /* a block comment
    /* which may nest */
    still a comment */
@@ -19,7 +20,54 @@ This chapter describes the surface syntax exhaustively. Source files use the
 
 Block comments nest: each `/*` must be closed by its own `*/`. A newline
 inside a block comment does not separate statements; a newline that ends a
-line comment does. There is no doc-comment form.
+line comment does. `//` and `#` are interchangeable; because `#` starts a
+line comment, a file may begin with a shebang line
+(see [Hello, world!](/guides/hello/#running-as-a-script)):
+
+```prepoly norun
+#!/usr/bin/env prepoly
+```
+
+### Doc comments
+
+A block comment that opens with `/**` is a **documentation comment**. Written
+directly above a `fun` or `type` declaration, it attaches to that declaration
+and is shown by editor tooling — the [language server](/installation/lsp/)
+renders it on hover and in completion, below the signature:
+
+```prepoly
+/** The area of a circle with radius `r`. */
+fun area(r: float64) -> float64 {
+    return 3.14159 * r * r
+}
+
+/**
+ * A named point on the screen.
+ * Coordinates are pixels.
+ */
+type Point = {
+    x: int32
+    y: int32
+}
+
+println(area(2.0))
+```
+
+The text is the comment body with the `/**` and `*/` markers and each line's
+leading `*` decoration removed; it is treated as markdown. Attachment rules:
+
+- The doc comment must sit directly above the declaration: only line breaks
+  and ordinary comments may come between. Several stacked doc comments join
+  into paragraphs.
+- Doc comments attach to `fun` (including method implementations
+  `fun T.m(...)`) and `type` declarations only. One written above anything
+  else — a top-level `let`/`const`, an import, a member signature inside a
+  type body — is ignored like an ordinary comment.
+- A plain `/* ... */` (single asterisk) is never a doc comment, and the empty
+  `/**/` is a plain comment.
+
+Doc comments have no runtime presence; they exist for readers and tooling.
+The standard library documents its public functions and types this way.
 
 ### Identifiers and keywords
 

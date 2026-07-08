@@ -124,5 +124,9 @@ pub fn function_markdown(full: &FullAnalysis, f: &FunInfo, call_args: Option<&[T
             .join(", ");
         value.push_str(&format!("\n\n---\n\n```prepoly\n{bindings}\n```"));
     }
+    // The declaration's doc comment, as markdown prose below the code.
+    if let Some(doc) = f.decl.doc.as_deref() {
+        value.push_str(&format!("\n\n---\n\n{doc}"));
+    }
     value
 }

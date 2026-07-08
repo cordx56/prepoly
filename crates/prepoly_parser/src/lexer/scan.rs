@@ -13,25 +13,44 @@ pub struct LexError {
     pub span: Span,
 }
 
+/// A `/** ... */` documentation comment. The text is the comment body with the
+/// markers and any per-line leading `*` decoration removed; the span covers
+/// the whole comment including the markers. Doc comments are not tokens: the
+/// parser receives them on a side channel and attaches each one to the
+/// declaration it directly precedes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocComment {
+    pub text: String,
+    pub span: Span,
+}
+
 struct Lexer<'a> {
     src: &'a [u8],
     pos: usize,
     tokens: Vec<Token>,
+    docs: Vec<DocComment>,
 }
 
 /// Tokenize `src` into a token vector terminated by `Eof`.
 ///
 /// Leading newlines and newlines adjacent to other newlines are collapsed so
 /// the parser never sees empty statements. Comments are discarded but a
-/// newline that ends a `//` comment still separates statements.
+/// newline that ends a `//` or `#` comment still separates statements.
 pub fn lex(src: &str) -> Result<Vec<Token>, LexError> {
+    lex_with_docs(src).map(|(tokens, _)| tokens)
+}
+
+/// Like [`lex`], but also collects `/** ... */` documentation comments in
+/// source order so the parser can attach them to declarations.
+pub fn lex_with_docs(src: &str) -> Result<(Vec<Token>, Vec<DocComment>), LexError> {
     let mut lx = Lexer {
         src: src.as_bytes(),
         pos: 0,
         tokens: Vec::new(),
+        docs: Vec::new(),
     };
     lx.run()?;
-    Ok(lx.tokens)
+    Ok((lx.tokens, lx.docs))
 }
 
 impl<'a> Lexer<'a> {
@@ -75,13 +94,21 @@ impl<'a> Lexer<'a> {
                         self.pos += 1;
                     }
                 }
+                // `#` starts a line comment; this also makes a leading
+                // `#!/usr/bin/env prepoly` shebang line valid source.
+                b'#' => {
+                    while self.pos < self.src.len() && self.src[self.pos] != b'\n' {
+                        self.pos += 1;
+                    }
+                }
                 b'/' if self.peek(1) == Some(b'*') => self.skip_block_comment()?,
                 _ => return Ok(()),
             }
         }
     }
 
-    /// Skip a `/* ... */` block comment. Block comments nest.
+    /// Skip a `/* ... */` block comment. Block comments nest. A comment that
+    /// opens with `/**` is recorded as a [`DocComment`] for the parser.
     fn skip_block_comment(&mut self) -> Result<(), LexError> {
         let start = self.pos;
         self.pos += 2;
@@ -101,6 +128,14 @@ impl<'a> Lexer<'a> {
         if depth != 0 {
             return Err(LexError {
                 message: "unterminated block comment".into(),
+                span: Span::new(start, self.pos),
+            });
+        }
+        let raw = std::str::from_utf8(&self.src[start..self.pos])
+            .map_err(|_| self.err(start, "invalid utf-8"))?;
+        if let Some(text) = clean_doc_comment(raw) {
+            self.docs.push(DocComment {
+                text,
                 span: Span::new(start, self.pos),
             });
         }
@@ -416,6 +451,37 @@ impl<'a> Lexer<'a> {
             span: Span::new(lo, self.pos.max(lo + 1)),
         }
     }
+}
+
+/// Extract the documentation text from a raw block comment, or `None` when
+/// the comment is not a doc comment. A doc comment opens with exactly `/**`
+/// (so `/*` stays a plain comment and `/**/` is empty); each line loses its
+/// indentation and one optional leading `* ` decoration, and blank lines at
+/// either end are dropped. Interior blank lines survive so the text can hold
+/// markdown paragraphs.
+fn clean_doc_comment(raw: &str) -> Option<String> {
+    // Shorter than `/**x*/` the `/**` opener and `*/` closer would overlap
+    // (`/**/` is an empty plain comment, not a doc comment).
+    if raw.len() < 5 {
+        return None;
+    }
+    let inner = raw.strip_prefix("/**")?;
+    let inner = inner.strip_suffix("*/").unwrap_or(inner);
+    let lines: Vec<String> = inner
+        .split('\n')
+        .map(|line| {
+            let line = line.trim();
+            match line.strip_prefix('*') {
+                Some(rest) => rest.strip_prefix(' ').unwrap_or(rest),
+                None => line,
+            }
+            .trim_end()
+            .to_string()
+        })
+        .collect();
+    let first = lines.iter().position(|l| !l.is_empty())?;
+    let last = lines.iter().rposition(|l| !l.is_empty())?;
+    Some(lines[first..=last].join("\n"))
 }
 
 fn is_ident_start(c: u8) -> bool {

@@ -195,11 +195,19 @@ fn cmd_drive(mode: &str) -> ExitCode {
     }
 }
 
-/// Start `prepoly-lsp` with `PREPOLY_PACKAGES` set.
+/// Start `prepoly-lsp`, with `PREPOLY_PACKAGES` set when the current
+/// directory is a ppm project. Without a `package.toml` (the editor opened a
+/// plain directory of .pp files) the server still starts, just without
+/// package resolution: editors run this command at startup, so it must not
+/// die where `prepoly-lsp` itself would come up.
 fn cmd_lsp() -> ExitCode {
-    let env_val = match resolve_packages() {
-        Ok(v) => v,
-        Err(code) => return code,
+    let env_val = if Path::new("package.toml").exists() {
+        match resolve_packages() {
+            Ok(v) => v,
+            Err(code) => return code,
+        }
+    } else {
+        String::new()
     };
 
     let mut cmd = Command::new("prepoly-lsp");

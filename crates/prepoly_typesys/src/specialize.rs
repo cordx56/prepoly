@@ -146,6 +146,7 @@ fn specialize_one(
         )),
         body,
         span: src.span,
+        doc: src.doc.clone(),
     };
     Ok((decl, info.module.clone()))
 }

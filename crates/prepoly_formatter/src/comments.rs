@@ -34,6 +34,16 @@ pub fn extract(src: &str) -> Vec<Comment> {
                     span: Span::new(lo, i),
                 });
             }
+            // `#` line comments (including a leading shebang), as in the lexer.
+            b'#' => {
+                let lo = i;
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                out.push(Comment {
+                    span: Span::new(lo, i),
+                });
+            }
             b'/' if b.get(i + 1) == Some(&b'*') => {
                 let lo = i;
                 i += 2;

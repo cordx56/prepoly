@@ -9,7 +9,10 @@ pub mod lexer;
 pub mod newline;
 mod parser;
 
-pub use lexer::{LexError, Span, StrPart, Token, TokenKind, keyword_or_ident, lex, line_col};
+pub use lexer::{
+    DocComment, LexError, Span, StrPart, Token, TokenKind, keyword_or_ident, lex, lex_with_docs,
+    line_col,
+};
 pub use parser::{ParseError, parse, parse_recovering, parse_with_base};
 
 #[cfg(test)]
@@ -454,6 +457,51 @@ mod tests {
             }
             other => panic!("expected qualified variant literal, got {other:?}"),
         }
+    }
+
+    // Doc comments: a `/** ... */` directly above a declaration lands in its
+    // `doc` field, with the markers and per-line `*` decoration stripped.
+    #[test]
+    fn doc_comment_attaches_to_fun_and_type() {
+        let m = module(
+            "/** Adds one. */\nfun inc(x) {\n    return x + 1\n}\n\n/**\n * A 2D point.\n * Units are pixels.\n */\ntype Point = {\n    x: int32\n    y: int32\n}\n",
+        );
+        let TopLevel::Fun(f) = &m.items[0] else {
+            panic!("expected a function");
+        };
+        assert_eq!(f.doc.as_deref(), Some("Adds one."));
+        let TopLevel::Type(t) = &m.items[1] else {
+            panic!("expected a type");
+        };
+        assert_eq!(t.doc.as_deref(), Some("A 2D point.\nUnits are pixels."));
+    }
+
+    // A doc comment buried inside an earlier body must not leak onto the next
+    // declaration, and a plain `/* */` comment is not documentation.
+    #[test]
+    fn doc_comment_does_not_leak_or_misfire() {
+        let m = module(
+            "fun f() {\n    /** stray */\n    let x = 1\n}\n\n/* plain */\nfun g() {\n    return 0\n}\n",
+        );
+        let TopLevel::Fun(g) = &m.items[1] else {
+            panic!("expected a function");
+        };
+        assert_eq!(g.doc, None);
+        let TopLevel::Fun(f) = &m.items[0] else {
+            panic!("expected a function");
+        };
+        assert_eq!(f.doc, None);
+    }
+
+    // Blank lines and `//` comments between the doc and the declaration do not
+    // detach it; stacked doc comments join into paragraphs.
+    #[test]
+    fn doc_comment_attachment_is_tolerant() {
+        let m = module("/** First. */\n/** Second. */\n\n// note\nfun h() {\n    return 0\n}\n");
+        let TopLevel::Fun(h) = &m.items[0] else {
+            panic!("expected a function");
+        };
+        assert_eq!(h.doc.as_deref(), Some("First.\n\nSecond."));
     }
 
     #[test]

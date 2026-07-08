@@ -105,6 +105,52 @@ fn hover_shows_unknown_numbered_signature() {
     assert!(!text.contains("---"), "no bindings without a call: {text}");
 }
 
+/// A `/** ... */` comment directly above a function shows as prose below the
+/// signature block on hover -- at the declaration and at a call site.
+#[test]
+fn hover_shows_function_doc_comment() {
+    let src = "/** Adds one to `x`. */\nfun inc(x: int32) -> int32 {\n    return x + 1\n}\n\nfun main() {\n    let y = inc(2)\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "inc(x", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover over the declaration"));
+    assert!(text.contains("fun inc(x: int32) -> int32"), "{text}");
+    assert!(text.contains("Adds one to `x`."), "doc shown: {text}");
+    let (doc, pos) = position(src, "inc(2", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover over the call"));
+    assert!(
+        text.contains("Adds one to `x`."),
+        "doc at call site: {text}"
+    );
+}
+
+/// Doc comments written in the standard library reach hover through the
+/// prelude cache: `println` documents itself.
+#[test]
+fn hover_shows_stdlib_doc_comment() {
+    let src = "fun main() {\n    println(1)\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "println", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover over println"));
+    assert!(
+        text.contains("followed by a newline"),
+        "stdlib doc shown: {text}"
+    );
+}
+
+/// A doc comment above a `type` declaration shows on hover of the type name,
+/// and one above a `fun T.m` implementation shows on hover of `recv.m`.
+#[test]
+fn hover_shows_type_and_method_doc_comments() {
+    let src = "/**\n * A 2D point.\n */\ntype Point = {\n    x: float64\n    y: float64\n    norm(self) -> float64\n}\n\n/** Euclidean norm. */\nfun Point.norm(self) -> float64 {\n    return sqrt(self.x * self.x + self.y * self.y)\n}\n\nfun main() {\n    let p = Point { x: 3.0, y: 4.0 }\n    let n = p.norm()\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "Point {", true);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover over the type name"));
+    assert!(text.contains("A 2D point."), "type doc shown: {text}");
+    let (doc, pos) = position(src, "norm()", true);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover over the method"));
+    assert!(text.contains("Euclidean norm."), "method doc shown: {text}");
+}
+
 /// Calling an unannotated parameter (`fun apply(f, x) { f(x) }`) constrains it to
 /// a function type, so hover shows `apply` as a higher-order function -- `f` as
 /// `(U) -> V` (a function value, shown without a `ref`/`mut` wrapper) rather than

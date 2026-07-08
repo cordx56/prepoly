@@ -12,22 +12,28 @@ const INT64_MIN = -9223372036854775807 - 1
 
 // The conversions that can fail return `T!` (a `Result`): the `!` propagates the
 // underlying conversion's error, and the success value is wrapped as `Ok`.
+
+/** Convert a numeric value to `int32`. Fails when the value does not fit. */
 fun int32_from(x) -> int32! {
     return int32.from(x)!
 }
 
+/** Parse a decimal string as `int32`. Fails on malformed or out-of-range input. */
 fun int32_parse(s: string) -> int32! {
     return int32.parse(s)!
 }
 
+/** Convert a numeric value to `float64`. */
 fun float64_from(x) -> float64 {
     return float64.from(x)
 }
 
+/** Parse a decimal string as `float64`. Fails on malformed input. */
 fun float64_parse(s: string) -> float64! {
     return float64.parse(s)!
 }
 
+/** The text rendering of any value, as `print` would show it. */
 fun string_from(x) -> string {
     return string.from(x)
 }

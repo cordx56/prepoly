@@ -81,7 +81,11 @@ pub fn hover(doc: &Document, full: &FullAnalysis, pos: Position) -> Option<Hover
             return Some(function_hover(full, f, call_args, Some(doc.range_of(span))));
         }
         if let Some(t) = full.program.resolve_type(&module, &name) {
-            return Some(markup(render_type_def(t), Some(doc.range_of(span))));
+            return Some(markup_with_doc(
+                render_type_def(t),
+                t.doc.as_deref(),
+                Some(doc.range_of(span)),
+            ));
         }
     }
 
@@ -109,7 +113,11 @@ fn value_hover(full: &FullAnalysis, name: &str, ty: &Type, range: Option<Range>)
     if let Type::Record(n) = core
         && let Some(info) = full.program.type_by_id(n.id)
     {
-        return markup(render_type_def_with(info, &n.substitution), range);
+        return markup_with_doc(
+            render_type_def_with(info, &n.substitution),
+            info.doc.as_deref(),
+            range,
+        );
     }
     let mut namer = UnknownNamer::default();
     markup(format!("{name}: {}", render_type(ty, &mut namer)), range)
@@ -168,7 +176,35 @@ fn method_hover(doc: &Document, full: &FullAnalysis, local: usize, global: usize
         mutated.as_deref(),
         &mut UnknownNamer::default(),
     );
-    Some(markup(rendered, Some(doc.range_of(span))))
+    Some(markup_with_doc(
+        rendered,
+        method_doc(full, &recv_ty, &name),
+        Some(doc.range_of(span)),
+    ))
+}
+
+/// The doc comment of the method `name` on `recv_ty` -- from the `fun T.m`
+/// declaration for a record/sum method, or the stdlib function declaration for
+/// a primitive/array method.
+fn method_doc<'a>(full: &'a FullAnalysis, recv_ty: &Type, name: &str) -> Option<&'a str> {
+    let mut t = recv_ty;
+    while let Type::Ref(i) | Type::Mut(i) | Type::ConstOf(i) | Type::Nullable(i) = t {
+        t = i;
+    }
+    if let Type::Record(n) | Type::Sum(n) = t
+        && let TypeKind::Record { methods, .. } = &full.program.type_by_id(n.id)?.kind
+    {
+        return methods.get(name).and_then(|m| m.decl.doc.as_deref());
+    }
+    let class = t.primitive_class()?;
+    let symbol = full
+        .program
+        .primitive_methods
+        .get(&(class.to_string(), name.to_string()))?;
+    full.program
+        .functions
+        .get(symbol)
+        .and_then(|f| f.decl.doc.as_deref())
 }
 
 /// Resolve `sig` against the receiver's instance using the type's scheme. The
@@ -449,10 +485,20 @@ fn local_range(doc: &Document, full: &FullAnalysis, span: Span) -> Option<Range>
 
 /// Wrap rendered text in a Prepoly code block for the hover popup.
 fn markup(code: String, range: Option<Range>) -> Hover {
+    markup_with_doc(code, None, range)
+}
+
+/// Like [`markup`], with the declaration's doc comment (already markdown
+/// prose) appended below the code block behind a separator.
+fn markup_with_doc(code: String, doc: Option<&str>, range: Option<Range>) -> Hover {
+    let mut value = format!("```prepoly\n{code}\n```");
+    if let Some(doc) = doc {
+        value.push_str(&format!("\n\n---\n\n{doc}"));
+    }
     Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
-            value: format!("```prepoly\n{code}\n```"),
+            value,
         }),
         range,
     }

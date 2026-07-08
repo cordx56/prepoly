@@ -11,7 +11,7 @@
 //! Statement blocks reset to `depth == 0` so newlines separate their
 //! statements even when the block is nested inside brackets (closure bodies).
 
-use crate::lexer::{Span, StrPart, Token, TokenKind, lex};
+use crate::lexer::{DocComment, Span, StrPart, Token, TokenKind, lex_with_docs};
 
 use crate::ast::*;
 
@@ -56,7 +56,7 @@ pub fn parse_recovering(src: &str, base: usize) -> (Module, Vec<ParseError>) {
     };
     // A lexing error is unrecoverable (the token stream ends there); report it
     // alone with whatever an empty module gives the caller.
-    let mut tokens = match lex(src) {
+    let (mut tokens, mut docs) = match lex_with_docs(src) {
         Ok(t) => t,
         Err(e) => {
             let err = ParseError {
@@ -69,13 +69,20 @@ pub fn parse_recovering(src: &str, base: usize) -> (Module, Vec<ParseError>) {
     for t in &mut tokens {
         t.span = Span::new(t.span.lo + base, t.span.hi + base);
     }
-    let mut p = Parser::new(tokens, base);
+    for d in &mut docs {
+        d.span = Span::new(d.span.lo + base, d.span.hi + base);
+    }
+    let mut p = Parser::new(tokens, docs, base);
     let module = p.parse_module();
     (module, p.errors)
 }
 
 struct Parser {
     tokens: Vec<Token>,
+    /// Doc comments collected by the lexer, in source order. Attachment is by
+    /// span: a doc comment belongs to the declaration whose first token it
+    /// directly precedes (see [`Parser::doc_before`]).
+    docs: Vec<DocComment>,
     pos: usize,
     /// The file's span base (multi-file offset). Interpolation fragments are
     /// re-lexed from offset zero, so their sub-parser shifts spans by this base
@@ -110,9 +117,10 @@ const MAX_PARSE_ERRORS: usize = 20;
 const MAX_EXPR_DEPTH: usize = 150;
 
 impl Parser {
-    fn new(tokens: Vec<Token>, base: usize) -> Self {
+    fn new(tokens: Vec<Token>, docs: Vec<DocComment>, base: usize) -> Self {
         Parser {
             tokens,
+            docs,
             pos: 0,
             base,
             expr_depth: 0,
@@ -410,9 +418,46 @@ impl Parser {
 
     fn parse_top_level(&mut self) -> PResult<TopLevel> {
         match self.peek() {
-            TokenKind::Type => Ok(TopLevel::Type(self.parse_type_decl()?)),
-            TokenKind::Fun => Ok(TopLevel::Fun(self.parse_fun_decl()?)),
+            TokenKind::Type => {
+                let doc = self.doc_before();
+                let mut d = self.parse_type_decl()?;
+                d.doc = doc;
+                Ok(TopLevel::Type(d))
+            }
+            TokenKind::Fun => {
+                let doc = self.doc_before();
+                let mut d = self.parse_fun_decl()?;
+                d.doc = doc;
+                Ok(TopLevel::Fun(d))
+            }
             _ => Ok(TopLevel::Stmt(self.parse_stmt()?)),
+        }
+    }
+
+    /// The doc comment(s) written directly above the declaration that starts
+    /// at the current token: every doc comment lying between the previous
+    /// non-newline token and the current one (i.e. with nothing but line
+    /// breaks and plain comments in between). Stacked doc comments join into
+    /// paragraphs. Comments are matched by span, so a doc comment buried
+    /// inside an earlier construct never leaks onto a later declaration.
+    fn doc_before(&self) -> Option<String> {
+        let cur_lo = self.tokens[self.pos].span.lo;
+        let prev_hi = self.tokens[..self.pos]
+            .iter()
+            .rev()
+            .find(|t| !matches!(t.kind, TokenKind::Newline))
+            .map(|t| t.span.hi)
+            .unwrap_or(self.base);
+        let texts: Vec<&str> = self
+            .docs
+            .iter()
+            .filter(|d| d.span.lo >= prev_hi && d.span.hi <= cur_lo)
+            .map(|d| d.text.as_str())
+            .collect();
+        if texts.is_empty() {
+            None
+        } else {
+            Some(texts.join("\n\n"))
         }
     }
 
@@ -461,6 +506,7 @@ impl Parser {
             name,
             interfaces,
             body,
+            doc: None,
         })
     }
 
@@ -506,6 +552,7 @@ impl Parser {
                 params,
                 ret,
                 body: None,
+                doc: None,
             }))
         } else {
             let ty = if self.eat(TokenKind::Colon) {
@@ -617,6 +664,7 @@ impl Parser {
             params,
             ret,
             body,
+            doc: None,
         })
     }
 
@@ -1610,14 +1658,15 @@ impl Parser {
 /// shifted to stay attributable to the real file and line.
 fn parse_sub_expr(raw: &str, shift: usize) -> PResult<Expr> {
     let reattribute = |s: Span| Span::new(s.lo + shift, s.hi + shift);
-    let mut tokens = lex(raw).map_err(|e| ParseError {
+    let mut tokens = crate::lexer::lex(raw).map_err(|e| ParseError {
         message: format!("in string interpolation: {}", e.message),
         span: reattribute(e.span),
     })?;
     for t in &mut tokens {
         t.span = reattribute(t.span);
     }
-    let mut p = Parser::new(tokens, shift);
+    // An interpolation fragment is an expression; no declarations, no docs.
+    let mut p = Parser::new(tokens, Vec::new(), shift);
     p.eat_newlines();
     let e = p.parse_expr()?;
     p.eat_newlines();

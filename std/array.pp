@@ -5,7 +5,7 @@
 // import. `infer[]` requires an array while leaving the element type to
 // inference, so each method stays generic over it.
 
-// Apply `f` to each element, returning a new array of the results.
+/** Apply `f` to each element, returning a new array of the results. */
 fun infer[].map(self, f) {
     let result = []
     for item in self {
@@ -14,7 +14,7 @@ fun infer[].map(self, f) {
     return result
 }
 
-// Keep the elements for which `pred` returns true.
+/** A new array keeping only the elements for which `pred` returns true. */
 fun infer[].filter(self, pred) {
     let result = []
     for item in self {
@@ -25,7 +25,7 @@ fun infer[].filter(self, pred) {
     return result
 }
 
-// Left fold: combine elements into a single accumulator starting from `init`.
+/** Left fold: combine the elements into one accumulator, starting from `init`. */
 fun infer[].fold(self, init, f) {
     let acc = init
     for item in self {
@@ -34,16 +34,18 @@ fun infer[].fold(self, init, f) {
     return acc
 }
 
-// Run `f` for its side effects on each element.
+/** Run `f` for its side effects on each element. */
 fun infer[].each(self, f) {
     for item in self {
         f(item)
     }
 }
 
-// A copy of `self[start..end]`. Bounds are `int64` (the type of `len`), so both
-// `arr.slice(1, 4)` and `arr.slice(1, arr.len())` work and the loop counter stays
-// `int64`.
+/**
+ * A copy of the elements from `start` (inclusive) to `end` (exclusive).
+ * Bounds are `int64` (the type of `len`), so both `arr.slice(1, 4)` and
+ * `arr.slice(1, arr.len())` work.
+ */
 fun infer[].slice(self, start: int64, end: int64) {
     let one: int64 = 1
     let result = []
@@ -55,7 +57,7 @@ fun infer[].slice(self, start: int64, end: int64) {
     return result
 }
 
-// The elements of `self` in reverse order.
+/** A new array with the elements in reverse order. */
 fun infer[].reverse(self) {
     let one: int64 = 1
     let result = []
@@ -67,9 +69,10 @@ fun infer[].reverse(self) {
     return result
 }
 
-// Membership test for arrays: `arr.contains(x)` checks elements by `==`.
-// Substring search on strings is a distinct operation (`s.find(sub)`), because
-// strings are not iterated directly.
+/**
+ * Whether some element equals `x` (compared with `==`). Substring search on
+ * strings is a distinct operation: use `s.find(sub)`.
+ */
 fun infer[].contains(self, x) {
     for item in self {
         if item == x {
@@ -79,7 +82,8 @@ fun infer[].contains(self, x) {
     return false
 }
 
-// Insertion sort returning a new ascending array, ordering with `<`/`>`.
+/** A new array with the elements sorted ascending, ordered with `<`/`>`. */
+// Insertion sort.
 fun infer[].sort(self) {
     let one: int64 = 1
     let result = []

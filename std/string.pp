@@ -4,7 +4,11 @@
 // positions, and the per-character helpers advance by each character's byte
 // length. Part of the implicit prelude.
 
-// Split `self` on every occurrence of `sep`.
+/**
+ * Split `self` on every occurrence of `sep`, one field per boundary: interior
+ * and trailing empty fields are kept, and an empty `sep` yields the whole
+ * string unsplit.
+ */
 fun string.split(self, sep: string) -> string[] {
     let result = []
     // An empty separator has a match at every position, so `_string_find` always
@@ -40,11 +44,12 @@ fun string.split(self, sep: string) -> string[] {
     return result
 }
 
-// Strip leading and trailing ASCII whitespace. Multibyte-safe: whitespace is
-// always a single byte, so the probes advance/retreat one byte at a time, and a
-// probe that lands mid-character (`_string_char_at` returns null there) means a
-// multibyte character -- never whitespace -- so the scan stops. The null probe is
-// handled with `if let`, never compared as a string.
+/** A copy of `self` with leading and trailing ASCII whitespace removed. */
+// Multibyte-safe: whitespace is always a single byte, so the probes
+// advance/retreat one byte at a time, and a probe that lands mid-character
+// (`_string_char_at` returns null there) means a multibyte character -- never
+// whitespace -- so the scan stops. The null probe is handled with `if let`,
+// never compared as a string.
 fun string.trim(self) -> string {
     let one: int64 = 1
     let start: int64 = 0
@@ -74,6 +79,7 @@ fun string.trim(self) -> string {
     return _string_slice(self, start, end)
 }
 
+/** Whether `self` begins with `prefix`. */
 fun string.starts_with(self, prefix: string) -> bool {
     if len(prefix) > len(self) {
         return false
@@ -81,6 +87,7 @@ fun string.starts_with(self, prefix: string) -> bool {
     return _string_slice(self, 0, len(prefix)) == prefix
 }
 
+/** Whether `self` ends with `suffix`. */
 fun string.ends_with(self, suffix: string) -> bool {
     if len(suffix) > len(self) {
         return false
@@ -88,15 +95,16 @@ fun string.ends_with(self, suffix: string) -> bool {
     return _string_slice(self, len(self) - len(suffix), len(self)) == suffix
 }
 
-// `s.find(sub)`: the byte offset of the first occurrence of substring `sub` in
-// `s`, or null if absent. This is the string substring search, distinct from the
-// polymorphic element-membership `contains` (use `s.find(sub) != null` for a
-// substring test).
+/**
+ * The byte offset of the first occurrence of substring `sub`, or null if
+ * absent. Use `s.find(sub) != null` for a substring test; the array method
+ * `contains` compares whole elements, not substrings.
+ */
 fun string.find(self, sub: string) -> int64? {
     return _string_find(self, sub)
 }
 
-// Replace every occurrence of `old` with `new`.
+/** A copy of `self` with every occurrence of `old` replaced by `new`. */
 fun string.replace(self, old: string, new: string) -> string {
     if len(old) == 0 {
         return self
@@ -117,8 +125,10 @@ fun string.replace(self, old: string, new: string) -> string {
     return result
 }
 
-// The characters of `self` as a one-element-per-character array. Advances by each
-// character's byte length so multibyte UTF-8 characters are handled correctly.
+/**
+ * The characters of `self` as a one-string-per-character array. Multibyte
+ * UTF-8 characters are kept whole.
+ */
 fun string.chars(self) -> string[] {
     let result = []
     let i: int64 = 0
@@ -133,8 +143,7 @@ fun string.chars(self) -> string[] {
     return result
 }
 
-// Join the string elements of `self` with `sep` between each. A method on the
-// array type, so `parts.join(", ")` reaches it.
+/** Join the string elements of `self` with `sep` between each. */
 fun string[].join(self, sep: string) -> string {
     let result = ""
     let first = true
@@ -149,9 +158,10 @@ fun string[].join(self, sep: string) -> string {
     return result
 }
 
-// ASCII upper-casing implemented over the UTF-8 byte view. An ASCII case change
-// preserves UTF-8 validity, so the byte->string conversion cannot fail; matching
-// (rather than `!`) keeps `to_upper` non-fallible, returning `string` not `string!`.
+/** A copy of `self` with ASCII letters upper-cased; other characters are unchanged. */
+// Implemented over the UTF-8 byte view. An ASCII case change preserves UTF-8
+// validity, so the byte->string conversion cannot fail; matching (rather than
+// `!`) keeps `to_upper` non-fallible, returning `string` not `string!`.
 fun string.to_upper(self) -> string {
     let bytes = _string_bytes(self)
     let result = []
@@ -168,6 +178,7 @@ fun string.to_upper(self) -> string {
     }
 }
 
+/** A copy of `self` with ASCII letters lower-cased; other characters are unchanged. */
 fun string.to_lower(self) -> string {
     let bytes = _string_bytes(self)
     let result = []

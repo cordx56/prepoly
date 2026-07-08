@@ -5,7 +5,7 @@
 mod scan;
 mod token;
 
-pub use scan::{LexError, lex};
+pub use scan::{DocComment, LexError, lex, lex_with_docs};
 pub use token::{Span, StrPart, Token, TokenKind, keyword_or_ident};
 
 /// Compute a 1-based (line, column) for a byte offset in `src`, for error
@@ -91,6 +91,46 @@ mod tests {
                 TokenKind::Ident("b".into()),
                 TokenKind::Eq,
                 TokenKind::Int(2),
+                TokenKind::Newline,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    // `#` comments run to end of line; the terminating newline still
+    // separates statements, mirroring `//` behavior.
+    #[test]
+    fn hash_line_comment() {
+        let k = kinds("let a = 1 # trailing comment\nlet b = 2");
+        assert_eq!(
+            k,
+            vec![
+                TokenKind::Let,
+                TokenKind::Ident("a".into()),
+                TokenKind::Eq,
+                TokenKind::Int(1),
+                TokenKind::Newline,
+                TokenKind::Let,
+                TokenKind::Ident("b".into()),
+                TokenKind::Eq,
+                TokenKind::Int(2),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    // A leading shebang line must lex as a comment so scripts can start with
+    // `#!/usr/bin/env prepoly`.
+    #[test]
+    fn shebang_line() {
+        let k = kinds("#!/usr/bin/env prepoly\nlet a = 1\n");
+        assert_eq!(
+            k,
+            vec![
+                TokenKind::Let,
+                TokenKind::Ident("a".into()),
+                TokenKind::Eq,
+                TokenKind::Int(1),
                 TokenKind::Newline,
                 TokenKind::Eof,
             ]
