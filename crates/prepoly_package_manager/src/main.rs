@@ -26,6 +26,8 @@ enum Cmd {
     Check,
     /// Run the current package.
     Run,
+    /// Start the language server with package resolution.
+    Lsp,
 }
 
 fn main() -> ExitCode {
@@ -34,6 +36,7 @@ fn main() -> ExitCode {
         Cmd::New { name } => cmd_new(&name),
         Cmd::Check => cmd_drive("check"),
         Cmd::Run => cmd_drive("run"),
+        Cmd::Lsp => cmd_lsp(),
     }
 }
 
@@ -74,25 +77,18 @@ fn cmd_new(name: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Read `package.toml` in the current directory, fetch dependencies, set
-/// `PREPOLY_PACKAGES`, and invoke `prepoly check` or `prepoly run` on the
-/// root file.
-fn cmd_drive(mode: &str) -> ExitCode {
-    let manifest = match Manifest::load(Path::new("package.toml")) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+/// Read `package.toml`, fetch dependencies, and return the `PREPOLY_PACKAGES`
+/// env-var value. Shared by `check`/`run`/`lsp`.
+fn resolve_packages() -> Result<String, ExitCode> {
+    let manifest = Manifest::load(Path::new("package.toml")).map_err(|e| {
+        eprintln!("error: {e}");
+        ExitCode::FAILURE
+    })?;
 
-    let packages_dir = match packages_root() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let packages_dir = packages_root().map_err(|e| {
+        eprintln!("error: {e}");
+        ExitCode::FAILURE
+    })?;
 
     let mut pkg_entries: BTreeMap<String, PathBuf> = BTreeMap::new();
     for (name, dep) in &manifest.dependencies {
@@ -113,14 +109,13 @@ fn cmd_drive(mode: &str) -> ExitCode {
                         "error: git clone failed for `{name}` (exit {})",
                         s.code().unwrap_or(-1)
                     );
-                    return ExitCode::FAILURE;
+                    return Err(ExitCode::FAILURE);
                 }
                 Err(e) => {
                     eprintln!("error: cannot run git: {e}");
-                    return ExitCode::FAILURE;
+                    return Err(ExitCode::FAILURE);
                 }
             }
-            // Checkout the pinned commit.
             let status = Command::new("git")
                 .args(["-C", &dest.display().to_string(), "checkout", &dep.hash])
                 .status();
@@ -128,22 +123,40 @@ fn cmd_drive(mode: &str) -> ExitCode {
                 Ok(s) if s.success() => {}
                 Ok(_) => {
                     eprintln!("error: git checkout `{}` failed for `{name}`", dep.hash);
-                    return ExitCode::FAILURE;
+                    return Err(ExitCode::FAILURE);
                 }
                 Err(e) => {
                     eprintln!("error: cannot run git: {e}");
-                    return ExitCode::FAILURE;
+                    return Err(ExitCode::FAILURE);
                 }
             }
         }
         pkg_entries.insert(name.clone(), dest);
     }
 
-    let env_val = pkg_entries
+    Ok(pkg_entries
         .iter()
         .map(|(name, path)| format!("{name}={}", path.display()))
         .collect::<Vec<_>>()
-        .join(":");
+        .join(":"))
+}
+
+/// Read `package.toml` in the current directory, fetch dependencies, set
+/// `PREPOLY_PACKAGES`, and invoke `prepoly check` or `prepoly run` on the
+/// root file.
+fn cmd_drive(mode: &str) -> ExitCode {
+    let manifest = match Manifest::load(Path::new("package.toml")) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let env_val = match resolve_packages() {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
 
     let root_file = format!("{}.pp", manifest.package.name);
 
@@ -164,6 +177,31 @@ fn cmd_drive(mode: &str) -> ExitCode {
         }
         Err(e) => {
             eprintln!("error: cannot run prepoly: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Start `prepoly-lsp` with `PREPOLY_PACKAGES` set.
+fn cmd_lsp() -> ExitCode {
+    let env_val = match resolve_packages() {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+
+    let mut cmd = Command::new("prepoly-lsp");
+    if !env_val.is_empty() {
+        cmd.env("PREPOLY_PACKAGES", &env_val);
+    }
+
+    match cmd.status() {
+        Ok(s) if s.success() => ExitCode::SUCCESS,
+        Ok(s) => {
+            let code: u8 = s.code().unwrap_or(1) as u8;
+            ExitCode::from(code)
+        }
+        Err(e) => {
+            eprintln!("error: cannot run prepoly-lsp: {e}");
             ExitCode::FAILURE
         }
     }
