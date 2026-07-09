@@ -961,6 +961,165 @@ mod tests {
         );
     }
 
+    // ----- variance of function types -----
+    //
+    // A function value is sound to substitute when its parameters are
+    // CONTRAVARIANT and its return COVARIANT. `Dog <: Animal` structurally
+    // (Dog adds `breed`), so `(Animal) -> void` is usable where `(Dog) -> void`
+    // is required, but not the reverse. The reject cases are the ones a
+    // covariant (naive) rule would wrongly accept.
+
+    const VARIANCE_BASE: &str =
+        "type Animal = { sound: string }\ntype Dog: Animal = { sound: string  breed: string }\n";
+
+    #[test]
+    fn function_value_parameter_contravariance_accepts_wider_param() {
+        // Sound direction: an `(Animal) -> void` value flows into a
+        // `(Dog) -> void` slot -- the slot's holder only ever calls it with a
+        // Dog, which the value's Animal parameter accepts.
+        let e = errs(&format!(
+            "{VARIANCE_BASE}fun main() {{\n  let f: (Dog) -> void = (a: Animal) -> {{ let s = a.sound }}\n}}\n"
+        ));
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn function_value_parameter_contravariance_rejects_narrower_param() {
+        // Unsound direction: a `(Dog) -> void` value into an `(Animal) -> void`
+        // slot. The holder may call it with a bare Animal, but the body reads
+        // `.breed`. A covariant rule would accept this; contravariance rejects.
+        let e = errs(&format!(
+            "{VARIANCE_BASE}fun main() {{\n  let g = (d: Dog) -> {{ let s = d.breed }}\n  let f: (Animal) -> void = g\n}}\n"
+        ));
+        assert!(
+            e.iter()
+                .any(|m| m.contains("`(Dog) -> ?`") && m.contains("`(Animal) -> void`")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn function_value_parameter_contravariance_rejects_narrower_param_as_argument() {
+        // Same rule at a consumed argument position: passing a `(Dog) -> void`
+        // where the parameter is `(Animal) -> void` is rejected -- the callee
+        // will invoke the callback with a bare Animal.
+        let e = errs(&format!(
+            "{VARIANCE_BASE}fun run(cb: (Animal) -> void) -> void {{ cb(Animal {{ sound: \"x\" }}) }}\nfun main() {{\n  run((d: Dog) -> {{ let s = d.breed }})\n}}\n"
+        ));
+        assert!(
+            e.iter()
+                .any(|m| m.contains("`(Dog) -> ?`") && m.contains("`(Animal) -> void`")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn function_value_return_covariance() {
+        // The return type is covariant: `(int32) -> Dog` is usable where
+        // `(int32) -> Animal` is required (the result is read as an Animal, and
+        // a Dog is one), but `(int32) -> Animal` is not usable where
+        // `(int32) -> Dog` is required.
+        let ok = errs(&format!(
+            "{VARIANCE_BASE}fun main() {{\n  let f: (int32) -> Animal = (n: int32) -> Dog {{ sound: \"woof\", breed: \"x\" }}\n}}\n"
+        ));
+        assert!(ok.is_empty(), "{ok:?}");
+        let bad = errs(&format!(
+            "{VARIANCE_BASE}fun main() {{\n  let f: (int32) -> Dog = (n: int32) -> Animal {{ sound: \"woof\" }}\n}}\n"
+        ));
+        assert!(
+            bad.iter()
+                .any(|m| m.contains("`(int32) -> Animal`") && m.contains("`(int32) -> Dog`")),
+            "{bad:?}"
+        );
+    }
+
+    #[test]
+    fn higher_order_function_double_contravariance() {
+        // A parameter that is itself a function flips the variance twice, so the
+        // callback's own parameter ends up covariant at the outer boundary:
+        // `((Dog) -> void) -> void` is usable where
+        // `((Animal) -> void) -> void` is required, and the reverse is rejected.
+        let ok = errs(&format!(
+            "{VARIANCE_BASE}fun main() {{\n  let f: ((Animal) -> void) -> void = (cb: (Dog) -> void) -> {{}}\n}}\n"
+        ));
+        assert!(ok.is_empty(), "{ok:?}");
+        let bad = errs(&format!(
+            "{VARIANCE_BASE}fun main() {{\n  let f: ((Dog) -> void) -> void = (cb: (Animal) -> void) -> {{}}\n}}\n"
+        ));
+        assert!(
+            bad.iter().any(|m| m.contains("`((Animal) -> void) -> ?`")
+                && m.contains("`((Dog) -> void) -> void`")),
+            "{bad:?}"
+        );
+    }
+
+    #[test]
+    fn function_typed_field_is_invariant_through_interface() {
+        // A function-typed field is mutable storage, hence invariant: neither a
+        // contravariantly-wider nor a covariantly-narrower parameter is allowed
+        // to override the interface's field type, because a write through the
+        // interface alias could install an incompatible callback.
+        let widen = errs(&format!(
+            "{VARIANCE_BASE}type Handler = {{ on: (Animal) -> void }}\ntype DogHandler: Handler = {{ on: (Dog) -> void }}\n"
+        ));
+        assert!(
+            widen.iter().any(|m| m.contains("`DogHandler` field `on`")),
+            "{widen:?}"
+        );
+        let narrow = errs(&format!(
+            "{VARIANCE_BASE}type Handler = {{ on: (Dog) -> void }}\ntype AniHandler: Handler = {{ on: (Animal) -> void }}\n"
+        ));
+        assert!(
+            narrow.iter().any(|m| m.contains("`AniHandler` field `on`")),
+            "{narrow:?}"
+        );
+    }
+
+    #[test]
+    fn method_function_typed_parameter_is_invariant() {
+        // A method parameter is invariant (a caller reaching the type through
+        // the interface must be able to pass everything the interface allows),
+        // so a function-typed method parameter must match the interface's
+        // parameter type exactly in BOTH directions.
+        let widen = errs(&format!(
+            "{VARIANCE_BASE}type C = {{ run(self, cb: (Dog) -> void) -> void }}\ntype D: C = {{ }}\nfun D.run(self, cb: (Animal) -> void) -> void {{ }}\n"
+        ));
+        assert!(
+            widen
+                .iter()
+                .any(|m| m.contains("method `run` signature is not compatible")),
+            "{widen:?}"
+        );
+        let narrow = errs(&format!(
+            "{VARIANCE_BASE}type C = {{ run(self, cb: (Animal) -> void) -> void }}\ntype D: C = {{ }}\nfun D.run(self, cb: (Dog) -> void) -> void {{ }}\n"
+        ));
+        assert!(
+            narrow
+                .iter()
+                .any(|m| m.contains("method `run` signature is not compatible")),
+            "{narrow:?}"
+        );
+    }
+
+    #[test]
+    fn method_function_typed_return_is_covariant() {
+        // A method's return type is covariant: an implementation returning a
+        // contravariantly-wider callback (`(Animal) -> void`) satisfies an
+        // interface returning `(Dog) -> void`, but the reverse is rejected.
+        let ok = errs(&format!(
+            "{VARIANCE_BASE}type C = {{ make(self) -> (Dog) -> void }}\ntype D: C = {{ }}\nfun D.make(self) -> (Animal) -> void {{ return (a: Animal) -> {{}} }}\n"
+        ));
+        assert!(ok.is_empty(), "{ok:?}");
+        let bad = errs(&format!(
+            "{VARIANCE_BASE}type C = {{ make(self) -> (Animal) -> void }}\ntype D: C = {{ }}\nfun D.make(self) -> (Dog) -> void {{ return (d: Dog) -> {{}} }}\n"
+        ));
+        assert!(
+            bad.iter()
+                .any(|m| m.contains("method `make` signature is not compatible")),
+            "{bad:?}"
+        );
+    }
+
     #[test]
     fn interface_unknown_field_is_constrained_at_call_site() {
         let e = errs(
