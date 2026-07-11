@@ -53,7 +53,7 @@ reports each caller's own argument type:
 type Shape = | Circle { r: float64 } | Square
 println(typeof(Shape.Circle { r: 1.0 }))      // Shape
 
-const xs = [1, 2, 3]
+let xs = [1, 2, 3]
 println(typeof(xs))                            // int32[]
 
 fun name(x) -> string { return typeof(x) }
@@ -190,7 +190,7 @@ the target type (`let ret: infer` becomes `let ret: User`), and
 runtime decode error otherwise.
 
 This turns a whole recursive JSON-to-struct decoder into one method — this is
-exactly how `std.data.json` implements `JsonValue.into` (abridged):
+exactly how the `data.json` library implements `JsonValue.into` (abridged):
 
 ```prepoly norun
 fun JsonValue.into(self) -> infer! {

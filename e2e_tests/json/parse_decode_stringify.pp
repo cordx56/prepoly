@@ -1,4 +1,4 @@
-import std.data.json.{ JsonValue, parse, stringify }
+import data.json.{ JsonValue, parse, stringify }
 
 type Address = { city: string, zip: int64 }
 type User = { name: string, age: int64, address: Address }

@@ -549,44 +549,66 @@ pub fn resolve(
     expr: &TypeExpr,
     mut nominal_info: impl FnMut(&str) -> Option<NominalInfo>,
 ) -> Result<Type, String> {
-    resolve_inner(expr, &mut nominal_info)
+    resolve_inner(expr, &mut nominal_info, &mut |_| None)
+}
+
+/// [`resolve`] with a `type Alias = ..` lookup consulted before the nominal
+/// table, so an annotation naming a concrete-instance alias (a refinement
+/// like `_JsonObject`) resolves to the alias's full substituted type instead
+/// of failing as an unknown name. The caller owns the qualification rule
+/// (module-local vs imported alias names).
+pub fn resolve_with_aliases(
+    expr: &TypeExpr,
+    mut nominal_info: impl FnMut(&str) -> Option<NominalInfo>,
+    mut alias: impl FnMut(&str) -> Option<Type>,
+) -> Result<Type, String> {
+    resolve_inner(expr, &mut nominal_info, &mut alias)
 }
 
 fn resolve_inner(
     expr: &TypeExpr,
     nominal_info: &mut dyn FnMut(&str) -> Option<NominalInfo>,
+    alias: &mut dyn FnMut(&str) -> Option<Type>,
 ) -> Result<Type, String> {
     match expr {
-        TypeExpr::Named(name, _) => resolve_named(name, nominal_info),
+        TypeExpr::Named(name, _) => {
+            if let Some(t) = alias(name) {
+                return Ok(t);
+            }
+            resolve_named(name, nominal_info)
+        }
         TypeExpr::Array(inner, Some(n), _) => Ok(Type::Array(
-            Box::new(resolve_inner(inner, nominal_info)?),
+            Box::new(resolve_inner(inner, nominal_info, alias)?),
             *n,
         )),
-        TypeExpr::Array(inner, None, _) => {
-            Ok(Type::Slice(Box::new(resolve_inner(inner, nominal_info)?)))
-        }
+        TypeExpr::Array(inner, None, _) => Ok(Type::Slice(Box::new(resolve_inner(
+            inner,
+            nominal_info,
+            alias,
+        )?))),
         TypeExpr::Fun(params, ret, _) => Ok(Type::Fun(
             params
                 .iter()
-                .map(|p| resolve_inner(p, nominal_info))
+                .map(|p| resolve_inner(p, nominal_info, alias))
                 .collect::<Result<_, _>>()?,
-            Box::new(resolve_inner(ret, nominal_info)?),
+            Box::new(resolve_inner(ret, nominal_info, alias)?),
         )),
         TypeExpr::Nullable(inner, _) => Ok(Type::Nullable(Box::new(resolve_inner(
             inner,
             nominal_info,
+            alias,
         )?))),
         // `T!` is the built-in fallible Result: success payload `T`, error payload
         // left open (an `infer` placeholder the caller freshens, so it is inferred
         // from the body's `error(...)` sites like an unannotated fallible return).
         TypeExpr::Fallible(inner, _) => Ok(Type::result(
-            resolve_inner(inner, nominal_info)?,
+            resolve_inner(inner, nominal_info, alias)?,
             Type::Unknown(INFER_VAR),
         )),
         TypeExpr::Tuple(elems, _) => Ok(Type::Tuple(
             elems
                 .iter()
-                .map(|e| resolve_inner(e, nominal_info))
+                .map(|e| resolve_inner(e, nominal_info, alias))
                 .collect::<Result<_, _>>()?,
         )),
         // An anonymous structure resolves to a structural record whose field types
@@ -594,12 +616,20 @@ fn resolve_inner(
         TypeExpr::Anonymous(fields, _) => {
             let mut resolved = Vec::with_capacity(fields.len());
             for (name, fty) in fields {
-                resolved.push((name.clone(), resolve_inner(fty, nominal_info)?));
+                resolved.push((name.clone(), resolve_inner(fty, nominal_info, alias)?));
             }
             Ok(structural_record(resolved))
         }
-        TypeExpr::Mut(inner, _) => Ok(Type::Mut(Box::new(resolve_inner(inner, nominal_info)?))),
-        TypeExpr::Ref(inner, _) => Ok(Type::Ref(Box::new(resolve_inner(inner, nominal_info)?))),
+        TypeExpr::Mut(inner, _) => Ok(Type::Mut(Box::new(resolve_inner(
+            inner,
+            nominal_info,
+            alias,
+        )?))),
+        TypeExpr::Ref(inner, _) => Ok(Type::Ref(Box::new(resolve_inner(
+            inner,
+            nominal_info,
+            alias,
+        )?))),
         // `typeof(e)` cannot be resolved without inferring `e`'s type, which this
         // pure pass does not do. It resolves to the same open placeholder as an
         // `infer` word; the type checker replaces it with `e`'s inferred type

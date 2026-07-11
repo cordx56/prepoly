@@ -1,1 +1,1 @@
-`parse` is defined in module `std.data.json` but not imported here
+`parse` is defined in module `data.json` but not imported here

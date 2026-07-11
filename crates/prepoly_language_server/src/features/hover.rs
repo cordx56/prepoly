@@ -29,6 +29,14 @@ pub fn hover(doc: &Document, full: &FullAnalysis, pos: Position) -> Option<Hover
     let global = local + full.main_base;
     let module = vec!["main".to_string()];
 
+    // The cursor inside an `import` shows what the import brings in: an
+    // imported name resolves to its definition in the imported module (so a
+    // renamed import shows the remote declaration), a path segment to the
+    // module itself.
+    if let Some(h) = import_hover(doc, full, local, global) {
+        return Some(h);
+    }
+
     // The cursor on a method name in `recv.method(...)` shows the *method's* type
     // (its signature), not the call's result type. (A method called through UFCS is
     // a free function and is handled by the `resolve_function` path below.)
@@ -84,15 +92,7 @@ pub fn hover(doc: &Document, full: &FullAnalysis, pos: Position) -> Option<Hover
             return Some(function_hover(full, f, call_args, Some(doc.range_of(span))));
         }
         if let Some(t) = full.program.resolve_type(&module, &name) {
-            // The declaration view: no instance, so slots stay open and method
-            // types resolve against the declaration itself (`Self.<slot>`).
-            let empty = Substitution::empty();
-            let resolved = typedef_method_signatures(full, t, &empty);
-            return Some(markup_with_doc(
-                render_type_def_with(t, &empty, &resolved),
-                t.doc.as_deref(),
-                Some(doc.range_of(span)),
-            ));
+            return Some(type_decl_hover(full, t, Some(doc.range_of(span))));
         }
     }
 
@@ -103,6 +103,84 @@ pub fn hover(doc: &Document, full: &FullAnalysis, pos: Position) -> Option<Hover
             render_type(&expr.ty, &mut namer),
             local_range(doc, full, expr.span),
         ));
+    }
+    None
+}
+
+/// Hover for a type's declaration view: no instance, so slots stay open and
+/// method types resolve against the declaration itself (`Self.<slot>`), with
+/// the type's doc comment below.
+fn type_decl_hover(full: &FullAnalysis, t: &TypeInfo, range: Option<Range>) -> Hover {
+    let empty = Substitution::empty();
+    let resolved = typedef_method_signatures(full, t, &empty);
+    markup_with_doc(
+        render_type_def_with(t, &empty, &resolved),
+        t.doc.as_deref(),
+        range,
+    )
+}
+
+/// Hover inside an `import` statement. An imported name (either side of an
+/// `as` rename, or the trailing name of a bare single-name import) shows the
+/// named function's signature or type's definition as declared in the
+/// imported module, doc comment included; any other identifier in the
+/// statement is a module path segment and shows the imported module's path.
+/// Returns `None` when the cursor is not inside an import.
+fn import_hover(doc: &Document, full: &FullAnalysis, local: usize, global: usize) -> Option<Hover> {
+    let imp = full
+        .main_ast
+        .imports
+        .iter()
+        .find(|imp| nav::contains(imp.span, global))?;
+    let (name, span) = nav::ident_at(&doc.text, local)?;
+    let range = Some(doc.range_of(span));
+
+    // `import` itself and `as` are not identifiers worth a popup.
+    if name == "import" || name == "as" {
+        return None;
+    }
+
+    // The loader canonicalized the import in `main_ast`, so a bare single-name
+    // import already has its name split off into `names`. A bare prelude
+    // module keeps its written path but is stored under `std.<name>`.
+    let target: Vec<String> = if prepoly_resolve::is_prelude_path(&imp.path) {
+        std::iter::once("std".to_string())
+            .chain(imp.path.iter().cloned())
+            .collect()
+    } else {
+        imp.path.clone()
+    };
+
+    let named = imp
+        .names
+        .iter()
+        .find(|n| n.remote == name || n.local == name);
+    if let Some(named) = named {
+        // Resolve in the imported module directly rather than through `main`'s
+        // scope: a renamed import is visible in `main` only under its local
+        // name, but its declaration lives under the remote one.
+        if let Some(f) = full
+            .program
+            .functions
+            .values()
+            .find(|f| f.module == target && f.signature.name == named.remote)
+        {
+            return Some(function_hover(full, f, None, range));
+        }
+        if let Some(t) = full
+            .program
+            .types
+            .values()
+            .find(|t| t.module == target && t.name == named.remote)
+        {
+            return Some(type_decl_hover(full, t, range));
+        }
+        return None;
+    }
+
+    // A module path segment: show the module the import resolves to.
+    if imp.path.contains(&name) {
+        return Some(markup(format!("module {}", imp.path.join(".")), range));
     }
     None
 }
@@ -254,7 +332,7 @@ fn scheme_resolved_signature(
 /// declaration's own slot variable so it renders as `Self.<slot>`. The type's
 /// own nominal in a parameter or return shows as `Self`. A type without a
 /// scheme (or a method the scheme does not know) keeps its stored signature.
-fn typedef_method_signatures(
+pub(crate) fn typedef_method_signatures(
     full: &FullAnalysis,
     info: &TypeInfo,
     substitution: &Substitution,

@@ -2,13 +2,16 @@
 //!
 //! Three contexts are handled. Inside an `import` statement the cursor is offered
 //! module path segments (`import math.|`) and, within the brace list, the public
-//! names a module exports (`import math.{ |`); these are recovered textually
-//! from the current line, so they work even while the line does not yet parse.
+//! names a module exports (`import math.{ |`); the context is recovered textually
+//! from the current line (so it works while the line does not yet parse), and the
+//! candidates come from the loader's search roots -- prelude, nested std, files
+//! next to the document, include paths, and declared packages -- with the brace
+//! names carrying the signatures and docs of the analyzed module.
 //! After a `.` (`a.|`) the cursor is offered the members reachable on the
-//! receiver -- built-in methods, the receiver type's record methods, and the
-//! free functions callable on it through UFCS -- or, when the receiver is a type
-//! name (`Shape.|`), that type's variants and methods. Everywhere else the
-//! cursor is offered the types and functions visible from the document.
+//! receiver -- the receiver type's record fields and methods, and built-in and
+//! stdlib methods for its kind -- or, when the receiver is a type name
+//! (`Shape.|`), that type's variants and methods. Everywhere else the cursor is
+//! offered the types and functions visible from the document.
 //!
 //! The member case needs the receiver's inferred type, but `a.` does not parse,
 //! so the source is re-analyzed with a probe identifier spliced in at the cursor
@@ -18,15 +21,17 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use prepoly_hir::{Type, TypeKind};
+use prepoly_hir::{Type, TypeInfo, TypeKind};
 use prepoly_parser::ast::{TopLevel, TypeBody};
 use prepoly_parser::parse;
+use prepoly_resolve::SearchPaths;
 use tower_lsp_server::ls_types::{CompletionItem, CompletionItemKind};
 
 use crate::analysis::world::{prelude_module_names, prelude_source};
 use crate::analysis::{DocAnalyzer, FullAnalysis};
 use crate::document::Document;
-use crate::render::render_signature;
+use crate::features::hover::typedef_method_signatures;
+use crate::render::{UnknownNamer, is_public_member, render_signature, render_type};
 
 /// Built-in type names that are always in scope.
 const BUILTIN_TYPES: &[&str] = &[
@@ -40,11 +45,24 @@ const BUILTIN_FUNCTIONS: &[&str] = &["len", "error", "ok"];
 
 /// Compute completion items for `pos`, analyzing the document (and, for the
 /// member case, a probe-spliced variant of it) through `analyzer` as needed.
+/// Import resolution uses the process environment's search paths.
 pub fn completion(
     doc: &Document,
     analyzer: &DocAnalyzer,
     doc_path: &Path,
     pos: tower_lsp_server::ls_types::Position,
+) -> Vec<CompletionItem> {
+    completion_with(doc, analyzer, doc_path, pos, &SearchPaths::from_env())
+}
+
+/// [`completion`] with explicit module search paths, so tests can point the
+/// import contexts at their own roots without touching the environment.
+pub(crate) fn completion_with(
+    doc: &Document,
+    analyzer: &DocAnalyzer,
+    doc_path: &Path,
+    pos: tower_lsp_server::ls_types::Position,
+    search: &SearchPaths,
 ) -> Vec<CompletionItem> {
     let offset = doc.offset_at(pos);
     let line_start = doc.text[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
@@ -53,10 +71,10 @@ pub fn completion(
     if let Some(ctx) = import_context(prefix) {
         return match ctx {
             ImportContext::Names { module, prefix } => {
-                import_name_items(&module, &prefix, doc_path)
+                import_name_items(&module, &prefix, analyzer, doc_path, search)
             }
             ImportContext::Path { parents, prefix } => {
-                import_path_items(&parents, &prefix, doc_path)
+                import_path_items(&parents, &prefix, doc_path, search)
             }
         };
     }
@@ -117,24 +135,43 @@ fn split_path(s: &str) -> Vec<String> {
     s.split('.').map(|p| p.trim().to_string()).collect()
 }
 
-/// Module path segment candidates under `parents`: the prelude modules and the
-/// `std` namespace at the root, plus `.pp` files and directories on disk.
-fn import_path_items(parents: &[String], prefix: &str, doc_path: &Path) -> Vec<CompletionItem> {
+/// Module path segment candidates under `parents`. At the root: the prelude
+/// modules, the `std` namespace, the declared package names, and the modules
+/// next to the document or under an include path. Under `std`: the prelude
+/// modules and the embedded nested std modules. Anywhere else: the next path
+/// segments served by the same roots the loader would search -- a declared
+/// package's directory when the first segment names one, otherwise the
+/// document's directory and each include path.
+fn import_path_items(
+    parents: &[String],
+    prefix: &str,
+    doc_path: &Path,
+    search: &SearchPaths,
+) -> Vec<CompletionItem> {
     let mut names: Vec<String> = Vec::new();
     if parents.is_empty() {
         names.extend(prelude_module_names().map(String::from));
         names.push("std".to_string());
+        names.extend(search.packages.keys().cloned());
         // Exclude the current file so it does not suggest importing itself.
         let self_stem = doc_path.file_stem().and_then(|s| s.to_str());
         names.extend(dir_module_names(&doc_dir(doc_path), self_stem));
-    } else if parents == ["std"] {
-        names.extend(prelude_module_names().map(String::from));
-    } else {
-        let mut dir = doc_dir(doc_path);
-        for seg in parents {
-            dir.push(seg);
+        for include in &search.includes {
+            names.extend(dir_module_names(include, None));
         }
-        names.extend(dir_module_names(&dir, None));
+    } else if parents.first().is_some_and(|s| s == "std") {
+        if parents.len() == 1 {
+            names.extend(prelude_module_names().map(String::from));
+        }
+        names.extend(nested_std_segments(&parents[1..]));
+    } else {
+        for root in module_roots(doc_path, search, &parents[0]) {
+            let mut dir = root;
+            for seg in parents {
+                dir.push(seg);
+            }
+            names.extend(dir_module_names(&dir, None));
+        }
     }
 
     let mut seen = HashSet::new();
@@ -145,36 +182,141 @@ fn import_path_items(parents: &[String], prefix: &str, doc_path: &Path) -> Vec<C
         .collect()
 }
 
-/// The public names exported by the module the import path names, for the brace
-/// list. Prelude modules read from the embedded source; others from disk.
-fn import_name_items(module: &[String], prefix: &str, doc_path: &Path) -> Vec<CompletionItem> {
-    module_public_symbols(module, doc_path)
-        .into_iter()
-        .filter(|(name, _)| name.starts_with(prefix))
-        .map(|(name, kind)| item(name, kind, None))
-        .collect()
+/// The directories a non-`std` module path is served from, mirroring the
+/// loader: a path whose first segment names a declared package resolves only
+/// under that package's directory; anything else searches the document's
+/// directory first, then each include path.
+fn module_roots(
+    doc_path: &Path,
+    search: &SearchPaths,
+    first_segment: &str,
+) -> Vec<std::path::PathBuf> {
+    if let Some(pkg_root) = search.packages.get(first_segment) {
+        return vec![pkg_root.clone()];
+    }
+    let mut roots = vec![doc_dir(doc_path)];
+    roots.extend(search.includes.iter().cloned());
+    roots
 }
 
-/// The public top-level (name, kind) pairs a module exports.
-fn module_public_symbols(module: &[String], doc_path: &Path) -> Vec<(String, CompletionItemKind)> {
+/// The next path segments of the embedded nested std modules under
+/// `parents` (the segments after `std`): `[]` offers `collections`,
+/// `["collections"]` offers `hashmap`.
+fn nested_std_segments(parents: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
+    for (key, _) in prepoly_resolve::STDLIB_NESTED {
+        let segs: Vec<&str> = key.split('/').collect();
+        if segs.len() > parents.len() && segs[..parents.len()].iter().eq(parents.iter()) {
+            names.push(segs[parents.len()].to_string());
+        }
+    }
+    names
+}
+
+/// The public names exported by the module the import path names, for the
+/// brace list. The module is analyzed through the document's module graph
+/// (a probe source importing it), so the items carry resolved signatures and
+/// doc comments; when that finds nothing (e.g. the graph's environment lacks
+/// a root the caller supplied), the module's source is located through
+/// `search` and its top-level names are listed textually.
+fn import_name_items(
+    module: &[String],
+    prefix: &str,
+    analyzer: &DocAnalyzer,
+    doc_path: &Path,
+    search: &SearchPaths,
+) -> Vec<CompletionItem> {
+    let mut items = analyzed_module_exports(module, analyzer);
+    if items.is_empty() {
+        items = module_public_symbols(module, doc_path, search)
+            .into_iter()
+            .map(|(name, kind)| item(name, kind, None))
+            .collect();
+    }
+    filter_prefix(items, prefix)
+}
+
+/// Enumerate a module's public exports from a full analysis of a probe source
+/// that imports it -- the same module graph the document's analysis uses, so
+/// prelude, nested std, disk, include-path, and plugin modules all resolve.
+/// Signatures and docs come from the checked program.
+fn analyzed_module_exports(module: &[String], analyzer: &DocAnalyzer) -> Vec<CompletionItem> {
+    if module.is_empty() {
+        return Vec::new();
+    }
+    let probe = format!("import {}\n", module.join("."));
+    let Some(full) = analyzer.analyze_full(&probe) else {
+        return Vec::new();
+    };
+    // The probe's import path was canonicalized by the loader; a bare prelude
+    // module (`import math`) keeps its written path but is stored under
+    // `std.<name>`.
+    let Some(imp) = full.main_ast.imports.first() else {
+        return Vec::new();
+    };
+    let target: Vec<String> = if prepoly_resolve::is_prelude_path(&imp.path) {
+        std::iter::once("std".to_string())
+            .chain(imp.path.iter().cloned())
+            .collect()
+    } else {
+        imp.path.clone()
+    };
+
+    let mut items = Vec::new();
+    for f in full.program.functions.values() {
+        // A class-qualified name (`fun string.split` stored as `string.split`)
+        // is a primitive method, not an importable bare name.
+        if f.module == target
+            && prepoly_resolve::is_public(&f.signature.name)
+            && !f.signature.name.contains('.')
+        {
+            items.push(doc_item(
+                f.signature.name.clone(),
+                CompletionItemKind::FUNCTION,
+                Some(render_signature(&f.signature)),
+                f.decl.doc.as_deref(),
+            ));
+        }
+    }
+    for t in full.program.types.values() {
+        if t.module == target && prepoly_resolve::is_public(&t.name) {
+            let kind = match t.kind {
+                TypeKind::Record { .. } => CompletionItemKind::STRUCT,
+                TypeKind::Sum { .. } => CompletionItemKind::ENUM,
+            };
+            items.push(doc_item(
+                t.name.clone(),
+                kind,
+                Some(format!("type {}", t.name)),
+                t.doc.as_deref(),
+            ));
+        }
+    }
+    items
+}
+
+/// The public top-level (name, kind) pairs a module exports, parsed from its
+/// source text. The textual fallback for [`import_name_items`]: prelude and
+/// nested std modules read from the embedded sources, everything else is
+/// located through the loader's search roots.
+fn module_public_symbols(
+    module: &[String],
+    doc_path: &Path,
+    search: &SearchPaths,
+) -> Vec<(String, CompletionItemKind)> {
     let src = match module {
         [single] if prelude_source(single).is_some() => prelude_source(single).map(String::from),
-        [s, name] if s == "std" => prelude_source(name).map(String::from),
-        _ => {
-            let mut file = doc_dir(doc_path);
-            for seg in module {
-                file.push(seg);
-            }
-            file.set_extension("pp");
-            match std::fs::read_to_string(file) {
-                Ok(src) => Some(src),
-                // A native plugin library also names a module: list its
-                // functions from the synthesized wrapper source, exactly as
-                // the loader will build it.
-                Err(_) => prepoly_resolve::plugin::plugin_library_for(&doc_dir(doc_path), module)
-                    .and_then(|lib| prepoly_resolve::plugin::synthesize_plugin_module(&lib).ok()),
-            }
+        [s, name] if s == "std" && prelude_source(name).is_some() => {
+            prelude_source(name).map(String::from)
         }
+        [s, rest @ ..] if s == "std" => {
+            let key = rest.join("/");
+            prepoly_resolve::STDLIB_NESTED
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, src)| (*src).to_string())
+        }
+        _ => prepoly_resolve::module_source(&doc_dir(doc_path), search, module),
     };
     let Some(src) = src else {
         return Vec::new();
@@ -264,6 +406,9 @@ fn member_completion(
         _ => return None,
     }
     let partial = &doc.text[word_start..cursor];
+    // `_`-prefixed members are implementation details, hidden unless the user
+    // is explicitly typing such a name.
+    let include_private = partial.starts_with('_');
 
     // `recv.` does not parse, so splice in a probe identifier; `recv.partial`
     // already parses as a field access.
@@ -275,14 +420,14 @@ fn member_completion(
     };
 
     // A bare type name receiver (`Shape.`) offers that type's variants/methods.
-    if let Some(items) = type_qualified_items(&full, &doc.text, dot) {
+    if let Some(items) = type_qualified_items(&full, &doc.text, dot, include_private) {
         return Some(filter_prefix(items, partial));
     }
     // Otherwise a value receiver: its members come from its inferred type, found
     // as the expression that ends exactly at the `.`.
     let recv_hi = full.main_base + dot;
     let items = match receiver_type_at(&full, recv_hi) {
-        Some(ty) => value_member_items(&full, &ty),
+        Some(ty) => value_member_items(&full, &ty, include_private),
         None => Vec::new(),
     };
     Some(filter_prefix(items, partial))
@@ -300,11 +445,16 @@ fn receiver_type_at(full: &FullAnalysis, hi: usize) -> Option<Type> {
         .map(|e| e.ty.clone())
 }
 
-/// Members reachable on a value of `ty`: built-in methods for its kind, a record
-/// type's own methods, and the stdlib methods implemented on a primitive/array
-/// receiver (`fun string.split`, `fun infer[].map`). There is no UFCS, so a plain
-/// free function is not a member.
-fn value_member_items(full: &FullAnalysis, ty: &Type) -> Vec<CompletionItem> {
+/// Members reachable on a value of `ty`: a record type's fields and methods,
+/// built-in methods for its kind, and the stdlib methods implemented on a
+/// primitive/array receiver (`fun string.split`, `fun infer[].map`). There is
+/// no UFCS, so a plain free function is not a member. `_`-prefixed members are
+/// omitted unless `include_private` (the user typed the `_` themselves).
+fn value_member_items(
+    full: &FullAnalysis,
+    ty: &Type,
+    include_private: bool,
+) -> Vec<CompletionItem> {
     let base = strip(ty);
     let mut items = Vec::new();
 
@@ -320,18 +470,31 @@ fn value_member_items(full: &FullAnalysis, ty: &Type) -> Vec<CompletionItem> {
         _ => {}
     }
 
-    if let Some(id) = nominal_id(&base)
-        && let Some(info) = full.program.type_by_id(id)
-        && let TypeKind::Record { methods, .. } = &info.kind
+    if let Type::Record(n) = &base
+        && let Some(info) = full.program.type_by_id(n.id)
+        && let TypeKind::Record { fields, .. } = &info.kind
     {
-        for (name, m) in methods {
-            items.push(doc_item(
-                name.clone(),
-                CompletionItemKind::METHOD,
-                Some(render_signature(&m.signature)),
-                m.decl.doc.as_deref(),
-            ));
+        // Fields, typed for this instance: the receiver's substitution carries
+        // the concrete type an open (inferred/slot-dependent) field was pinned
+        // to; a still-open slot variable renders as `Self.<slot>`.
+        let mut namer = UnknownNamer::default();
+        for (slot, var) in &info.slots {
+            namer.fix(*var, format!("Self.{slot}"));
         }
+        for f in fields {
+            if !include_private && !is_public_member(&f.name) {
+                continue;
+            }
+            let resolved = n.substitution.get(&f.name).or(f.resolved_ty.as_ref());
+            let detail = resolved.map(|t| format!("{}: {}", f.name, render_type(t, &mut namer)));
+            items.push(item(f.name.clone(), CompletionItemKind::FIELD, detail));
+        }
+        items.extend(record_method_items(
+            full,
+            info,
+            &n.substitution,
+            include_private,
+        ));
     }
 
     // Stdlib methods on this receiver's primitive/array class, dispatched by
@@ -354,12 +517,43 @@ fn value_member_items(full: &FullAnalysis, ty: &Type) -> Vec<CompletionItem> {
     dedup_by_label(items)
 }
 
+/// Completion items for a record type's methods, with each signature resolved
+/// against `substitution` through the type's scheme (see
+/// [`typedef_method_signatures`]) -- so a `HashMap<string, int32>` receiver
+/// shows `get` returning `int32?` rather than an open variable.
+fn record_method_items(
+    full: &FullAnalysis,
+    info: &TypeInfo,
+    substitution: &prepoly_hir::Substitution,
+    include_private: bool,
+) -> Vec<CompletionItem> {
+    let TypeKind::Record { methods, .. } = &info.kind else {
+        return Vec::new();
+    };
+    let resolved = typedef_method_signatures(full, info, substitution);
+    let mut items = Vec::new();
+    for (name, m) in methods {
+        if !include_private && !is_public_member(name) {
+            continue;
+        }
+        let sig = resolved.get(name).unwrap_or(&m.signature);
+        items.push(doc_item(
+            name.clone(),
+            CompletionItemKind::METHOD,
+            Some(render_signature(sig)),
+            m.decl.doc.as_deref(),
+        ));
+    }
+    items
+}
+
 /// When the text before the `.` at `dot` is a standalone identifier naming a
 /// type, the members are that type's variants (sum) or methods (record).
 fn type_qualified_items(
     full: &FullAnalysis,
     text: &str,
     dot: usize,
+    include_private: bool,
 ) -> Option<Vec<CompletionItem>> {
     let bytes = text.as_bytes();
     let mut start = dot;
@@ -382,18 +576,17 @@ fn type_qualified_items(
     match &info.kind {
         TypeKind::Sum { variants } => {
             for v in variants {
+                if !include_private && !is_public_member(&v.name) {
+                    continue;
+                }
                 items.push(item(v.name.clone(), CompletionItemKind::ENUM_MEMBER, None));
             }
         }
-        TypeKind::Record { methods, .. } => {
-            for (n, m) in methods {
-                items.push(doc_item(
-                    n.clone(),
-                    CompletionItemKind::METHOD,
-                    Some(render_signature(&m.signature)),
-                    m.decl.doc.as_deref(),
-                ));
-            }
+        TypeKind::Record { .. } => {
+            // The declaration view: no instance, so an empty substitution shows
+            // signatures over the declaration's own slots (`Self.<slot>`).
+            let empty = prepoly_hir::Substitution::empty();
+            items.extend(record_method_items(full, info, &empty, include_private));
         }
     }
     Some(items)
@@ -407,13 +600,6 @@ fn strip(ty: &Type) -> Type {
             strip(inner)
         }
         other => other.clone(),
-    }
-}
-
-fn nominal_id(ty: &Type) -> Option<i32> {
-    match ty {
-        Type::Record(n) | Type::Sum(n) => Some(n.id),
-        _ => None,
     }
 }
 

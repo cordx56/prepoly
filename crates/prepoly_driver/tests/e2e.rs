@@ -38,7 +38,12 @@ fn collect_cases(dir: &Path, out: &mut Vec<PathBuf>) {
         if path.is_dir() {
             if !cfg!(feature = "jit")
                 && path.file_name().is_some_and(|n| {
-                    n == "concurrency" || n == "net" || n == "process" || n == "path" || n == "fs"
+                    n == "concurrency"
+                        || n == "net"
+                        || n == "process"
+                        || n == "path"
+                        || n == "fs"
+                        || n == "http"
                 })
             {
                 continue;

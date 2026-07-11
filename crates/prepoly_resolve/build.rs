@@ -105,7 +105,7 @@ fn main() {
         &mut src,
         "STDLIB_NESTED",
         "Embedded standard-library modules BELOW `std` (`std.collections`,\n\
-         `std.collections`, `std.data.json`, ...): every non-prelude `.pp`\n\
+         `std.collections`, ...): every non-prelude `.pp`\n\
          under `std/`. Not in the implicit prelude -- their names are in scope\n\
          only after an explicit `import std.<path>.{ Name }`, at which point\n\
          the module is loaded on demand (`load_std_nested`). Keyed by the\n\

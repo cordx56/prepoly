@@ -90,7 +90,7 @@ fn nested_key(path: &[String]) -> Option<String> {
 }
 
 /// Load the embedded nested std modules (`std.collections`,
-/// `std.data.json`) imported by `modules` or named in `extra_imports`
+/// `std.collections.hashmap`) imported by `modules` or named in `extra_imports`
 /// (the active document's imports, when it is kept separate from `modules`),
 /// transitively (a nested module may import another). Returns the newly loaded
 /// modules to append to the graph; nested modules that are not imported
@@ -310,6 +310,18 @@ fn find_module_file(root: &Path, search: &SearchPaths, segs: &[String]) -> Optio
     std::iter::once(root)
         .chain(search.includes.iter().map(PathBuf::as_path))
         .find_map(|r| module_file_under(r, segs))
+}
+
+/// The source text serving module path `segs` as seen from `root`: the `.pp`
+/// file's contents, or a native plugin library's synthesized wrapper module.
+/// Resolution follows [`find_module_file`] (package directory, project root,
+/// then include paths). Used by editor tooling to list a module's exports
+/// without loading the whole graph.
+pub fn module_source(root: &Path, search: &SearchPaths, segs: &[String]) -> Option<String> {
+    match find_module_file(root, search, segs)? {
+        ModuleFile::Source(file) => std::fs::read_to_string(file).ok(),
+        ModuleFile::Plugin(lib) => crate::plugin::synthesize_plugin_module(&lib).ok(),
+    }
 }
 
 /// Parse the embedded prelude into `sources`, returning its modules. The

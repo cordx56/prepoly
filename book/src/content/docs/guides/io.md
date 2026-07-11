@@ -37,11 +37,16 @@ println("Hello, {name}!")
 
 ## Files
 
-`read_file(path)` and `write_file(path, content)` cover whole-file text I/O.
-Both return a Result. In a quick script, unwrap with `!` and let a failure
-stop the program:
+Whole-file text I/O lives in the `fs` library, not in the implicit prelude.
+Import it first; from a repo checkout, build `libraries/build.sh` and set
+`PREPOLY_INCLUDE` to the `libraries/` directory as described in the
+[standard library reference](/references/stdlib/#fs-a-library-not-std).
+`read_file(path)` and `write_file(path, content)` both return a Result. In a
+quick script, unwrap with `!` and let a failure stop the program:
 
-```prepoly
+```prepoly norun
+import fs.{ read_file, write_file }
+
 let path = "demo.txt"
 write_file(path, "line one\nline two")!
 let content = read_file(path)!
@@ -52,7 +57,9 @@ for line in content.split("\n") {
 
 Where a failure should be handled instead, match on the Result:
 
-```prepoly
+```prepoly norun
+import fs.read_file
+
 match read_file("missing.txt") {
     Ok { value } => println(value),
     Err { error } => println("read failed: {error}"),
@@ -63,8 +70,9 @@ For finer control, `open(path, mode)` returns a `File!`; a `File` has
 `read(n)`, `write(bytes)`, `seek`, `size()`, and `close()`, all returning
 Results, plus the `File.stdin()` / `File.stdout()` / `File.stderr()`
 constructors. See the
-[standard library reference](/references/stdlib/#files) for the signatures.
+[standard library reference](/references/stdlib/#fs-a-library-not-std) for the
+signatures.
 
-Note: file I/O runs on the native runtime. The REPL interpreter (and the
-browser playground) refuses it at runtime — see the
-[execution model reference](/references/execution/).
+Note: the native `prepoly` and `prepoly repl` can both use the plugin-backed
+libraries, but the browser playground cannot load plugins, so file I/O
+examples are not runnable there.

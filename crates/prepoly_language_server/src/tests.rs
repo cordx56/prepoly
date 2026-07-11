@@ -766,7 +766,8 @@ fn completion_offers_import_modules() {
     );
 }
 
-/// In `import math.{ |`, the public names of the `math` module are offered.
+/// In `import math.{ |`, the public names of the `math` module are offered,
+/// carrying the resolved signature and the stdlib doc comment.
 #[test]
 fn completion_offers_imported_names() {
     let src = "import math.{ ";
@@ -780,6 +781,173 @@ fn completion_offers_imported_names() {
             .any(|l| l == "sqrt" || l == "abs" || l == "pow"),
         "math's public functions should be offered: {labels:?}"
     );
+    let sqrt = items.iter().find(|i| i.label == "sqrt").expect("sqrt item");
+    assert!(
+        sqrt.detail.as_deref().unwrap_or("").contains("fun sqrt("),
+        "signature detail: {:?}",
+        sqrt.detail
+    );
+    assert!(sqrt.documentation.is_some(), "stdlib doc carried");
+}
+
+/// Under the `std` namespace, the embedded nested modules complete alongside
+/// the prelude ones (`import std.|` offers `collections`), and the brace list
+/// of a nested module offers its public types with their docs.
+#[test]
+fn completion_offers_nested_std_segments() {
+    let analyzer = DocAnalyzer::new(path());
+    let src = "import std.";
+    let doc = Document::new(src.to_string(), 1);
+    let items = completion::completion(&doc, &analyzer, &path(), doc.position_at(src.len()));
+    let std_segs = labels(&items);
+    assert!(
+        std_segs.contains(&"collections".to_string()),
+        "nested namespace: {std_segs:?}"
+    );
+    assert!(
+        std_segs.contains(&"math".to_string()),
+        "prelude under std: {std_segs:?}"
+    );
+
+    let src = "import std.collections.{ ";
+    let doc = Document::new(src.to_string(), 1);
+    let items = completion::completion(&doc, &analyzer, &path(), doc.position_at(src.len()));
+    let names = labels(&items);
+    assert!(
+        names.contains(&"HashMap".to_string()),
+        "nested std exports: {names:?}"
+    );
+}
+
+/// Modules served by an include path (`PREPOLY_INCLUDE`) and declared package
+/// names (`PREPOLY_PACKAGES`) complete in the import path, exactly as the
+/// loader would resolve them.
+#[test]
+fn completion_offers_include_and_package_modules() {
+    let root =
+        std::env::temp_dir().join(format!("prepoly_lsp_include_test-{}", std::process::id()));
+    let geo_dir = root.join("geometry");
+    std::fs::create_dir_all(&geo_dir).expect("create include dir");
+    std::fs::write(root.join("geometry.pp"), "fun origin() { return 0 }\n")
+        .expect("write include module");
+    std::fs::write(geo_dir.join("vec.pp"), "fun dot() { return 0 }\n")
+        .expect("write nested include module");
+    let search = prepoly_resolve::SearchPaths {
+        packages: std::collections::HashMap::from([(
+            "mypkg".to_string(),
+            std::path::PathBuf::from("/nonexistent"),
+        )]),
+        includes: vec![root.clone()],
+    };
+
+    let analyzer = DocAnalyzer::new(path());
+    // Root: include-path modules and package names appear.
+    let src = "import ";
+    let doc = Document::new(src.to_string(), 1);
+    let items = completion::completion_with(
+        &doc,
+        &analyzer,
+        &path(),
+        doc.position_at(src.len()),
+        &search,
+    );
+    let roots = labels(&items);
+    assert!(
+        roots.contains(&"geometry".to_string()),
+        "include module: {roots:?}"
+    );
+    assert!(
+        roots.contains(&"mypkg".to_string()),
+        "package name: {roots:?}"
+    );
+
+    // Nested: the include directory's subdirectory serves the next segment.
+    let src = "import geometry.";
+    let doc = Document::new(src.to_string(), 1);
+    let items = completion::completion_with(
+        &doc,
+        &analyzer,
+        &path(),
+        doc.position_at(src.len()),
+        &search,
+    );
+    let nested = labels(&items);
+    assert!(
+        nested.contains(&"vec".to_string()),
+        "nested include module: {nested:?}"
+    );
+
+    // Brace list: the include module's public names are offered (through the
+    // textual fallback -- the analyzer's environment knows no include roots).
+    let src = "import geometry.{ ";
+    let doc = Document::new(src.to_string(), 1);
+    let items = completion::completion_with(
+        &doc,
+        &analyzer,
+        &path(),
+        doc.position_at(src.len()),
+        &search,
+    );
+    let names = labels(&items);
+    assert!(
+        names.contains(&"origin".to_string()),
+        "include module names: {names:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The brace list of a module next to the document carries analyzed
+/// signatures and doc comments, and offers its public types.
+#[test]
+fn completion_import_names_carry_signature_and_doc() {
+    let root = std::env::temp_dir().join(format!("prepoly_lsp_brace_test-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("create module dir");
+    std::fs::write(
+        root.join("shapes.pp"),
+        concat!(
+            "/** Area of a w-by-h rectangle. */\n",
+            "fun area(w: int32, h: int32) -> int32 {\n",
+            "    return w * h\n",
+            "}\n",
+            "\n",
+            "type Rect = {\n",
+            "    w: int32\n",
+            "}\n",
+        ),
+    )
+    .expect("write module");
+    let main = root.join("main.pp");
+
+    let src = "import shapes.{ ";
+    let analyzer = DocAnalyzer::new(main.clone());
+    let doc = Document::new(src.to_string(), 1);
+    let items = completion::completion(&doc, &analyzer, &main, doc.position_at(src.len()));
+    let area = items
+        .iter()
+        .find(|i| i.label == "area")
+        .unwrap_or_else(|| panic!("area offered: {:?}", labels(&items)));
+    assert!(
+        area.detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("fun area(w: int32, h: int32) -> int32"),
+        "resolved signature: {:?}",
+        area.detail
+    );
+    let doc_text = match &area.documentation {
+        Some(tower_lsp_server::ls_types::Documentation::MarkupContent(m)) => m.value.clone(),
+        other => format!("{other:?}"),
+    };
+    assert!(
+        doc_text.contains("Area of a w-by-h rectangle."),
+        "doc comment: {doc_text}"
+    );
+    let labels = labels(&items);
+    assert!(
+        labels.contains(&"Rect".to_string()),
+        "public type: {labels:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// After `arr.` on an array value, offer the built-in array methods and the std
@@ -847,6 +1015,107 @@ fn completion_offers_record_methods() {
     );
 }
 
+/// After `p.` on a record value, offer that record's fields alongside its
+/// methods, each field typed for the instance.
+#[test]
+fn completion_offers_record_fields() {
+    let src = concat!(
+        "type Point = {\n",
+        "    x: int32\n",
+        "    y: float64\n",
+        "}\n",
+        "\n",
+        "fun Point.dist(self) -> int32 {\n",
+        "    return self.x\n",
+        "}\n",
+        "\n",
+        "fun main() {\n",
+        "    let p = Point { x: 1, y: 2.0 }\n",
+        "    p.\n",
+        "}\n",
+    );
+    let analyzer = DocAnalyzer::new(path());
+    let doc = Document::new(src.to_string(), 1);
+    let off = src.find("p.\n").unwrap() + 2;
+    let items = completion::completion(&doc, &analyzer, &path(), doc.position_at(off));
+    let x = items
+        .iter()
+        .find(|i| i.label == "x")
+        .unwrap_or_else(|| panic!("field x offered: {:?}", labels(&items)));
+    // The field item carries its type and the field kind (not method).
+    assert_eq!(
+        x.kind,
+        Some(tower_lsp_server::ls_types::CompletionItemKind::FIELD)
+    );
+    assert_eq!(x.detail.as_deref(), Some("x: int32"));
+    let labels = labels(&items);
+    assert!(labels.contains(&"y".to_string()), "field y: {labels:?}");
+    assert!(labels.contains(&"dist".to_string()), "method: {labels:?}");
+}
+
+/// `_`-prefixed members are implementation details: hidden from the member
+/// list, but offered once the user types the leading `_` themselves.
+#[test]
+fn completion_hides_private_members_unless_typed() {
+    let src = concat!(
+        "import std.collections.{ HashMap }\n",
+        "fun main() {\n",
+        "    let m = HashMap.new()\n",
+        "    m.set(\"a\", 1)\n",
+        "    m.\n",
+        "}\n",
+    );
+    let analyzer = DocAnalyzer::new(path());
+    let doc = Document::new(src.to_string(), 1);
+    let off = src.find("m.\n").unwrap() + 2;
+    let items = completion::completion(&doc, &analyzer, &path(), doc.position_at(off));
+    let visible = labels(&items);
+    assert!(visible.contains(&"get".to_string()), "{visible:?}");
+    assert!(
+        !visible.iter().any(|l| l.starts_with('_')),
+        "internals hidden: {visible:?}"
+    );
+
+    // Typing `m._e` asks for the internals explicitly.
+    let src = src.replace("m.\n", "m._e\n");
+    let doc = Document::new(src.clone(), 1);
+    let off = src.find("m._e\n").unwrap() + 4;
+    let items = completion::completion(&doc, &analyzer, &path(), doc.position_at(off));
+    let private = labels(&items);
+    assert!(
+        private.contains(&"_entries".to_string()),
+        "typed `_` shows internals: {private:?}"
+    );
+}
+
+/// A member item's detail shows the method's signature resolved for the
+/// receiver's instance: on a `HashMap` whose entries were pinned to
+/// `string -> int32`, `get` completes as returning `int32?`.
+#[test]
+fn completion_method_detail_resolves_via_scheme() {
+    let src = concat!(
+        "import std.collections.{ HashMap }\n",
+        "fun main() {\n",
+        "    let m = HashMap.new()\n",
+        "    m.set(\"a\", 1)\n",
+        "    m.\n",
+        "}\n",
+    );
+    let analyzer = DocAnalyzer::new(path());
+    let doc = Document::new(src.to_string(), 1);
+    let off = src.find("m.\n").unwrap() + 2;
+    let items = completion::completion(&doc, &analyzer, &path(), doc.position_at(off));
+    let get = items
+        .iter()
+        .find(|i| i.label == "get")
+        .unwrap_or_else(|| panic!("get offered: {:?}", labels(&items)));
+    let detail = get.detail.as_deref().unwrap_or("");
+    assert!(
+        detail.contains("-> int32?"),
+        "instance-resolved return: {detail}"
+    );
+}
+
 /// `HashMap` lives in the embedded prelude module `std.collections`, and
 /// its operations are `fun HashMap.m(...)` methods. The analysis must load that
 /// nested prelude module so `HashMap.new(...)` types to `HashMap` and `m.` offers
@@ -869,6 +1138,65 @@ fn completion_offers_hashmap_prelude_methods() {
         labels.contains(&"set".to_string()) && labels.contains(&"get".to_string()),
         "HashMap methods: {labels:?}"
     );
+}
+
+/// Hovering a name inside an import's brace list shows the imported
+/// function's signature and doc comment, as declared in its module.
+#[test]
+fn hover_import_name_shows_signature_and_doc() {
+    let src = "import math.{ pow }\nfun main() {\n    println(pow(2.0, 3.0))\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "pow", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover the imported name"));
+    assert!(text.contains("fun pow("), "signature: {text}");
+    assert!(text.contains("raised to the power"), "doc comment: {text}");
+}
+
+/// A renamed import (`pow as power`) resolves both sides of the `as` to the
+/// remote declaration -- the local name is not visible under the remote
+/// module and vice versa, so this must not go through `main`'s scope.
+#[test]
+fn hover_import_renamed_name_resolves_remote_declaration() {
+    let src = "import math.{ pow as power }\nfun main() {\n    println(power(2.0, 3.0))\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "power", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover the local rename"));
+    assert!(text.contains("fun pow("), "remote signature: {text}");
+    let (doc, pos) = position(src, "pow", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover the remote name"));
+    assert!(text.contains("fun pow("), "remote signature: {text}");
+}
+
+/// Hovering an imported type shows its definition and doc comment; hovering a
+/// module path segment shows the module the import resolves to.
+#[test]
+fn hover_import_type_and_module_path() {
+    let src = "import std.collections.{ HashMap }\nfun main() {\n    let m = HashMap.new()\n    m.set(\"a\", 1)\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "HashMap", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover the imported type"));
+    assert!(text.contains("type HashMap"), "type definition: {text}");
+    assert!(text.contains("HashMap.new()"), "type doc comment: {text}");
+    let (doc, pos) = position(src, "collections", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover the path segment"));
+    assert!(
+        text.contains("module std.collections"),
+        "module path: {text}"
+    );
+}
+
+/// A bare single-name import (`import math.pow`) was split by the loader into
+/// a module path and one name; hover still resolves both parts.
+#[test]
+fn hover_import_bare_single_name() {
+    let src = "import math.pow\nfun main() {\n    println(pow(2.0, 3.0))\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "pow", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover the bare imported name"));
+    assert!(text.contains("fun pow("), "signature: {text}");
+    let (doc, pos) = position(src, "math", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover the module segment"));
+    assert!(text.contains("module math"), "module path: {text}");
 }
 
 /// After a sum type name (`Shape.`), offer its variants.

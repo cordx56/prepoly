@@ -106,8 +106,10 @@ knowing:
 - **Concurrency is experimental.** Scheduling is unstructured, so code that must
   observe a spawned task's results calls `sync()` first. Treat it as a preview.
 - **The JIT and interpreter agree across the language's tested surface,** but a
-  few runtime-only features differ: file I/O and concurrency currently require
-  the native runtime rather than `prepoly repl`.
+  few features are native-only: concurrency (`spawn`/`sync`/`with`) and runtime
+  type specialization are refused by the interpreter, so they need the JIT.
+  File I/O and the other native libraries run on both back ends (`prepoly repl`
+  included); only the browser playground, which cannot load plugins, lacks them.
 
 ## License
 

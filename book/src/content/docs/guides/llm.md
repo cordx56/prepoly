@@ -430,7 +430,8 @@ import geometry.vec as g
   `Stdio.Pipe`), `wait() -> int32!` (exit code). A piped stream is an fs
   `File`, so drive it with `read`/`write`/`close` and convert bytes with the
   prelude `to_bytes`/`to_text`.
-- JSON: also nested -- `import std.data.json.{ JsonValue, parse, stringify }`.
+- JSON: a LIBRARY (pure prepoly, same setup as the others) --
+  `import data.json.{ JsonValue, parse, stringify }`.
   `parse(text) -> JsonValue!`; accessors `get(key)`, `at(index)`, `as_bool()`,
   `as_number()`, `as_string()` (each fallible), `is_null()`; `stringify(v)` is
   a FREE function (`stringify(v)`, not `v.stringify()`). `j.into()!` decodes a

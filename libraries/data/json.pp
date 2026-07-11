@@ -1,14 +1,21 @@
 // JSON: a value tree, a recursive-descent parser, accessors, a serializer, and
-// a reflective decoder into typed structures. Part of the standard library but
-// NOT in the implicit prelude -- import it explicitly:
+// a reflective decoder into typed structures. A library (pure prepoly, no
+// plugin) -- import it explicitly:
 //
-//     import std.data.json.{ JsonValue, parse }
+//     import data.json.{ JsonValue, parse }
 //
-// The value tree mirrors the six JSON kinds. An Object keeps its members as
-// parallel `keys`/`vals` arrays rather than a `HashMap`: the typed back end
-// cannot lay a `HashMap` out inside a sum variant, and object field counts are
-// small, so an association list is the practical representation here (a
-// `HashMap` remains available to user code via `import std.collections`).
+// The value tree mirrors the six JSON kinds. An Object keeps its members in a
+// string -> JsonValue `HashMap` (the `_JsonObject` refinement below pins the
+// slots), so `get` is a hash lookup. One consequence: `stringify` renders
+// object members in the map's slot order, not insertion order -- stable for a
+// given input, but not the source document's ordering.
+
+import std.collections.HashMap
+
+type _JsonObject = HashMap {
+    key: string
+    value: JsonValue
+}
 
 /**
  * A parsed JSON value, one variant per JSON kind. Obtain one with `parse`,
@@ -21,7 +28,7 @@ type JsonValue =
     | Number { value: float64 }
     | String { value: string }
     | Array { value: JsonValue[] }
-    | Object { keys: string[], vals: JsonValue[] }
+    | Object { values: _JsonObject }
 
 // ----- accessors -----
 
@@ -64,11 +71,9 @@ fun JsonValue.is_null(self) -> bool {
 /** The value of object field `key`, or an error naming the missing field. */
 fun JsonValue.get(self, key: string) -> JsonValue! {
     match self {
-        JsonValue.Object { keys, vals } => {
-            for i in [0..keys.len()] {
-                if keys[i] == key {
-                    return vals[i]
-                }
+        JsonValue.Object { values } => {
+            if let v = values.get(key) {
+                return v
             }
             return error("missing field '{key}'")
         }
@@ -106,7 +111,7 @@ fun JsonValue.into(self) -> infer! {
         JsonValue.String { value } => { return infer.from(value) }
         JsonValue.Bool { value } => { return infer.from(value) }
         JsonValue.Null => { return null }
-        JsonValue.Object { keys, vals } => {
+        JsonValue.Object { values } => {
             let ret: infer
             for field in fields(ret) {
                 ret[field] = self.get(field)!.into()!
@@ -146,11 +151,15 @@ fun stringify(value: JsonValue) -> string {
             }
             return out + "]"
         }
-        JsonValue.Object { keys, vals } => {
+        JsonValue.Object { values } => {
             let out = "\{"
-            for i in [0..keys.len()] {
-                if i > 0 { out = out + "," }
-                out = out + _quote(keys[i]) + ":" + stringify(vals[i])
+            let first = true
+            for k in values.keys() {
+                if !first { out = out + "," }
+                if let v = values.get(k) {
+                    out = out + _quote(k) + ":" + stringify(v)
+                }
+                first = false
             }
             return out + "\}"
         }
@@ -255,12 +264,11 @@ fun _Cursor._value(self) -> JsonValue! {
 
 fun _Cursor._object(self) -> JsonValue! {
     self.pos = self.pos + 1
-    let keys: string[] = []
-    let vals: JsonValue[] = []
+    let values: _JsonObject = HashMap.new()
     self._skip_ws()
     if self._peek() == "\}" {
         self.pos = self.pos + 1
-        return JsonValue.Object { keys: keys, vals: vals }
+        return JsonValue.Object { values: values }
     }
     while true {
         self._skip_ws()
@@ -272,13 +280,12 @@ fun _Cursor._object(self) -> JsonValue! {
         self.pos = self.pos + 1
         self._skip_ws()
         const val = self._value()!
-        keys.push(key)
-        vals.push(val)
+        values.set(key, val)
         self._skip_ws()
         const sep = self._peek()
         self.pos = self.pos + 1
         if sep == "\}" {
-            return JsonValue.Object { keys: keys, vals: vals }
+            return JsonValue.Object { values: values }
         }
         if sep != "," {
             return error("expected ',' or '\}' in object at offset {self.pos}")

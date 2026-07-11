@@ -150,7 +150,7 @@ type HttpClient = {
     _connect
 }
 
-fun HttpClient.http(host: string, port: int32) -> HttpClient {
+fun HttpClient.http(host: string, port: int32) {
     return Self {
         host: host,
         port: port,
@@ -159,7 +159,7 @@ fun HttpClient.http(host: string, port: int32) -> HttpClient {
     }
 }
 
-fun HttpClient.https(host: string, port: int32) -> HttpClient {
+fun HttpClient.https(host: string, port: int32) {
     return Self {
         host: host,
         port: port,

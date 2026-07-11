@@ -31,7 +31,7 @@ pub struct UnknownNamer {
 impl UnknownNamer {
     /// Fix the display name of inference variable `id` (e.g. to a type slot's
     /// `Self.<name>` form) instead of numbering it `unknown_N`.
-    fn fix(&mut self, id: u32, name: String) {
+    pub(crate) fn fix(&mut self, id: u32, name: String) {
         self.fixed.insert(id, name);
     }
 
@@ -298,9 +298,9 @@ pub fn render_type_def_with(
 }
 
 /// Whether a field/method/variant name is part of a type's public surface. A
-/// leading underscore marks an implementation detail (e.g. `HashMap._find`), which
-/// hover and the type view omit.
-fn is_public_member(name: &str) -> bool {
+/// leading underscore marks an implementation detail (e.g. `HashMap._find`),
+/// which hover, the type view, and member completion omit.
+pub(crate) fn is_public_member(name: &str) -> bool {
     !name.starts_with('_')
 }
 

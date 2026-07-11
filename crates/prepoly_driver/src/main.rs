@@ -811,7 +811,7 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         ast: main_ast,
     });
 
-    // Nested std modules (`std.collections`, `std.data.json`) are not in
+    // Nested std modules (`std.collections`, ...) are not in
     // the implicit prelude; load only the ones actually imported, transitively.
     let nested = prepoly_resolve::load_std_nested(&modules, &[], &mut sources);
     modules.extend(nested);
@@ -931,7 +931,7 @@ fn specialize_keyed(
     })?;
     // Inject each generated method into the module that defines its receiver.
     // A record key defined in another module (`User` in the caller, decoder in
-    // `std.data.json`) is not visible there, so also inject a synthetic import
+    // the json library) is not visible there, so also inject a synthetic import
     // of the key type into the receiver's module. Collected per module first so
     // one import covers every specialization that needs it.
     use prepoly_hir::Type;

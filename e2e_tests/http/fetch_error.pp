@@ -1,0 +1,16 @@
+// fetch drives the whole client pipeline (URI parse, client construction
+// with its per-scheme _connect closure, request/response plumbing); loopback
+// port 1 has no listener, so it fails deterministically at connect, offline.
+// This pins that the unannotated-closure-field client monomorphizes at all.
+import http.{ fetch }
+
+fun main() {
+    match fetch("http://127.0.0.1:1/") {
+        Ok { value } => println("unexpected status {value.status}"),
+        Err { error } => println("fetch failed"),
+    }
+    match fetch("not a url") {
+        Ok { value } => println("unexpected parse ok"),
+        Err { error } => println("bad url errs"),
+    }
+}

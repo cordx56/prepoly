@@ -9,7 +9,7 @@ The standard library has two layers:
   `string`, `math`, `conv`, `assert`) plus the runtime builtins. Their public
   names are in scope in every program with no import.
 - **Import-only modules** — everything else under `std/`
-  (`std.collections`, `std.data.json`): imported explicitly, e.g.
+  (`std.collections`): imported explicitly, e.g.
   `import std.collections.{ HashMap }`, and loaded on demand.
 
 Most of the library is written in prepoly itself, on top of a small set of
@@ -408,23 +408,31 @@ arguments** — the key/value types are inferred from the first `set` or
 | `m.pairs()`                 | `-> [K, V][]`           | same order as `keys`            |
 | `m.clear()`                 | remove every pair       | keeps capacity and types        |
 
-## `std.data.json`
+## `data.json` (a library, not `std`)
 
-```prepoly
-import std.data.json.{ JsonValue, parse, stringify }
+```prepoly norun
+import data.json.{ JsonValue, parse, stringify }
 ```
 
 A JSON value tree, parser, accessors, serializer, and a reflective decoder.
+A pure-prepoly library (no plugin) under `libraries/`, with the same setup
+as the others — automatic for a distributed toolchain, `PREPOLY_INCLUDE`
+from a repo checkout.
 
-```prepoly
+```prepoly norun
 type JsonValue =
     | Null
     | Bool { value: bool }
     | Number { value: float64 }
     | String { value: string }
     | Array { value: JsonValue[] }
-    | Object { keys: string[], vals: JsonValue[] }   // members as parallel arrays
+    | Object { values: _JsonObject }   // a string -> JsonValue HashMap
 ```
+
+An `Object` keeps its members in a `HashMap` (a refinement pinning the key
+to `string` and the value to `JsonValue`), so `get` is a hash lookup. One
+consequence: `stringify` renders object members in the map's slot order,
+not the source document's ordering (stable for a given input).
 
 | Function / method                                 | Signature                           | Behavior                                                                                                             |
 | ------------------------------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
@@ -438,8 +446,8 @@ type JsonValue =
 
 Decoding a whole document into a typed structure combines `parse` and `into`:
 
-```prepoly
-import std.data.json.{ JsonValue, parse }
+```prepoly norun
+import data.json.{ JsonValue, parse }
 
 type Address = { city: string, zip: int64 }
 type User = { name: string, age: int64, address: Address }

@@ -618,9 +618,29 @@ fn resolve_program_annotations(
         errors,
     );
 
+    // Sum variant fields may name a `type Alias = ..` (a concrete refinement
+    // like json's `_JsonObject`); resolve such names through the alias table
+    // `resolve_type_decls` just filled, so the field's declared type reaches
+    // the back ends -- a bare sum crossing a function boundary has no
+    // construction substitution to fall back on.
+    let alias_types: HashMap<String, Type> = program
+        .type_aliases
+        .iter()
+        .map(|(k, a)| (k.clone(), a.ty.clone()))
+        .collect();
     for info in program.types.values_mut() {
         let module = info.module.clone();
         let nominal = |name: &str| resolve_nominal(&module, name);
+        let alias = |name: &str| -> Option<Type> {
+            crate::hir::resolve_qualified(
+                &alias_types,
+                &import_origins,
+                &import_renames_snap,
+                &module,
+                name,
+            )
+            .cloned()
+        };
         match &mut info.kind {
             // Record fields are resolved by `resolve_type_decls` above; only the
             // method signatures remain.
@@ -639,7 +659,7 @@ fn resolve_program_annotations(
             TypeKind::Sum { variants } => {
                 for variant in variants {
                     variant.fields.iter_mut().for_each(|field| {
-                        resolve_field_annotation(field, &nominal, &mut next_unknown)
+                        resolve_variant_field_annotation(field, &nominal, &alias, &mut next_unknown)
                     });
                     variant.methods.values_mut().for_each(|method| {
                         let assign_ret_unknown = method.decl.body.is_none();
@@ -672,13 +692,17 @@ fn resolve_program_annotations(
     propagate_interface_method_constraints(program);
 }
 
-fn resolve_field_annotation(
+/// Resolve a sum variant field's declared type. The annotation may name a
+/// `type Alias = ..` (see the alias snapshot at the call site); an
+/// unannotated field is a free type parameter.
+fn resolve_variant_field_annotation(
     field: &mut FieldInfo,
     nominal: &impl Fn(&str) -> Option<NominalInfo>,
+    alias: &impl Fn(&str) -> Option<Type>,
     next_unknown: &mut u32,
 ) {
     field.resolved_ty = match &field.ty {
-        Some(ty) => resolve(ty, nominal)
+        Some(ty) => crate::types::resolve_with_aliases(ty, nominal, alias)
             .ok()
             .map(|t| crate::freshen_infer(t, &mut || fresh_unknown(next_unknown))),
         None => {
