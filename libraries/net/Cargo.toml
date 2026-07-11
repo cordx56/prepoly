@@ -1,0 +1,25 @@
+# The net library's native half: a Prepoly plugin (cdylib) loaded by
+# `libraries/net.pp`. Build and install it with `libraries/build.sh`.
+[package]
+name = "prepoly_lib_net"
+description = "Prepoly plugin: TCP/UDP sockets and TLS client connections"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+# The cdylib is installed as `libraries/libnet.so`, and the wrapper
+# module imports it by that file name (`import libnet.{ .. }`).
+name = "net"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+prepoly_plugin = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+webpki-roots = "1.0"

@@ -1,0 +1,41 @@
+// Several spawned TCP clients against one listener: every connect, write,
+// and read crosses the plugin boundary concurrently, so the native side must
+// hold up under threads -- the regression net-as-a-plugin is most exposed
+// to. Each client reads the echo back before closing, so every round trip
+// completes before the count is printed. Clients print only on failure.
+import net.{ Tcp, TcpListener }
+
+fun run_client(port: int64) {
+    match Tcp.connect("127.0.0.1", port) {
+        Ok { value } => {
+            let conn = value
+            let w = conn.write(to_bytes("hi"))
+            match conn.read(64) {
+                Ok { value } => { let echoed = value }
+                Err { error } => println("client read failed: {error}")
+            }
+            let closed = conn.close()
+        }
+        Err { error } => println("connect failed: {error}")
+    }
+}
+
+fun main() {
+    let listener = TcpListener.bind("127.0.0.1", 0)!
+    let port = int64.parse(listener.local_addr()!.split(":")[1])!
+    spawn(() -> { run_client(port) })
+    spawn(() -> { run_client(port) })
+    spawn(() -> { run_client(port) })
+    spawn(() -> { run_client(port) })
+    let served = 0
+    while served < 4 {
+        let conn = listener.accept()!
+        let req = conn.read(64)!
+        conn.write(req)!
+        conn.close()!
+        served += 1
+    }
+    sync()
+    listener.close()!
+    println("served {served}")
+}

@@ -1,6 +1,8 @@
 // File I/O via the runtime primitives. `write_file` and `read_file` return a
 // Result; we match on it explicitly.
 
+import fs.{ read_file, write_file }
+
 fun main() {
     let path = "/tmp/prepoly_io_demo.txt"
     let content = "line one\nline two\nline three"

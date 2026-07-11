@@ -240,29 +240,9 @@ pub trait Codegen {
     fn string_char_at(&mut self, s: Self::Value, i: Self::Value) -> Self::Value;
     /// A string from a `uint8[]` (`_string_from_bytes`): a `Result<string, string>`.
     fn string_from_bytes(&mut self, bytes: Self::Value) -> Self::Value;
-    /// `open(path, mode)`: a `Result<File, string>`.
-    fn file_open(&mut self, path: Self::Value, mode: Self::Value) -> Self::Value;
-    /// A standard stream as a `File`: `which` is 0 = stdin, 1 = stdout, 2 = stderr
-    /// (`File.stdin`/`File.stdout`/`File.stderr`).
-    fn file_std(&mut self, which: u8) -> Self::Value;
-    /// `_file_from_fd(fd)`: adopt an already-open descriptor as a `File`.
-    fn file_from_fd(&mut self, fd: Self::Value) -> Self::Value;
-    /// `file.read(n)`: a `Result<uint8[], string>` of up to `n` bytes.
-    fn file_read(&mut self, file: Self::Value, n: Self::Value) -> Self::Value;
-    /// `file.write(bytes)`: a `Result<int64, string>` (bytes written).
-    fn file_write(&mut self, file: Self::Value, bytes: Self::Value) -> Self::Value;
-    /// `file.size()`: a `Result<int64, string>`.
-    fn file_size(&mut self, file: Self::Value) -> Self::Value;
-    /// `file.seek(pos)`: a `Result<void, string>` (reposition the cursor).
-    fn file_seek(&mut self, file: Self::Value, pos: Self::Value) -> Self::Value;
-    /// `file.close()`: a `Result<void, string>`.
-    fn file_close(&mut self, file: Self::Value) -> Self::Value;
-    /// A network primitive call (`_tcp_connect` and friends): `rt_name` is the
-    /// runtime symbol; every argument is already in ABI form (an object
-    /// pointer, or an integer the back end widens to i64) and the result is a
-    /// typed `Result` object pointer. One hook covers the whole family because
-    /// the calls share that shape (see `prepoly_runtime::net`).
-    fn net_call(&mut self, rt_name: &'static str, args: &[Self::Value]) -> Self::Value;
+    /// `_stdin_read(n)`: a `Result<uint8[], string>` of up to `n` bytes from
+    /// standard input.
+    fn stdin_read(&mut self, n: Self::Value) -> Self::Value;
     /// A native-plugin call (`_plugin_[f]call_<t>`): `rt_name` is one of the
     /// `pp_plugin_call_{int,float,obj}` runtime symbols, picked by return
     /// class. `strings` are the path/name/sig string objects; `args` are the
@@ -1205,26 +1185,6 @@ pub trait Codegen {
                     _ => self.string_len(v),
                 };
             }
-            CallKind::FileMethod(name) => {
-                let file = self.codegen_operand(program, f, &args[0], &arg_types[0]);
-                return match name {
-                    "read" => {
-                        let n = self.codegen_operand(program, f, &args[1], &arg_types[1]);
-                        self.file_read(file, n)
-                    }
-                    "write" => {
-                        let b = self.codegen_operand(program, f, &args[1], &arg_types[1]);
-                        self.file_write(file, b)
-                    }
-                    "seek" => {
-                        let pos = self.codegen_operand(program, f, &args[1], &arg_types[1]);
-                        self.file_seek(file, pos)
-                    }
-                    "size" => self.file_size(file),
-                    _ => self.file_close(file),
-                };
-            }
-            CallKind::FileStd(which) => return self.file_std(which),
             CallKind::NumericConv { ty, method } => {
                 return self.codegen_conv(program, f, ty, method, args);
             }
@@ -1596,83 +1556,18 @@ pub trait Codegen {
                 let x = self.codegen_operand(program, f, &args[0], &f64t);
                 self.convert(&Type::Int(prepoly_hir::IntKind::I64), "from", &f64t, x)
             }
-            // `open(path, mode) -> File!`.
-            "open" => {
-                let p = self.codegen_operand(program, f, &args[0], &Type::Str);
-                let m = self.codegen_operand(program, f, &args[1], &Type::Str);
-                self.file_open(p, m)
+            // Standalone stdio primitives: write a string to stdout, read
+            // bytes from stdin. These back the prelude's `print`/`println`
+            // bodies and `input`, with no `File` value involved.
+            "_print_str" | "_println_str" => {
+                let s = self.codegen_operand(program, f, &args[0], &Type::Str);
+                self.emit_print(s, name == "_println_str");
+                self.unit()
             }
-            "_file_from_fd" => {
+            "_stdin_read" => {
                 let i64t = Type::Int(prepoly_hir::IntKind::I64);
-                let fd = self.codegen_operand(program, f, &args[0], &i64t);
-                self.file_from_fd(fd)
-            }
-            // Network primitives (`host, port` establishment forms): sockets
-            // are `File`s, so their results reuse the File Result shapes.
-            "_tcp_connect" | "_tcp_listen" | "_udp_bind" => {
-                let i64t = Type::Int(prepoly_hir::IntKind::I64);
-                let host = self.codegen_operand(program, f, &args[0], &Type::Str);
-                let port = self.codegen_operand(program, f, &args[1], &i64t);
-                let rt = match name {
-                    "_tcp_connect" => "pp_tcp_connect",
-                    "_tcp_listen" => "pp_tcp_listen",
-                    _ => "pp_udp_bind",
-                };
-                self.net_call(rt, &[host, port])
-            }
-            "_tcp_accept" => {
-                let aty = operand_type_of(&args[0], &f.local_types);
-                let l = self.codegen_operand(program, f, &args[0], &aty);
-                self.net_call("pp_tcp_accept", &[l])
-            }
-            "_udp_send_to" => {
-                let i64t = Type::Int(prepoly_hir::IntKind::I64);
-                let sty = operand_type_of(&args[0], &f.local_types);
-                let sock = self.codegen_operand(program, f, &args[0], &sty);
-                let bty = operand_type_of(&args[1], &f.local_types);
-                let bytes = self.codegen_operand(program, f, &args[1], &bty);
-                let host = self.codegen_operand(program, f, &args[2], &Type::Str);
-                let port = self.codegen_operand(program, f, &args[3], &i64t);
-                self.net_call("pp_udp_send_to", &[sock, bytes, host, port])
-            }
-            // The `(socket, i64)` forms: recv size, addr selector, timeout ms.
-            "_udp_recv_from" | "_socket_addr" | "_socket_set_timeout" => {
-                let i64t = Type::Int(prepoly_hir::IntKind::I64);
-                let sty = operand_type_of(&args[0], &f.local_types);
-                let sock = self.codegen_operand(program, f, &args[0], &sty);
-                let n = self.codegen_operand(program, f, &args[1], &i64t);
-                let rt = match name {
-                    "_udp_recv_from" => "pp_udp_recv_from",
-                    "_socket_addr" => "pp_socket_addr",
-                    _ => "pp_socket_set_timeout",
-                };
-                self.net_call(rt, &[sock, n])
-            }
-            // TLS primitives share the network call shape; the connection is
-            // an int64 handle rather than a File.
-            "_tls_connect" => {
-                let i64t = Type::Int(prepoly_hir::IntKind::I64);
-                let host = self.codegen_operand(program, f, &args[0], &Type::Str);
-                let port = self.codegen_operand(program, f, &args[1], &i64t);
-                self.net_call("pp_tls_connect", &[host, port])
-            }
-            "_tls_read" => {
-                let i64t = Type::Int(prepoly_hir::IntKind::I64);
-                let h = self.codegen_operand(program, f, &args[0], &i64t);
-                let max = self.codegen_operand(program, f, &args[1], &i64t);
-                self.net_call("pp_tls_read", &[h, max])
-            }
-            "_tls_write" => {
-                let i64t = Type::Int(prepoly_hir::IntKind::I64);
-                let h = self.codegen_operand(program, f, &args[0], &i64t);
-                let bty = operand_type_of(&args[1], &f.local_types);
-                let bytes = self.codegen_operand(program, f, &args[1], &bty);
-                self.net_call("pp_tls_write", &[h, bytes])
-            }
-            "_tls_close" => {
-                let i64t = Type::Int(prepoly_hir::IntKind::I64);
-                let h = self.codegen_operand(program, f, &args[0], &i64t);
-                self.net_call("pp_tls_close", &[h])
+                let n = self.codegen_operand(program, f, &args[0], &i64t);
+                self.stdin_read(n)
             }
             // Integer width conversions: widen is infallible, narrow
             // returns a range-checked Result.
@@ -1725,10 +1620,6 @@ pub trait Codegen {
             CallKind::ArrayRemove => Some(element_type(&arg_types[0])),
             CallKind::ArrayPop => Some(Type::Nullable(Box::new(element_type(&arg_types[0])))),
             CallKind::Len => Some(Type::Int(prepoly_hir::IntKind::I64)),
-            // File methods return typed Results the back-end leaves build at the
-            // destination type already.
-            CallKind::FileMethod(_) => None,
-            CallKind::FileStd(_) => Some(Type::Record(prepoly_hir::NominalType::new(-1, "File"))),
             CallKind::NumericConv { ty, method } => numeric_conv_ret(ty, method),
             CallKind::Io(_) => Some(Type::Void),
             CallKind::Builtin(name) => builtin_result_type(name, args, &f.local_types),
@@ -1901,11 +1792,6 @@ enum CallKind<'c> {
     ArrayPop,
     /// `arr.len()` / `s.len()`: the length builtin in method form.
     Len,
-    /// A `read`/`write`/`close`/`size`/`seek` method on the builtin `File`
-    /// record: a runtime file primitive, not a user method.
-    FileMethod(&'c str),
-    /// `File.stdin()`/`stdout()`/`stderr()`: a standard stream (0/1/2).
-    FileStd(u8),
     /// A runtime-recognized numeric/string conversion `ty.method(arg)` (not a
     /// user static).
     NumericConv { ty: &'c str, method: &'c str },
@@ -1943,12 +1829,6 @@ fn classify_call<'c>(
         {
             CallKind::Len
         }
-        Callee::Method(name)
-            if matches!(name.as_str(), "read" | "write" | "close" | "size" | "seek")
-                && matches!(arg_types.first(), Some(Type::Record(r)) if r.is_name("File")) =>
-        {
-            CallKind::FileMethod(name)
-        }
         // Instance method (`arg_types[0]` is the receiver). A nominal method
         // instance is keyed by `method_symbol`; a stdlib primitive/array method
         // (`fun string.split`) by its class-qualified symbol. The type checker
@@ -1966,15 +1846,6 @@ fn classify_call<'c>(
         }
         Callee::Static { ty, method } if numeric_conv_ret(ty, method).is_some() => {
             CallKind::NumericConv { ty, method }
-        }
-        Callee::Static { ty, method }
-            if ty == "File" && matches!(method.as_str(), "stdin" | "stdout" | "stderr") =>
-        {
-            CallKind::FileStd(match method.as_str() {
-                "stdin" => 0,
-                "stdout" => 1,
-                _ => 2,
-            })
         }
         // The destination type keys a return-polymorphic, no-argument
         // constructor (a witness-free `new()`) to the same instance the

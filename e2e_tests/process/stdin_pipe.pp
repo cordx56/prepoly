@@ -1,6 +1,5 @@
 // A duplex pipe: write to `cat`'s stdin, read the same bytes from its stdout.
 import process.{ Command, Stdio }
-import std.net.{ to_bytes, to_text }
 
 const child = Command.new("cat")
     .stdin(Stdio.Pipe)

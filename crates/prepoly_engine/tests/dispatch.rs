@@ -139,37 +139,8 @@ impl Codegen for TextBackend {
     fn int_narrow(&mut self, x: usize, from: usize, to: usize, signed: usize) -> usize {
         self.val(format!("int_narrow v{x} v{from} v{to} v{signed}"))
     }
-    fn file_open(&mut self, path: usize, mode: usize) -> usize {
-        self.val(format!("file_open v{path} v{mode}"))
-    }
-    fn file_std(&mut self, which: u8) -> usize {
-        self.val(format!("file_std {which}"))
-    }
-    fn file_from_fd(&mut self, fd: usize) -> usize {
-        self.val(format!("file_from_fd v{fd}"))
-    }
-    fn file_read(&mut self, file: usize, n: usize) -> usize {
-        self.val(format!("file_read v{file} v{n}"))
-    }
-    fn file_write(&mut self, file: usize, bytes: usize) -> usize {
-        self.val(format!("file_write v{file} v{bytes}"))
-    }
-    fn file_size(&mut self, file: usize) -> usize {
-        self.val(format!("file_size v{file}"))
-    }
-    fn file_seek(&mut self, file: usize, pos: usize) -> usize {
-        self.val(format!("file_seek v{file} v{pos}"))
-    }
-    fn file_close(&mut self, file: usize) -> usize {
-        self.val(format!("file_close v{file}"))
-    }
-    fn net_call(&mut self, rt_name: &'static str, args: &[usize]) -> usize {
-        let args = args
-            .iter()
-            .map(|a| format!("v{a}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        self.val(format!("{rt_name} {args}"))
+    fn stdin_read(&mut self, n: usize) -> usize {
+        self.val(format!("stdin_read v{n}"))
     }
     fn plugin_call(
         &mut self,

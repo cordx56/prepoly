@@ -25,6 +25,8 @@ members = [
     "crates/prepoly_plugin_altlib",
     "libraries/process",
     "libraries/path",
+    "libraries/net",
+    "libraries/fs",
 ]
 # The default set includes the command-line driver. On native targets the driver
 # enables its `jit` feature by default, so a plain `cargo build` may need LLVM;

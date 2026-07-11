@@ -2,7 +2,6 @@
 // pipe, then read it back and check the exit code. `echo` is a POSIX utility
 // present everywhere, so this stays portable.
 import process.{ Command, Stdio }
-import std.net.{ to_text }
 
 const child = Command.new("echo")
     .args(["hello", "from", "process"])

@@ -27,7 +27,17 @@ fn run_mode(mode: &str, path: &str) -> (bool, String, String) {
     if mode != "run" {
         cmd.arg(mode);
     }
-    let out = cmd.arg(path).output().expect("spawn prepoly");
+    let out = cmd
+        .arg(path)
+        .env(
+            "PREPOLY_INCLUDE",
+            format!(
+                "{}/libraries",
+                env!("CARGO_MANIFEST_DIR").to_string() + "/../.."
+            ),
+        )
+        .output()
+        .expect("spawn prepoly");
     (
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -36,8 +46,8 @@ fn run_mode(mode: &str, path: &str) -> (bool, String, String) {
 }
 
 /// Examples within the interpreter's supported subset (everything but the
-/// concurrency and file-I/O examples, which exercise runtime features the REPL
-/// does not implement). The JIT and the REPL must produce identical output.
+/// concurrency example; file I/O runs on the interpreter too now, through the
+/// fs plugin). The JIT and the REPL must produce identical output.
 const PARITY_CASES: &[&str] = &[
     "examples/01_records.pp",
     "examples/02_sum_types.pp",
@@ -50,6 +60,7 @@ const PARITY_CASES: &[&str] = &[
     "examples/09_collections.pp",
     "examples/10_strings_and_conversions.pp",
     "examples/11_control_flow.pp",
+    "examples/13_file_io.pp",
     "examples/14_type_safety.pp",
     "examples/15_numeric_conversions.pp",
     "examples/16_method_inference.pp",

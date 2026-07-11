@@ -3,7 +3,7 @@
 // itself would auto-guard it with a cown lock that the blocking accept would
 // then hold, tripping the deadlock watchdog. Match-based error handling
 // keeps the closure non-fallible (a `!` inside a closure is unsupported).
-import std.net.{ Tcp, TcpListener, to_bytes, to_text }
+import net.{ Tcp, TcpListener }
 
 fun run_client(port: int64) {
     match Tcp.connect("127.0.0.1", port) {

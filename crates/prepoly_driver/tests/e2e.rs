@@ -24,11 +24,10 @@ fn e2e_root() -> PathBuf {
 }
 
 /// Every `*.pp` under `dir`, recursively, in sorted order (so failures are stable).
-/// `concurrency/`, `net/`, and `process/` are skipped without the `jit`
-/// feature: those cases need real threads, sockets, and child processes that
-/// only the JIT back end provides. `path/` is skipped too -- not because the
-/// interpreter cannot run it, but because only the JIT configuration builds the
-/// native plugin the library imports.
+/// `concurrency/` is skipped without the `jit` feature (real threads need the
+/// JIT back end), and so are the library directories (`net/`, `process/`,
+/// `path/`, `fs/`) -- not because the interpreter cannot run them, but because
+/// only the JIT configuration builds the native plugins the libraries import.
 fn collect_cases(dir: &Path, out: &mut Vec<PathBuf>) {
     let mut entries: Vec<PathBuf> = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
@@ -39,7 +38,7 @@ fn collect_cases(dir: &Path, out: &mut Vec<PathBuf>) {
         if path.is_dir() {
             if !cfg!(feature = "jit")
                 && path.file_name().is_some_and(|n| {
-                    n == "concurrency" || n == "net" || n == "process" || n == "path"
+                    n == "concurrency" || n == "net" || n == "process" || n == "path" || n == "fs"
                 })
             {
                 continue;
@@ -63,6 +62,8 @@ fn libraries_root() -> PathBuf {
 const NATIVE_LIBRARIES: &[(&str, &str)] = &[
     ("prepoly_lib_process", "process"),
     ("prepoly_lib_path", "path"),
+    ("prepoly_lib_net", "net"),
+    ("prepoly_lib_fs", "fs"),
 ];
 
 /// Build each library's plugin and install it as `libraries/lib<name>.so`,

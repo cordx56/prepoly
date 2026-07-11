@@ -1,5 +1,7 @@
 // `read_file` of a nonexistent path returns a Result.Err that can be matched
 // instead of crashing the program.
+import fs.{ read_file }
+
 fun main() {
     match read_file("/nonexistent/prepoly_missing.txt") {
         Ok { value } => println("read: {value}"),

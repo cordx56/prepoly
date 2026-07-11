@@ -1,0 +1,18 @@
+// TLS failures surface as ordinary error Results on a spawned thread too:
+// the session table lives in the plugin, shared across threads. Loopback
+// port 1 has no listener, so the connect fails deterministically (before
+// any handshake or network access), keeping this case offline-safe.
+import net.{ TlsStream }
+
+fun try_connect() {
+    match TlsStream.connect("127.0.0.1", 1) {
+        Ok { value } => println("unexpected ok"),
+        Err { error } => println("connect failed"),
+    }
+}
+
+fun main() {
+    spawn(() -> { try_connect() })
+    sync()
+    println("main done")
+}

@@ -274,7 +274,7 @@ impl<'a> Checker<'a> {
             return true;
         }
         // Only the implicit-prelude modules are visible with no import; the
-        // nested standard-library modules (`std.net`, ...) follow the same
+        // nested standard-library modules (`std.data.json`, ...) follow the same
         // import rule as user modules.
         if self.program.prelude_modules.contains(defining) && !name.starts_with('_') {
             return true;
@@ -447,9 +447,6 @@ impl<'a> Checker<'a> {
             Type::Str => method == "len",
             Type::Slice(_) => matches!(method, "push" | "pop" | "insert" | "remove" | "len"),
             Type::Array(_, _) => method == "len",
-            Type::Record(rec) if rec.is_name("File") => {
-                matches!(method, "read" | "write" | "close" | "size" | "seek")
-            }
             // A user record/sum, or a primitive, with no matching member above
             // genuinely lacks the method.
             Type::Record(_)
@@ -535,7 +532,6 @@ impl<'a> Checker<'a> {
                 .keys()
                 .any(|k| k.starts_with(name) && k[name.len()..].starts_with('@'))
             || name == "Self"
-            || name == "File"
             || IntKind::from_name(name).is_some()
             || matches!(name, "float32" | "float64" | "string" | "bool")
     }

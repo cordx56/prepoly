@@ -59,22 +59,13 @@ const M_DEFAULT_LIBRARY: u32 = 1 << 1;
 /// Built-in scalar and runtime type names that always highlight as types.
 const BUILTIN_TYPES: &[&str] = &[
     "bool", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32",
-    "float64", "string", "void", "never", "Self", "Result", "File",
+    "float64", "string", "void", "never", "Self", "Result",
 ];
 
 /// A small set of prelude functions referenced by bare name (not via UFCS), so
 /// they highlight as functions even outside call position.
 const PRELUDE_FUNCTIONS: &[&str] = &[
-    "print",
-    "println",
-    "input",
-    "len",
-    "open",
-    "read_file",
-    "write_file",
-    "assert",
-    "panic",
-    "range",
+    "print", "println", "input", "len", "assert", "panic", "range",
 ];
 
 /// Compute the document's semantic tokens, delta-encoded as the protocol

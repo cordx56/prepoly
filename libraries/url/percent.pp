@@ -1,7 +1,6 @@
 // Percent-encoding (RFC 3986 section 2.1).
 
 import charset.{ hex_value, is_unreserved }
-import std.net.{ to_bytes, to_text }
 
 const _HEX_UPPER = "0123456789ABCDEF".chars()
 

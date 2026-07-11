@@ -217,26 +217,6 @@ pub(crate) fn const_operand_index(op: &Operand) -> Option<usize> {
     }
 }
 
-/// The synthetic `File` record type. `File` is a builtin handle,
-/// not a user-declared type, so it carries no registered id -- matching the type
-/// checker, whose `type_by_name("File")` falls back to the same synthetic record.
-fn file_type() -> Type {
-    Type::Record(NominalType::new(-1, "File"))
-}
-
-/// The `Result` a `File` instance method returns: `read ->
-/// uint8[]!`, `write`/`size -> int64!`, `close`/`seek -> void!`. `None` for a
-/// non-File method name.
-fn file_method_type(name: &str) -> Option<Type> {
-    let ok = match name {
-        "read" => Type::Slice(Box::new(Type::Int(IntKind::U8))),
-        "write" | "size" => Type::Int(IntKind::I64),
-        "close" | "seek" => Type::Void,
-        _ => return None,
-    };
-    Some(result_type(ok, Type::Str))
-}
-
 /// The `IntKind` named by a primitive type name (`int32`, `uint8`, ...).
 pub fn int_kind_name(s: &str) -> Option<IntKind> {
     Some(match s {
@@ -1299,32 +1279,13 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                 "_float_parse" => Ok(Some(result_type(Type::Float(FloatKind::F64), Type::Str))),
                 "_int_to_float" => Ok(Some(Type::Float(FloatKind::F64))),
                 "_float_to_int" => Ok(Some(result_type(Type::Int(IntKind::I64), Type::Str))),
-                // `open(path, mode) -> File!`; a runtime primitive.
-                "open" => Ok(Some(result_type(file_type(), Type::Str))),
-                // `_file_from_fd(fd) -> File`: adopt an open descriptor.
-                "_file_from_fd" => Ok(Some(file_type())),
-                // Network primitives: sockets are `File`s (see
-                // `prepoly_runtime::net` and std/net.pp).
-                "_tcp_connect" | "_tcp_listen" | "_tcp_accept" | "_udp_bind" => {
-                    Ok(Some(result_type(file_type(), Type::Str)))
-                }
-                "_udp_send_to" => Ok(Some(result_type(Type::Int(IntKind::I64), Type::Str))),
-                "_udp_recv_from" => Ok(Some(result_type(
+                // Standalone stdio primitives (the prelude's `print`/`println`
+                // bodies and `input`), no `File` involved.
+                "_print_str" | "_println_str" => Ok(Some(Type::Void)),
+                "_stdin_read" => Ok(Some(result_type(
                     Type::Slice(Box::new(Type::Int(IntKind::U8))),
                     Type::Str,
                 ))),
-                "_socket_addr" => Ok(Some(result_type(Type::Str, Type::Str))),
-                "_socket_set_timeout" => Ok(Some(result_type(Type::Void, Type::Str))),
-                // TLS primitives: connections are int64 handles (see
-                // `prepoly_runtime::tls` and std/net/tls.pp).
-                "_tls_connect" | "_tls_write" => {
-                    Ok(Some(result_type(Type::Int(IntKind::I64), Type::Str)))
-                }
-                "_tls_read" => Ok(Some(result_type(
-                    Type::Slice(Box::new(Type::Int(IntKind::U8))),
-                    Type::Str,
-                ))),
-                "_tls_close" => Ok(Some(result_type(Type::Void, Type::Str))),
                 // `to_string` only has a typed conversion for scalars/strings;
                 // other arguments fall back so formatting stays correct.
                 "to_string" => match args.first() {
@@ -1524,15 +1485,6 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         if let Type::Nullable(inner) = &arg_types[0] {
             arg_types[0] = (**inner).clone();
         }
-        // File I/O methods are runtime primitives over the builtin
-        // `File` record, not user methods, so they return their Result directly with
-        // no instance to monomorphize.
-        if let Type::Record(n) = &arg_types[0]
-            && n.is_name("File")
-            && let Some(ret) = file_method_type(name)
-        {
-            return Ok(Some(ret));
-        }
         // A genuine record or whole-sum method takes priority.
         if let Type::Record(n) | Type::Sum(n) = &arg_types[0]
             && let Some(info) = self.program.type_by_id(n.id)
@@ -1633,9 +1585,6 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             return Ok(Some(ret));
         }
         // `File.stdin/stdout/stderr` are runtime standard streams.
-        if ty == "File" && matches!(method_name, "stdin" | "stdout" | "stderr") {
-            return Ok(Some(file_type()));
-        }
         let info = self
             .program
             .resolve_type(module, ty)
@@ -2083,7 +2032,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
 #[cfg(test)]
 mod tests {
     use super::{check_instances, instance_symbol, monomorphize};
-    use prepoly_hir::{NominalType, RESULT_TYPE_ID, Type};
+    use prepoly_hir::{RESULT_TYPE_ID, Type};
 
     /// The JIT-time constraint check passes on a valid program: each
     /// monomorphized body (a free function, and a record method whose `self.x +
@@ -2136,8 +2085,8 @@ mod tests {
     /// enclosing function's successful bare return.
     #[test]
     fn propagated_result_does_not_define_enclosing_ok_payload() {
-        let src = "fun read_text(path: string) {\n  let f = open(path, \"r\")!\n  return \"done\"\n}\n\
-                   fun main() {\n  let r = read_text(\"/tmp/missing\")\n}\n";
+        let src = "fun read_text(path: string) {\n  let n = _int_parse(path)!\n  return \"done\"\n}\n\
+                   fun main() {\n  let r = read_text(\"12\")\n}\n";
         let ast = prepoly_parser::parse(src).expect("parse");
         let (program, errs) = prepoly_hir::lower(&[prepoly_hir::LoadedModule {
             is_prelude: false,
@@ -2156,6 +2105,5 @@ mod tests {
         let (ok, err) = result.result_payloads().expect("Result payloads");
         assert_eq!(ok, &Type::Str);
         assert_eq!(err, &Type::Str);
-        assert_ne!(ok, &Type::Record(NominalType::new(-1, "File")));
     }
 }

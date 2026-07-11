@@ -94,7 +94,7 @@ The `std/prelude/` modules (`io`, `array`, `string`, `math`, `conv`,
 everywhere without an import. They can also be imported explicitly by their
 bare name (`import io.{ ... }`) or `std` path.
 
-The other standard-library modules — `std.net`, `std.collections`,
+The other standard-library modules — `std.collections`,
 `std.data.json` — are **not** in the prelude. They are embedded in the
 compiler but loaded only when a module imports them (transitively: a nested
 std module may import another). See the

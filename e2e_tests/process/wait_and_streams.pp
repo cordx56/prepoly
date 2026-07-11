@@ -4,7 +4,6 @@
 // stream accessors memoize the adopted `File`, so calling one twice is not an
 // error -- the plugin gives each descriptor up exactly once.
 import process.{ Command, Stdio }
-import std.net.{ to_text }
 
 const child = Command.new("echo")
     .args(["buffered"])

@@ -601,13 +601,6 @@ impl<'p, 'm> Interp<'p, 'm> {
                 let v = self.eval_operand(f, frame, &args[0], &arg_types[0])?;
                 return Ok(length_of(&v));
             }
-            // File I/O methods are runtime primitives the REPL does not implement.
-            Callee::Method(name)
-                if matches!(name.as_str(), "read" | "write" | "close" | "size" | "seek")
-                    && matches!(arg_types.first(), Some(Type::Record(r)) if r.is_name("File")) =>
-            {
-                return Err("file I/O is not supported by the REPL runtime".into());
-            }
             Callee::Method(name) => {
                 let msym = method_symbol(name, &arg_types);
                 if self.program.lookup(&msym).is_some() {
@@ -620,9 +613,6 @@ impl<'p, 'm> Interp<'p, 'm> {
             }
             Callee::Static { ty, method } if numeric_conv_ret(ty, method).is_some() => {
                 return self.eval_conv(f, frame, ty, method, args);
-            }
-            Callee::Static { ty, .. } if ty == "File" => {
-                return Err("file standard streams are not supported by the REPL runtime".into());
             }
             // The destination type keys a return-polymorphic, no-argument
             // constructor (a witness-free `new()`) to the instance the
@@ -754,19 +744,32 @@ impl<'p, 'm> Interp<'p, 'm> {
             "__rt_dispatch" => {
                 Err("runtime type dispatch is not supported by the REPL runtime".into())
             }
-            "open" | "_file_from_fd" => Err("file I/O is not supported by the REPL runtime".into()),
-            "_tcp_connect"
-            | "_tcp_listen"
-            | "_tcp_accept"
-            | "_udp_bind"
-            | "_udp_send_to"
-            | "_udp_recv_from"
-            | "_socket_addr"
-            | "_socket_set_timeout"
-            | "_tls_connect"
-            | "_tls_read"
-            | "_tls_write"
-            | "_tls_close" => Err("networking is not supported by the REPL runtime".into()),
+            // Standalone stdio primitives: the prelude's `print`/`println`
+            // bodies and `input()`. Reading takes the process's real stdin,
+            // so interactive `input()` works on the interpreter.
+            "_print_str" | "_println_str" => {
+                let s = self.eval_operand(f, frame, &args[0], &Type::Str)?;
+                if name == "_println_str" {
+                    let _ = writeln!(self.out, "{}", s.as_str());
+                } else {
+                    let _ = write!(self.out, "{}", s.as_str());
+                }
+                Ok(Value::Void)
+            }
+            "_stdin_read" => {
+                let n = self
+                    .eval_operand(f, frame, &args[0], &Type::Int(IntKind::I64))?
+                    .as_int();
+                let mut buf = vec![0u8; n.max(0) as usize];
+                match std::io::Read::read(&mut std::io::stdin(), &mut buf) {
+                    Ok(got) => {
+                        let bytes: Vec<Value> =
+                            buf[..got].iter().map(|b| Value::Int(*b as i64)).collect();
+                        Ok(result_ok(Value::Array(Rc::new(RefCell::new(bytes)))))
+                    }
+                    Err(e) => Ok(result_err(&e.to_string())),
+                }
+            }
             // Native-plugin dispatch (`_plugin_[f]call_<t>(path, name, sig,
             // payload...)`): evaluate per the encoded signature, marshal
             // through the shared plugin host, and shape the result. On a

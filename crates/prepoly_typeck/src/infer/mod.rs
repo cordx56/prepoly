@@ -165,6 +165,10 @@ pub fn analyze(program: &Program) -> Inference {
     checker.validate_param_declarations();
     checker.precompute_global_bindings();
     checker.precompute_function_returns();
+    // Twice: a method's inferred return may depend on another type's method
+    // (`Tcp.close` propagating `File.close`); the second pass sees every
+    // first-pass entry, so cross-type chains converge.
+    checker.precompute_method_returns();
     checker.precompute_method_returns();
     // Check each type's method bodies first, then generalize each record type into
     // a scheme. The method loop binds `self` to the bare type, so a type's methods
@@ -450,9 +454,6 @@ impl<'a> Checker<'a> {
     }
 
     fn primitive_static_type(&self, tname: &str, method: &str) -> Option<Type> {
-        if matches!((tname, method), ("File", "stdin" | "stdout" | "stderr")) {
-            return Some(self.type_by_name("File"));
-        }
         primitive_static_return(tname, method)
     }
 

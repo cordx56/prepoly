@@ -12,11 +12,9 @@ pub mod conc;
 pub mod gc;
 pub mod io;
 pub mod mem;
-pub mod net;
 pub mod plugin;
 pub mod region;
 pub mod rt;
-pub mod tls;
 
 /// Every C-ABI runtime primitive paired with its address, so the JIT can map
 /// the module's external declarations to these implementations directly
@@ -81,28 +79,7 @@ pub fn symbols() -> Vec<(&'static str, usize)> {
         region::pp_write_barrier,
         region::pp_region_unborrow,
         region::pp_region_close,
-        io::pp_file_open,
-        io::pp_file_from_fd,
-        io::pp_file_stdin,
-        io::pp_file_stdout,
-        io::pp_file_stderr,
-        io::pp_file_read,
-        io::pp_file_write,
-        io::pp_file_size,
-        io::pp_file_seek,
-        io::pp_file_close,
-        net::pp_tcp_connect,
-        net::pp_tcp_listen,
-        net::pp_tcp_accept,
-        net::pp_udp_bind,
-        net::pp_udp_send_to,
-        net::pp_udp_recv_from,
-        net::pp_socket_addr,
-        net::pp_socket_set_timeout,
-        tls::pp_tls_connect,
-        tls::pp_tls_read,
-        tls::pp_tls_write,
-        tls::pp_tls_close,
+        io::pp_stdin_read,
         plugin::pp_plugin_call_int,
         plugin::pp_plugin_call_float,
         plugin::pp_plugin_call_obj,

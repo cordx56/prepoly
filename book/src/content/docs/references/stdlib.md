@@ -8,16 +8,16 @@ The standard library has two layers:
 - **The implicit prelude** — the modules under `std/prelude/` (`io`, `array`,
   `string`, `math`, `conv`, `assert`) plus the runtime builtins. Their public
   names are in scope in every program with no import.
-- **Import-only modules** — everything else under `std/` (`std.net`,
-  `std.collections`, `std.data.json`): imported explicitly, e.g.
+- **Import-only modules** — everything else under `std/`
+  (`std.collections`, `std.data.json`): imported explicitly, e.g.
   `import std.collections.{ HashMap }`, and loaded on demand.
 
 Most of the library is written in prepoly itself, on top of a small set of
 runtime primitives. Identifiers beginning with `_` (e.g. `_string_bytes`,
 `_panic`) are those internals — do not call them directly.
 
-Reserved builtin names that cannot be redefined: `len`, `open`, `spawn`,
-`with`, `sync`, `error`, `fields`, `typeof`.
+Reserved builtin names that cannot be redefined: `len`, `spawn`, `with`,
+`sync`, `error`, `fields`, `typeof`.
 
 ## Builtins
 
@@ -43,30 +43,15 @@ Indexing is bounds-checked at runtime on both array kinds.
 
 ## `std.io`
 
-| Function                    | Signature                   | Behavior                                                            |
-| --------------------------- | --------------------------- | ------------------------------------------------------------------- |
-| `print(value)`              | `(any) -> void`             | write the value's text to stdout; combine values with interpolation |
-| `println(value)`            | `(any) -> void`             | `print` plus a newline                                              |
-| `input()`                   | `() -> string!`             | one line from stdin, without the trailing newline                   |
-| `read_file(path)`           | `(string) -> string!`       | whole file as text                                                  |
-| `write_file(path, content)` | `(string, string) -> void!` | write text, truncating                                              |
+| Function         | Signature       | Behavior                                                            |
+| ---------------- | --------------- | ------------------------------------------------------------------- |
+| `print(value)`   | `(any) -> void` | write the value's text to stdout; combine values with interpolation |
+| `println(value)` | `(any) -> void` | `print` plus a newline                                              |
+| `input()`        | `() -> string!` | one line from stdin, without the trailing newline                   |
 
-### Files
-
-`open(path, mode) -> File!` opens a file (`mode` as in C: `"r"`, `"w"`, ...).
-`File` methods, all Results:
-
-| Method                                             | Signature             |
-| -------------------------------------------------- | --------------------- |
-| `f.read(n)`                                        | `(int64) -> uint8[]!` |
-| `f.write(bytes)`                                   | `(uint8[]) -> int64!` |
-| `f.seek(pos)`                                      | `-> void!`            |
-| `f.size()`                                         | `() -> int64!`        |
-| `f.close()`                                        | `() -> void!`         |
-| `File.stdin()` / `File.stdout()` / `File.stderr()` | static constructors   |
-
-File I/O requires the native runtime; the REPL interpreter refuses it (see
-[Execution model](/references/execution/)).
+Files live in the [`fs` library](#fs-a-library-not-std), not the prelude:
+opening and moving bytes needs native code, so it ships as a plugin like
+`process` and `path`.
 
 ## `std.array`
 
@@ -117,6 +102,10 @@ supporting `<` and, for `abs`, `-`). The float routines take and return
 
 Constants: `INT32_MAX`, `INT32_MIN`, `INT64_MAX`, `INT64_MIN`.
 
+Byte/string conversion: `to_bytes(s) -> uint8[]` is the UTF-8 bytes of a
+string, ready to `write`/`send_to`; `to_text(bytes) -> string!` decodes bytes
+as UTF-8 text and fails on invalid input.
+
 Free-function aliases of the conversion methods: `int32_from(x) -> int32!`,
 `int32_parse(s) -> int32!`, `float64_from(x) -> float64`,
 `float64_parse(s) -> float64!`, `string_from(x) -> string`. The method forms
@@ -128,103 +117,6 @@ Free-function aliases of the conversion methods: `int32_from(x) -> int32!`,
 `assert(cond: bool, msg: string?)` aborts the program when `cond` is false.
 `msg` is a trailing nullable parameter, so `assert(cond)` works and prints a
 generic message.
-
-## `std.net`
-
-```prepoly norun
-import std.net.{ Tcp, TcpListener, Udp }
-```
-
-TCP and UDP sockets, as three record types — a connection cannot `accept`
-and a listener cannot `read`. Under the hood a socket is a `File` (an OS
-file descriptor) held privately by each record. Not in the prelude: import
-it explicitly.
-
-**`Tcp`** — a bidirectional byte-stream connection:
-
-| Method                     | Signature                  | Behavior                                             |
-| -------------------------- | -------------------------- | ----------------------------------------------------- |
-| `Tcp.connect(host, port)`  | `(string, int64) -> Tcp!`  | open a connection; `host` is an IP or a DNS name     |
-| `conn.read(max)`           | `(int64) -> uint8[]!`      | up to `max` bytes; fewer on a short read              |
-| `conn.write(data)`         | `(uint8[]) -> int64!`      | write all of `data`                                   |
-| `conn.local_addr()` / `conn.peer_addr()` | `() -> string!` | the `"ip:port"` of each end                          |
-| `conn.set_timeout(ms)`     | `(int64) -> void!`         | read/write timeout; 0 clears it                       |
-| `conn.close()`             | `() -> void!`              |                                                       |
-
-**`TcpListener`** — produces `Tcp` connections:
-
-| Method                          | Signature                          | Behavior                                        |
-| ------------------------------- | ---------------------------------- | ------------------------------------------------ |
-| `TcpListener.bind(host, port)`  | `(string, int64) -> TcpListener!`  | bind and listen; port 0 picks an ephemeral port |
-| `listener.accept()`             | `() -> Tcp!`                       | block until a connection arrives                 |
-| `listener.local_addr()`         | `() -> string!`                    | reads back an OS-picked port                     |
-| `listener.close()`              | `() -> void!`                      |                                                  |
-
-**`Udp`** — a datagram socket:
-
-| Method                              | Signature                              | Behavior                                    |
-| ----------------------------------- | -------------------------------------- | -------------------------------------------- |
-| `Udp.bind(host, port)`              | `(string, int64) -> Udp!`              | port 0 picks an ephemeral port              |
-| `sock.send_to(data, host, port)`    | `(uint8[], string, int64) -> int64!`   | send one datagram                            |
-| `sock.recv_from(max)`               | `(int64) -> Datagram!`                 | block for one datagram of up to `max` bytes |
-| `sock.local_addr()`                 | `() -> string!`                        |                                              |
-| `sock.set_timeout(ms)`              | `(int64) -> void!`                     |                                              |
-| `sock.close()`                      | `() -> void!`                          |                                              |
-
-`Datagram` is `{ data: uint8[], addr: string }` — one received datagram with
-its sender's address. The free functions `to_bytes(s) -> uint8[]` and
-`to_text(bytes) -> string!` convert between strings and socket bytes.
-
-```prepoly norun
-import std.net.{ Tcp, TcpListener, to_bytes, to_text }
-
-let listener = TcpListener.bind("127.0.0.1", 0)!
-let port = int64.parse(listener.local_addr()!.split(":")[1])!
-
-let client = Tcp.connect("127.0.0.1", port)!
-let server = listener.accept()!
-client.write(to_bytes("hello"))!
-println(to_text(server.read(64)!)!)   // hello
-```
-
-Networking requires the native runtime; the REPL interpreter refuses it, like
-file I/O. Two practical notes for concurrent servers: a spawned closure
-should capture the **port** (a copied scalar), not the listener — a shared
-listener is auto-guarded by a cown lock that a blocking `accept` would then
-hold — and TCP is a byte stream: one `read` may return less than what the
-peer wrote, so frame messages or read in a loop.
-
-## `std.net.tls`
-
-```prepoly norun
-import std.net.tls.{ TlsStream }
-```
-
-TLS **client** connections, backed by rustls built into the runtime.
-Certificate verification uses the bundled Mozilla root set with the server
-name taken from `host`; there are no configuration knobs (no custom CAs, no
-server side yet). `TlsStream` mirrors `Tcp`, so code written against
-`read`/`write` structurally accepts either:
-
-| Method                          | Signature                        | Behavior                                              |
-| ------------------------------- | -------------------------------- | ------------------------------------------------------ |
-| `TlsStream.connect(host, port)` | `(string, int64) -> TlsStream!`  | TCP connect + full handshake; certificate errors fail here |
-| `conn.read(max)`                | `(int64) -> uint8[]!`            | up to `max` decrypted bytes; empty at end-of-stream    |
-| `conn.write(data)`              | `(uint8[]) -> int64!`            | encrypt and send all of `data`                         |
-| `conn.close()`                  | `() -> void!`                    | sends the TLS close notification                       |
-
-```prepoly norun
-import std.net.tls.{ TlsStream }
-import std.net.{ to_bytes, to_text }
-
-let conn = TlsStream.connect("example.com", 443)!
-conn.write(to_bytes("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"))!
-println(to_text(conn.read(16)!)!)   // HTTP/1.1 200 OK
-conn.close()!
-```
-
-A driver built without the `tls` cargo feature (and the wasm interpreter)
-keeps the same API but every call returns an error Result.
 
 ## `process` (a library, not `std`)
 
@@ -261,8 +153,8 @@ and `Null` discards it.
 | `child.wait()`                 | `() -> int32!`                | block for exit; returns the exit code        |
 | `child.output()`               | `() -> Output!`               | drain the piped streams, then wait           |
 
-`Stdio` is `| Inherit | Pipe | Null`. Piped streams are `File`s, so the byte
-helpers `to_bytes`/`to_text` from `std.net` convert their contents. The
+`Stdio` is `| Inherit | Pipe | Null`. Piped streams are `File`s, so the
+prelude byte helpers `to_bytes`/`to_text` convert their contents. The
 accessors may be called repeatedly: each hands back the same `File`.
 
 `wait` blocks for exit and nothing else, so a child writing more to a pipe
@@ -272,7 +164,6 @@ than the OS buffers (about 64KiB on Linux) blocks on the full pipe while
 
 ```prepoly norun
 import process.{ Command, Stdio }
-import std.net.{ to_text }
 
 let child = Command.new("git")
     .args(["log", "--oneline"])
@@ -290,9 +181,8 @@ Waiting is idempotent: a second `wait` returns the same code, and a piped
 stream stays readable afterwards, since the pipe still holds what the child
 wrote before it exited.
 
-Spawning and waiting work on either back end, but a piped stream is a `File`,
-and file I/O requires the native runtime — so the REPL interpreter refuses the
-stream accessors, like the rest of I/O.
+Everything here runs on either back end: a piped stream is an `fs` `File`,
+and the fs plugin executes natively under the interpreter too.
 
 ## `path` (a library, not `std`)
 
@@ -360,6 +250,135 @@ for entry in here.join("assets").entries()! {
     }
 }
 ```
+
+## `fs` (a library, not `std`)
+
+```prepoly norun
+import fs.{ File, open, read_file, write_file }
+```
+
+File handles and byte I/O. Like the other libraries this is a plugin under
+`libraries/`, with the same setup — automatic for a distributed toolchain,
+`libraries/build.sh` + `PREPOLY_INCLUDE` from a repo checkout.
+
+| Function / method           | Signature                   | Behavior                                          |
+| --------------------------- | --------------------------- | -------------------------------------------------- |
+| `open(path, mode)`          | `(string, string) -> File!` | `"r"` read, `"w"` truncate+create, `"a"` append   |
+| `read_file(path)`           | `(string) -> string!`       | whole file as text                                 |
+| `write_file(path, content)` | `(string, string) -> void!` | write text, truncating                             |
+| `f.read(n)`                 | `(int64) -> uint8[]!`       | up to `n` bytes; fewer at end-of-file              |
+| `f.write(bytes)`            | `(uint8[]) -> int64!`       | write all of `bytes`                               |
+| `f.seek(pos)`               | `(int64) -> void!`          | absolute reposition                                |
+| `f.size()`                  | `() -> int64!`              | by path (see below)                                |
+| `f.close()`                 | `() -> void!`               | idempotent; standard streams are never closed      |
+| `File.from_fd(fd)`          | `(int64) -> File`           | adopt an open descriptor (a pipe, a socket)        |
+| `File.stdin/stdout/stderr()`| `() -> File`                | the standard streams                               |
+
+`size()` is answered by the `path` library — a stat by name needs no open
+descriptor — so it works exactly for files opened by path; an adopted
+descriptor or standard stream has no path to ask about and reports an error.
+`File.from_fd` is how the `process` and `net` libraries hand their pipes and
+sockets to the ordinary read/write/close methods.
+
+File I/O runs on both back ends: the plugin executes natively whether the
+program is JIT-compiled or interpreted, so the old "the REPL refuses file
+I/O" rule is gone (only `spawn` remains JIT-only). The playground has no
+filesystem, so the examples here are not runnable in it.
+
+## `net` (a library, not `std`)
+
+```prepoly norun
+import net.{ Tcp, TcpListener, Udp, TlsStream }
+```
+
+TCP and UDP sockets plus TLS client connections. Like `process` and `path`
+this is a library: talking to the operating system's sockets needs native
+code, which arrives as a plugin under `libraries/`, and the setup is the
+same — automatic for a distributed toolchain, `libraries/build.sh` +
+`PREPOLY_INCLUDE` from a repo checkout. Networking does not run in the
+playground.
+
+Under the hood a plain socket is a `File` (an OS file descriptor) held
+privately by each record — a connection cannot `accept` and a listener
+cannot `read`.
+
+**`Tcp`** — a bidirectional byte-stream connection:
+
+| Method                     | Signature                  | Behavior                                             |
+| -------------------------- | -------------------------- | ----------------------------------------------------- |
+| `Tcp.connect(host, port)`  | `(string, int64) -> Tcp!`  | open a connection; `host` is an IP or a DNS name     |
+| `conn.read(max)`           | `(int64) -> uint8[]!`      | up to `max` bytes; fewer on a short read              |
+| `conn.write(data)`         | `(uint8[]) -> int64!`      | write all of `data`                                   |
+| `conn.local_addr()` / `conn.peer_addr()` | `() -> string!` | the `"ip:port"` of each end                          |
+| `conn.set_timeout(ms)`     | `(int64) -> void!`         | read/write timeout; 0 clears it                       |
+| `conn.close()`             | `() -> void!`              |                                                       |
+
+**`TcpListener`** — produces `Tcp` connections:
+
+| Method                          | Signature                          | Behavior                                        |
+| ------------------------------- | ---------------------------------- | ------------------------------------------------ |
+| `TcpListener.bind(host, port)`  | `(string, int64) -> TcpListener!`  | bind and listen; port 0 picks an ephemeral port |
+| `listener.accept()`             | `() -> Tcp!`                       | block until a connection arrives                 |
+| `listener.local_addr()`         | `() -> string!`                    | reads back an OS-picked port                     |
+| `listener.close()`              | `() -> void!`                      |                                                  |
+
+**`Udp`** — a datagram socket:
+
+| Method                              | Signature                              | Behavior                                    |
+| ----------------------------------- | -------------------------------------- | -------------------------------------------- |
+| `Udp.bind(host, port)`              | `(string, int64) -> Udp!`              | port 0 picks an ephemeral port              |
+| `sock.send_to(data, host, port)`    | `(uint8[], string, int64) -> int64!`   | send one datagram                            |
+| `sock.recv_from(max)`               | `(int64) -> Datagram!`                 | block for one datagram of up to `max` bytes |
+| `sock.local_addr()`                 | `() -> string!`                        |                                              |
+| `sock.set_timeout(ms)`              | `(int64) -> void!`                     |                                              |
+| `sock.close()`                      | `() -> void!`                          |                                              |
+
+`Datagram` is `{ data: uint8[], addr: string }` — one received datagram with
+its sender's address. The prelude helpers `to_bytes(s) -> uint8[]` and
+`to_text(bytes) -> string!` convert between strings and socket bytes.
+
+```prepoly norun
+import net.{ Tcp, TcpListener }
+
+let listener = TcpListener.bind("127.0.0.1", 0)!
+let port = int64.parse(listener.local_addr()!.split(":")[1])!
+
+let client = Tcp.connect("127.0.0.1", port)!
+let server = listener.accept()!
+client.write(to_bytes("hello"))!
+println(to_text(server.read(64)!)!)   // hello
+```
+
+Two practical notes for concurrent servers: a spawned closure should capture
+the **port** (a copied scalar), not the listener — a shared listener is
+auto-guarded by a cown lock that a blocking `accept` would then hold — and
+TCP is a byte stream: one `read` may return less than what the peer wrote,
+so frame messages or read in a loop.
+
+**`TlsStream`** — TLS **client** connections, backed by rustls inside the
+plugin. Certificate verification uses the bundled Mozilla root set with the
+server name taken from `host`; there are no configuration knobs (no custom
+CAs, no server side yet). `TlsStream` mirrors `Tcp`, so code written against
+`read`/`write` structurally accepts either:
+
+| Method                          | Signature                        | Behavior                                              |
+| ------------------------------- | -------------------------------- | ------------------------------------------------------ |
+| `TlsStream.connect(host, port)` | `(string, int64) -> TlsStream!`  | TCP connect + full handshake; certificate errors fail here |
+| `conn.read(max)`                | `(int64) -> uint8[]!`            | up to `max` decrypted bytes; empty at end-of-stream    |
+| `conn.write(data)`              | `(uint8[]) -> int64!`            | encrypt and send all of `data`                         |
+| `conn.close()`                  | `() -> void!`                    | sends the TLS close notification                       |
+
+```prepoly norun
+import net.{ TlsStream }
+
+let conn = TlsStream.connect("example.com", 443)!
+conn.write(to_bytes("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"))!
+println(to_text(conn.read(16)!)!)   // HTTP/1.1 200 OK
+conn.close()!
+```
+
+Back ends: everything here runs on either back end — sockets are `fs`
+`File`s and the plugins execute natively under the interpreter too.
 
 ## `std.collections`
 

@@ -59,8 +59,11 @@ fn project_dir_with(name: &str, src: &str) -> (PathBuf, PathBuf) {
     (dir, target)
 }
 
-fn project_dir() -> PathBuf {
-    project_dir_with("plugin_import", MAIN_PP).0
+/// Each caller gets its own project directory: the tests run in parallel
+/// threads, and re-copying the library into a shared path truncates a file
+/// another test's prepoly process may have mapped (a SIGSEGV with no output).
+fn project_dir(name: &str) -> PathBuf {
+    project_dir_with(name, MAIN_PP).0
 }
 
 fn run(args: &[&str], dir: &PathBuf) -> (bool, String, String) {
@@ -82,7 +85,7 @@ fn run(args: &[&str], dir: &PathBuf) -> (bool, String, String) {
 #[cfg(feature = "jit")]
 #[test]
 fn plugin_import_runs_on_the_jit() {
-    let dir = project_dir();
+    let dir = project_dir("plugin_import_jit");
     let (ok, stdout, stderr) = run(&[], &dir);
     assert!(ok, "jit run failed:\n{stderr}");
     assert_eq!(stdout, EXPECTED, "stderr:\n{stderr}");
@@ -91,7 +94,7 @@ fn plugin_import_runs_on_the_jit() {
 /// The REPL interpreter marshals the same calls through the shared host.
 #[test]
 fn plugin_import_runs_on_the_interpreter() {
-    let dir = project_dir();
+    let dir = project_dir("plugin_import_repl");
     let (ok, stdout, stderr) = run(&["repl"], &dir);
     assert!(ok, "interpreter run failed:\n{stderr}");
     assert_eq!(stdout, EXPECTED, "stderr:\n{stderr}");

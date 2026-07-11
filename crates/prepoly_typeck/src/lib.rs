@@ -2979,14 +2979,6 @@ mod tests {
     }
 
     #[test]
-    fn builtin_file_methods_are_typed_as_result() {
-        let e = errs(
-            "fun write(path: string) {\n    let f = open(path, \"w\")!\n    f.write(_string_bytes(\"x\"))!\n    f.close()!\n}\nfun main() {\n    let r = write(\"out.txt\")\n    match r {\n        Ok { value } => 0,\n        Err { error } => 1,\n    }\n}\n",
-        );
-        assert!(e.is_empty(), "{e:?}");
-    }
-
-    #[test]
     fn unknown_numeric_parameter_can_be_compared_to_literal() {
         let e = errs("fun abs(x) {\n    if x < 0 {\n        return -x\n    }\n    return x\n}\n");
         assert!(e.is_empty(), "{e:?}");
@@ -3184,16 +3176,6 @@ mod tests {
         assert!(
             e.iter()
                 .any(|m| m.contains("`_float_parse` expects a string")),
-            "{e:?}"
-        );
-    }
-
-    #[test]
-    fn open_requires_string_arguments() {
-        let e = errs("fun main() {\n    let f = open(1, \"r\")\n}\n");
-        assert!(
-            e.iter()
-                .any(|m| m.contains("cannot use `int32` where `string` is required")),
             "{e:?}"
         );
     }

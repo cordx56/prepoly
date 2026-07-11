@@ -13,6 +13,7 @@
 //
 // Build the plugin once with `libraries/build.sh`.
 
+import fs.{ File }
 import libprocess.{
     process_spawn,
     process_stream,
@@ -152,7 +153,7 @@ type Output = {
 // The plugin hands back the piped stream's raw descriptor; adopting it as a
 // `File` is what makes the ordinary read/write/close methods drive it.
 fun Child._stream(self, which: int64) -> File! {
-    return _file_from_fd(process_stream(self._handle, which)!)
+    return File.from_fd(process_stream(self._handle, which)!)
 }
 
 /** The child's standard input pipe, to write to it (requires `Stdio.Pipe`). */

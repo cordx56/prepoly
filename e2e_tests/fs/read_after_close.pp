@@ -1,0 +1,17 @@
+// A closed File forgets its descriptor, so byte I/O after close is a clean
+// error from the plugin -- never a touch on a descriptor the OS reassigned.
+import fs.{ File, open, write_file }
+
+fun main() {
+    const path = "/tmp/prepoly_e2e_read_after_close.txt"
+    write_file(path, "x")!
+    let f = open(path, "r")!
+    f.close()!
+    match f.read(1) {
+        Ok { value } => println("unexpected read"),
+        Err { error } => println("read after close: {error}"),
+    }
+    // Closing again is a no-op, not an error.
+    f.close()!
+    println("double close ok")
+}

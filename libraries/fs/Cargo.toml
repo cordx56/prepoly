@@ -1,0 +1,19 @@
+# The fs library's native half: a prepoly plugin (cdylib) loaded by
+# `libraries/fs.pp`. Build and install it with `libraries/build.sh`.
+[package]
+name = "prepoly_lib_fs"
+description = "prepoly plugin: file descriptors and byte I/O"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+# The cdylib is installed as `libraries/libfs.so`, and the wrapper
+# module imports it by that file name (`import libfs.{ .. }`).
+name = "fs"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+prepoly_plugin = { workspace = true }

@@ -19,9 +19,8 @@ pub use crate::types::RESULT_TYPE_ID;
 /// -- for `error` -- be dead because `error(x)` desugars to `Result.Err`), and
 /// the plugin-module loader renames a plugin function that lands on one rather
 /// than synthesizing a module that cannot be checked.
-pub const RESERVED_FUNCTION_NAMES: &[&str] = &[
-    "len", "open", "spawn", "with", "sync", "error", "fields", "typeof",
-];
+pub const RESERVED_FUNCTION_NAMES: &[&str] =
+    &["len", "spawn", "with", "sync", "error", "fields", "typeof"];
 
 /// The canonical identity of a top-level definition: its local name plus the
 /// module path it is defined in. The storage/codegen key (`symbol`) is its

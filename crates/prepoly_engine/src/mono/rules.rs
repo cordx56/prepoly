@@ -44,7 +44,7 @@ pub(super) fn is_supported(ty: &Type) -> bool {
 pub(super) fn resolve_nominal(program: &Program, ty: &Type) -> Type {
     fn go(program: &Program, ty: &Type, stack: &mut HashSet<i32>) -> Type {
         match ty {
-            Type::Record(n) if n.substitution.is_empty() && !n.is_name("File") => {
+            Type::Record(n) if n.substitution.is_empty() => {
                 let Some(info) = program.type_by_id(n.id) else {
                     return ty.clone();
                 };
@@ -66,7 +66,7 @@ pub(super) fn resolve_nominal(program: &Program, ty: &Type) -> Type {
             // An already-substituted record may still carry bare references in
             // its entries (a declared field's nominal type, e.g. the seed of an
             // uninitialized `let`); resolve them in place.
-            Type::Record(n) if !n.is_name("File") => {
+            Type::Record(n) => {
                 if !stack.insert(n.id) {
                     return ty.clone();
                 }
@@ -107,9 +107,6 @@ fn is_supported_rec(ty: &Type, visiting: &mut HashSet<i32>) -> bool {
         // yields `never`. The arm is type-checked (so payloads still infer) but
         // the back end skips emitting it, so an opaque placeholder slot suffices.
         Type::Never => true,
-        // `File` is a builtin opaque handle (a runtime file descriptor object), not
-        // a user record with fields, so it is supported despite an empty field set.
-        Type::Record(n) if n.is_name("File") => true,
         Type::Record(n) => {
             if !visiting.insert(n.id) {
                 return true; // already on the path: a self-reference, finite layout

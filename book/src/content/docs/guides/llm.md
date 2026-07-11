@@ -382,8 +382,13 @@ import geometry.vec as g
 ## Standard library (implicit prelude, no import needed)
 
 - IO: `print`, `println`, `input() -> string!` (one line, without the trailing
-  newline; unwrap with `!` or `match`), `read_file(path) -> string!`,
-  `write_file(path, content) -> void!`. Lower-level: `open`, `File.stdin/stdout`.
+  newline; unwrap with `!` or `match`) are the import-free prelude. Files are
+  the fs LIBRARY (set up like `process` below): `import fs.{ File, open,
+  read_file, write_file }`; `read_file(path) -> string!`,
+  `write_file(path, content) -> void!`, `open(path, mode) -> File!` then
+  `f.read(n)/f.write(bytes)/f.seek(pos)/f.size()/f.close()` (all fallible;
+  `size` works only for files opened by path), `File.from_fd(fd)`,
+  `File.stdin/stdout/stderr()`.
 - Arrays: `map`, `filter`, `fold`, `each`, `slice(start, end)`, `reverse`,
   `contains`, `sort`, `len`, `push`, `pop`, `insert`, `remove`.
 - Strings: `split`, `join`, `trim`, `starts_with`, `ends_with`, `find`,
@@ -401,20 +406,20 @@ import geometry.vec as g
   `get_or(k, default)`, `contains_key(k)`, `delete(k)`, `size()`,
   `is_empty()`, `keys()`, `values()`, `pairs()`, `clear()`, and
   `HashMap.from_pairs([[k, v], ...])`.
-- Networking: nested -- `import std.net.{ Tcp, TcpListener, Udp }`.
+- Networking: a LIBRARY, not `std` (set up like `process` below), so
+  `import net.{ Tcp, TcpListener, Udp, TlsStream }`.
   `Tcp.connect(host, port) -> Tcp!`; `TcpListener.bind(host, port) ->
   TcpListener!` (port 0 = ephemeral) then `listener.accept() -> Tcp!`;
   `conn.read(max) -> uint8[]!`, `conn.write(data) -> int64!`,
   `conn.local_addr()`/`conn.peer_addr() -> string!`, `conn.set_timeout(ms)`,
   `conn.close()`. `Udp.bind(host, port) -> Udp!`, `sock.send_to(data, host,
   port) -> int64!`, `sock.recv_from(max) -> Datagram!`
-  (`{ data: uint8[], addr: string }`). Convert bytes with
-  `to_bytes(string) -> uint8[]` and `to_text(uint8[]) -> string!`. TCP is a
-  byte stream (one read may return a partial message). For HTTPS-grade
-  encryption: `import std.net.tls.{ TlsStream }`;
-  `TlsStream.connect(host, port) -> TlsStream!` verifies the certificate and
-  then mirrors `Tcp` (`read`/`write`/`close`). Networking does not run on
-  `prepoly repl`.
+  (`{ data: uint8[], addr: string }`). Convert bytes with the PRELUDE
+  helpers `to_bytes(string) -> uint8[]` and `to_text(uint8[]) -> string!`
+  (no import). TCP is a byte stream (one read may return a partial
+  message). For HTTPS-grade encryption: `TlsStream.connect(host, port) ->
+  TlsStream!` verifies the certificate and then mirrors `Tcp`
+  (`read`/`write`/`close`). Everything here runs on either back end.
 - Processes: a LIBRARY, not `std` -- its native half is a plugin. Build it with
   `libraries/build.sh`, set `PREPOLY_INCLUDE=<repo>/libraries` (unneeded
   for a distributed toolchain, which finds `libraries/` beside its binary), then
@@ -422,9 +427,9 @@ import geometry.vec as g
   then chained builder methods `arg(s)`/`args(ss)`/`stdin/stdout/stderr(Stdio)`
   (`Stdio` is `| Inherit | Pipe | Null`), then `spawn() -> Child!`. On a
   `Child`: `stdin()/stdout()/stderr() -> File!` (each requires that stream be
-  `Stdio.Pipe`), `wait() -> int32!` (exit code). A piped stream is a `File`,
-  so drive it with `read`/`write`/`close` and convert bytes with
-  `to_bytes`/`to_text`. The stream accessors need the native runtime.
+  `Stdio.Pipe`), `wait() -> int32!` (exit code). A piped stream is an fs
+  `File`, so drive it with `read`/`write`/`close` and convert bytes with the
+  prelude `to_bytes`/`to_text`.
 - JSON: also nested -- `import std.data.json.{ JsonValue, parse, stringify }`.
   `parse(text) -> JsonValue!`; accessors `get(key)`, `at(index)`, `as_bool()`,
   `as_number()`, `as_string()` (each fallible), `is_null()`; `stringify(v)` is
@@ -434,8 +439,10 @@ import geometry.vec as g
 - `assert(cond, msg?)` aborts when `cond` is false (`msg` is optional).
 - Identifiers beginning with `_` (e.g. `_string_bytes`, `_panic`) are runtime
   internals -- do not call them directly; use the prelude wrappers above.
-- File I/O, networking, and concurrency run on the native runtime;
-  `prepoly repl` does not implement those runtime features.
+- Concurrency (`spawn`/`with`/`sync`) runs on the native runtime only;
+  `prepoly repl` rejects it. File I/O, processes, and networking run on
+  either back end (their libraries' plugins execute natively under the
+  interpreter too).
 
 ## Concurrency (experimental -- avoid unless asked)
 

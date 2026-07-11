@@ -1,0 +1,11 @@
+// size is the path library's answer (a stat by name), so a File that was
+// never opened by path -- a standard stream, an adopted descriptor -- has
+// nothing to ask about and reports an error instead of a bogus number.
+import fs.{ File }
+
+fun main() {
+    match File.stdin().size() {
+        Ok { value } => println("unexpected size {value}"),
+        Err { error } => println("no size: {error}"),
+    }
+}

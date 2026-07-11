@@ -1,5 +1,6 @@
-// Standard input/output, written in Prepoly on the runtime File primitives
-//. Part of the implicit prelude.
+// Standard input/output, written in Prepoly on the standalone stdio
+// primitives (`_print_str`/`_println_str`/`_stdin_read`), so the prelude
+// needs no `File` value. Part of the implicit prelude.
 
 /**
  * Write a value's text to standard output, without a trailing newline.
@@ -7,23 +8,19 @@
  * argument is the idiomatic form.
  */
 fun print(value) -> void {
-    let out = File.stdout()
-    out.write(_string_bytes(string.from(value)))
+    _print_str(string.from(value))
 }
 
 /** Like `print`, followed by a newline. */
 fun println(value) -> void {
-    let out = File.stdout()
-    out.write(_string_bytes(string.from(value)))
-    out.write(_string_bytes("\n"))
+    _println_str(string.from(value))
 }
 
 /** Read one line from standard input, without the trailing newline. */
 fun input() {
-    let stdin = File.stdin()
     let buf = []
     while true {
-        let byte = stdin.read(1)!
+        let byte = _stdin_read(1)!
         if len(byte) == 0 {
             break
         }
@@ -33,20 +30,4 @@ fun input() {
         buf.push(byte[0])
     }
     return _string_from_bytes(buf)!
-}
-
-/** Read the whole file at `path` as text. Fallible: returns a `Result`. */
-fun read_file(path: string) {
-    let f = open(path, "r")!
-    let size = f.size()!
-    let bytes = f.read(size)!
-    f.close()!
-    return _string_from_bytes(bytes)!
-}
-
-/** Write `content` to the file at `path`, truncating it. Fallible: returns a `Result`. */
-fun write_file(path: string, content: string) {
-    let f = open(path, "w")!
-    f.write(_string_bytes(content))!
-    f.close()!
 }

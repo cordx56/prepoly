@@ -50,6 +50,7 @@ fn runnable_examples_run_successfully() {
         let path = format!("{root}/{ex}");
         let out = Command::new(bin)
             .arg(&path)
+            .env("PREPOLY_INCLUDE", format!("{root}/libraries"))
             .output()
             .expect("spawn prepoly");
         assert!(
@@ -71,6 +72,7 @@ fn all_examples_typecheck() {
         let out = Command::new(bin)
             .arg("check")
             .arg(&path)
+            .env("PREPOLY_INCLUDE", format!("{root}/libraries"))
             .output()
             .expect("spawn prepoly");
         assert!(

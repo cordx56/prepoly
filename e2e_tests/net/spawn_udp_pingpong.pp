@@ -1,0 +1,39 @@
+// A spawned worker exchanges UDP datagrams with the main thread: the worker
+// binds its own socket, so both ends' plugin calls run on different threads,
+// and the Datagram's sender address is what lets main reply without knowing
+// the worker's port up front. The reply gates the worker's second send, so
+// the two receives arrive in a fixed order.
+import net.{ Udp }
+
+fun run_worker(main_port: int64) {
+    match Udp.bind("127.0.0.1", 0) {
+        Ok { value } => {
+            let sock = value
+            let sent = sock.send_to(to_bytes("ping"), "127.0.0.1", main_port)
+            match sock.recv_from(64) {
+                Ok { value } => {
+                    let sent_done = sock.send_to(to_bytes("done"), "127.0.0.1", main_port)
+                }
+                Err { error } => println("worker recv failed: {error}")
+            }
+            let closed = sock.close()
+        }
+        Err { error } => println("worker bind failed: {error}")
+    }
+}
+
+fun main() {
+    let sock = Udp.bind("127.0.0.1", 0)!
+    let port = int64.parse(sock.local_addr()!.split(":")[1])!
+    spawn(() -> { run_worker(port) })
+    let ping = sock.recv_from(64)!
+    println(to_text(ping.data)!)
+    // Reply to whoever sent the ping: the datagram's addr is "ip:port".
+    let sender_port = int64.parse(ping.addr.split(":")[1])!
+    sock.send_to(to_bytes("pong"), "127.0.0.1", sender_port)!
+    let done = sock.recv_from(64)!
+    println(to_text(done.data)!)
+    sync()
+    sock.close()!
+    println("finished")
+}

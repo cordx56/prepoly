@@ -1,0 +1,4 @@
+read after close errs
+addr after close: socket is closed
+accept after close: socket is closed
+done

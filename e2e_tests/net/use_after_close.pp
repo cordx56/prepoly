@@ -1,0 +1,26 @@
+// Closing a socket forgets both descriptors (the File's and the record's own
+// copy), so the socket-specific calls after close fail deterministically too.
+import net.{ Tcp, TcpListener }
+
+fun main() {
+    let listener = TcpListener.bind("127.0.0.1", 0)!
+    let port = int64.parse(listener.local_addr()!.split(":")[1])!
+    let client = Tcp.connect("127.0.0.1", port)!
+    let server = listener.accept()!
+    client.close()!
+    match client.read(1) {
+        Ok { value } => println("unexpected read"),
+        Err { error } => println("read after close errs"),
+    }
+    match client.local_addr() {
+        Ok { value } => println("unexpected addr"),
+        Err { error } => println("addr after close: {error}"),
+    }
+    server.close()!
+    listener.close()!
+    match listener.accept() {
+        Ok { value } => println("unexpected accept"),
+        Err { error } => println("accept after close: {error}"),
+    }
+    println("done")
+}

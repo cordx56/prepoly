@@ -245,7 +245,6 @@ impl<'p> ProgramCtx<'p> {
             || ((name.contains('.') || renamed(name))
                 && self.program.resolve_type(module, name).is_some())
             || name == "Self"
-            || name == "File"
             || prepoly_hir::IntKind::from_name(name).is_some()
             || matches!(name, "float32" | "float64" | "string" | "bool")
     }
@@ -255,21 +254,9 @@ impl<'p> ProgramCtx<'p> {
     /// routes as a method call only then; otherwise the name is a record FIELD
     /// holding a function value, loaded and called indirectly.
     fn method_name_exists(&self, name: &str) -> bool {
-        // Built-in slice mutators plus the runtime `File` instance methods,
-        // which have no user-level declaration to find in the type table.
-        if matches!(
-            name,
-            "push"
-                | "insert"
-                | "remove"
-                | "pop"
-                | "len"
-                | "read"
-                | "write"
-                | "size"
-                | "close"
-                | "seek"
-        ) {
+        // Built-in slice mutators, which have no user-level declaration to
+        // find in the type table.
+        if matches!(name, "push" | "insert" | "remove" | "pop" | "len") {
             return true;
         }
         if self

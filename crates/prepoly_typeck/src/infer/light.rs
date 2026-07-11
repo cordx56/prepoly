@@ -2,7 +2,6 @@
 //! return-type discovery for unannotated functions and a cheap
 //! expression walker that types bodies without reporting errors.
 
-use super::builtins::builtin_method_return;
 use super::*;
 
 impl<'a> Checker<'a> {
@@ -324,7 +323,21 @@ impl<'a> Checker<'a> {
                 }
             }
             let recv = self.infer_expr_light(base, env, props);
-            if let Some(ret) = builtin_method_return(&recv, method) {
+            // A user method's precomputed return: methods of a nominal
+            // receiver (peeling a narrowed nullable) resolve through the same
+            // table the full pass consults, so a body that propagates another
+            // type's fallible method infers fallible itself. The precompute
+            // runs twice, so a cross-type chain sees its callee's entry.
+            let peeled = match self.resolve(&recv) {
+                Type::Nullable(inner) => *inner,
+                other => other,
+            };
+            if let Type::Record(n) | Type::Sum(n) = &peeled
+                && let Some(ret) = self
+                    .method_returns
+                    .get(&(n.name.clone(), method.clone()))
+                    .cloned()
+            {
                 args.iter().for_each(|arg| {
                     self.infer_expr_light(&arg.expr, env, props);
                 });

@@ -2,7 +2,6 @@
 // writes far more than a pipe buffer holds (about 64KiB) completes. A plain
 // `wait()` on the same child would block forever: nobody is reading the pipe.
 import process.{ Command, Stdio }
-import std.net.{ to_text }
 
 const big = Command.new("head")
     .args(["-c", "100000", "/dev/zero"])

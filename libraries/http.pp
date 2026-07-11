@@ -1,5 +1,4 @@
-import std.net.{ Tcp, to_bytes, to_text }
-import std.net.tls.{ TlsStream }
+import net.{ Tcp, TlsStream }
 import url.{ URI }
 
 type Header = {

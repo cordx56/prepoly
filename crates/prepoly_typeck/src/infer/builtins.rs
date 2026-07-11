@@ -68,19 +68,21 @@ impl<'a> Checker<'a> {
         if let Some(ret) = self.concurrency_builtin_type(name, args, span, scopes) {
             return Some(ret);
         }
-        if name == "open" {
-            // `open(path: string, mode: string) -> File!`.
-            self.check_builtin_args_against("open", args, &[Type::Str, Type::Str], span, scopes);
-            return Some(Type::result(self.type_by_name("File"), Type::Str));
+        // The standalone stdio primitives behind the prelude's
+        // `print`/`println`/`input`, so those stay import-free with no `File`
+        // value involved.
+        if name == "_print_str" || name == "_println_str" {
+            self.check_builtin_args_against(name, args, &[Type::Str], span, scopes);
+            return Some(Type::Void);
         }
-        if name == "_file_from_fd" {
-            // `_file_from_fd(fd: int64) -> File`: adopt an open descriptor.
+        if name == "_stdin_read" {
+            // `_stdin_read(n: int64) -> uint8[]!`: up to `n` bytes from stdin.
             let i64_ty = Type::Int(IntKind::I64);
-            self.check_builtin_args_against("_file_from_fd", args, &[i64_ty], span, scopes);
-            return Some(self.type_by_name("File"));
-        }
-        if let Some(ret) = self.net_builtin_type(name, args, span, scopes) {
-            return Some(ret);
+            self.check_builtin_args_against(name, args, &[i64_ty], span, scopes);
+            return Some(Type::result(
+                Type::Slice(Box::new(Type::Int(IntKind::U8))),
+                Type::Str,
+            ));
         }
         if let Some(ret) = prepoly_hir::plugin_builtin_return(name) {
             self.check_plugin_call(name, args, span, scopes);
@@ -152,52 +154,6 @@ impl<'a> Checker<'a> {
         for a in payload.iter().skip(params.len()) {
             self.check_expr(&a.expr, scopes);
         }
-    }
-
-    /// Static contracts for the network runtime primitives (see
-    /// `prepoly_runtime::net` and the `std/net.pp` wrappers). Sockets are
-    /// `File`s, so the socket-typed slots check against the builtin `File`
-    /// nominal exactly like `open`'s result.
-    fn net_builtin_type(
-        &mut self,
-        name: &str,
-        args: &[Arg],
-        span: prepoly_parser::Span,
-        scopes: &mut ScopeStack,
-    ) -> Option<Type> {
-        let i64_ty = Type::Int(IntKind::I64);
-        let bytes_ty = Type::Slice(Box::new(Type::Int(IntKind::U8)));
-        let file_ty = self.type_by_name("File");
-        let file_result = Type::result(file_ty.clone(), Type::Str);
-        let (params, ret) = match name {
-            "_tcp_connect" | "_tcp_listen" | "_udp_bind" => (vec![Type::Str, i64_ty], file_result),
-            "_tcp_accept" => (vec![file_ty], file_result),
-            "_udp_send_to" => (
-                vec![file_ty, bytes_ty, Type::Str, i64_ty.clone()],
-                Type::result(i64_ty, Type::Str),
-            ),
-            "_udp_recv_from" => (vec![file_ty, i64_ty], Type::result(bytes_ty, Type::Str)),
-            "_socket_addr" => (vec![file_ty, i64_ty], Type::result(Type::Str, Type::Str)),
-            "_socket_set_timeout" => (vec![file_ty, i64_ty], Type::result(Type::Void, Type::Str)),
-            // TLS connections are int64 handles into the runtime's session
-            // table (see `prepoly_runtime::tls` and std/net/tls.pp).
-            "_tls_connect" => (
-                vec![Type::Str, i64_ty.clone()],
-                Type::result(i64_ty, Type::Str),
-            ),
-            "_tls_read" => (
-                vec![i64_ty.clone(), i64_ty],
-                Type::result(bytes_ty, Type::Str),
-            ),
-            "_tls_write" => (
-                vec![i64_ty.clone(), bytes_ty],
-                Type::result(i64_ty, Type::Str),
-            ),
-            "_tls_close" => (vec![i64_ty], Type::result(Type::Void, Type::Str)),
-            _ => return None,
-        };
-        self.check_builtin_args_against(name, args, &params, span, scopes);
-        Some(ret)
     }
 
     /// Static contracts for the numeric runtime helpers. These
@@ -408,24 +364,11 @@ impl<'a> Checker<'a> {
             return Some(ret);
         }
         match name {
-            "open" => Some(Type::result(self.type_by_name("File"), Type::Str)),
-            "_file_from_fd" => Some(self.type_by_name("File")),
-            "_tcp_connect" | "_tcp_listen" | "_tcp_accept" | "_udp_bind" => {
-                Some(Type::result(self.type_by_name("File"), Type::Str))
-            }
-            "_udp_send_to" => Some(Type::result(Type::Int(IntKind::I64), Type::Str)),
-            "_udp_recv_from" => Some(Type::result(
+            "_print_str" | "_println_str" => Some(Type::Void),
+            "_stdin_read" => Some(Type::result(
                 Type::Slice(Box::new(Type::Int(IntKind::U8))),
                 Type::Str,
             )),
-            "_socket_addr" => Some(Type::result(Type::Str, Type::Str)),
-            "_socket_set_timeout" => Some(Type::result(Type::Void, Type::Str)),
-            "_tls_connect" | "_tls_write" => Some(Type::result(Type::Int(IntKind::I64), Type::Str)),
-            "_tls_read" => Some(Type::result(
-                Type::Slice(Box::new(Type::Int(IntKind::U8))),
-                Type::Str,
-            )),
-            "_tls_close" => Some(Type::result(Type::Void, Type::Str)),
             "input" => Some(Type::result(Type::Str, Type::Str)),
             "len" => Some(Type::Int(IntKind::I64)),
             "print" | "println" | "assert" => Some(Type::Void),
@@ -645,14 +588,7 @@ impl<'a> Checker<'a> {
         scopes: &mut ScopeStack,
         span: prepoly_parser::Span,
     ) -> Option<Type> {
-        if let Some(ret) = self.array_method_type(recv_ty, method, args, scopes, span) {
-            return Some(ret);
-        }
-        let ret = builtin_method_return(recv_ty, method)?;
-        args.iter().for_each(|arg| {
-            self.check_expr(&arg.expr, scopes);
-        });
-        Some(ret)
+        self.array_method_type(recv_ty, method, args, scopes, span)
     }
 
     /// Type the builtin collection methods so their element types are enforced:
@@ -812,24 +748,6 @@ impl NumericClass {
             NumericClass::Str => "a string",
             NumericClass::Bool => "a bool",
         }
-    }
-}
-
-pub(super) fn builtin_method_return(recv_ty: &Type, method: &str) -> Option<Type> {
-    let Type::Record(name) = recv_ty else {
-        return None;
-    };
-    if !name.is_name("File") {
-        return None;
-    }
-    match method {
-        "write" | "size" => Some(Type::result(Type::Int(IntKind::I64), Type::Str)),
-        "read" => Some(Type::result(
-            Type::Slice(Box::new(Type::Int(IntKind::U8))),
-            Type::Str,
-        )),
-        "close" | "seek" => Some(Type::result(Type::Void, Type::Str)),
-        _ => None,
     }
 }
 

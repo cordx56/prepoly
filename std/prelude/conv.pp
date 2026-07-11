@@ -37,3 +37,13 @@ fun float64_parse(s: string) -> float64! {
 fun string_from(x) -> string {
     return string.from(x)
 }
+
+/** The UTF-8 bytes of `s`, ready to `write`/`send_to`. */
+fun to_bytes(s: string) -> uint8[] {
+    return _string_bytes(s)
+}
+
+/** Decode bytes as UTF-8 text. Fails on invalid UTF-8. */
+fun to_text(bytes: uint8[]) -> string! {
+    return _string_from_bytes(bytes)!
+}
