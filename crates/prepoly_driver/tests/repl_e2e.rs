@@ -56,6 +56,23 @@ const PARITY_CASES: &[&str] = &[
     "examples/17_higher_order.pp",
     "examples/18_methods.pp",
     "examples/modules/main.pp",
+    // A `T?` return inferred over a parameter that pins to a nullable type:
+    // the collapse of the resulting `T??` must happen the same way on both.
+    "e2e_tests/types/nullable_inferred_return_collapses.pp",
+    // An annotated closure parameter coerces its arguments identically on both:
+    // the typed back end packs a nullable cell where the interpreter boxes.
+    "e2e_tests/closure/annotated_param_coercion.pp",
+    // `typeof(x)` in a generic body derives each instance's name from the
+    // operand's monomorphized type; both back ends must agree per instance.
+    "e2e_tests/reflection/typeof_instances.pp",
+    // A generic `let y: typeof(x) = x` slot is inferred per instance (the
+    // span-keyed slot type is dropped on cross-instance disagreement); each
+    // instance must keep its own layout on both back ends.
+    "e2e_tests/reflection/typeof_annotation_instances.pp",
+    // A generic whose argument is view-converted in one instance and a nominal
+    // record in another: the identity pass-through must balance ownership on
+    // the typed back end (it crashed after the right output without it).
+    "e2e_tests/structure/view_arg_nominal_instance.pp",
 ];
 
 #[test]

@@ -10,8 +10,8 @@ pub mod newline;
 mod parser;
 
 pub use lexer::{
-    DocComment, LexError, Span, StrPart, Token, TokenKind, keyword_or_ident, lex, lex_with_docs,
-    line_col,
+    DocComment, LexError, Span, StrPart, Token, TokenKind, is_keyword, keyword_or_ident, lex,
+    lex_with_docs, line_col,
 };
 pub use parser::{ParseError, parse, parse_recovering, parse_with_base};
 

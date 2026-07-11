@@ -284,11 +284,23 @@ impl NominalType {
     /// see [`Type::display_with`] for the contract shared with the language
     /// server's hover renderer.
     pub fn display_with(&self, unknown: &mut dyn FnMut(u32) -> String) -> String {
+        self.render(unknown, true)
+    }
+
+    /// Like [`Self::display_with`], but keeping the `_`-prefixed members. See
+    /// [`Type::display_full`].
+    pub fn display_full_with(&self, unknown: &mut dyn FnMut(u32) -> String) -> String {
+        self.render(unknown, false)
+    }
+
+    /// `hide_private` drops `_`-prefixed substitution members from the
+    /// rendering.
+    fn render(&self, unknown: &mut dyn FnMut(u32) -> String, hide_private: bool) -> String {
         if let Some((ok, err)) = self.result_payloads() {
             return format!(
                 "Result<{}, {}>",
-                ok.display_with(unknown),
-                err.display_with(unknown)
+                ok.render(unknown, hide_private),
+                err.render(unknown, hide_private)
             );
         }
         // A structural/anonymous record has no declared name; render it as the
@@ -299,7 +311,7 @@ impl NominalType {
             let fields = self
                 .substitution
                 .iter()
-                .map(|(key, ty)| format!("{key}: {}", ty.display_with(unknown)))
+                .map(|(key, ty)| format!("{key}: {}", ty.render(unknown, hide_private)))
                 .collect::<Vec<_>>()
                 .join(", ");
             return format!("anonymous {{ {fields} }}");
@@ -311,8 +323,8 @@ impl NominalType {
         let entries = self
             .substitution
             .iter()
-            .filter(|(key, _)| !key.starts_with('_'))
-            .map(|(key, ty)| format!("{key}={}", ty.display_with(unknown)))
+            .filter(|(key, _)| !hide_private || !key.starts_with('_'))
+            .map(|(key, ty)| format!("{key}={}", ty.render(unknown, hide_private)))
             .collect::<Vec<_>>()
             .join(", ");
         if entries.is_empty() {
@@ -454,6 +466,22 @@ impl Type {
     /// the language server numbers them `unknown_N` for hover. Everything else
     /// renders identically for both, so diagnostics and hover agree.
     pub fn display_with(&self, unknown: &mut dyn FnMut(u32) -> String) -> String {
+        self.render(unknown, true)
+    }
+
+    /// Render including the `_`-prefixed members [`Self::display`] hides.
+    ///
+    /// Hiding them is right for every surface a programmer reads a type on
+    /// (hover, a signature), but it can make two *different* instantiations of
+    /// the same nominal print identically -- a type whose only open members are
+    /// private renders as its bare name. A diagnostic that must tell two types
+    /// apart falls back to this; see [`mismatch_display`].
+    pub fn display_full(&self) -> String {
+        self.render(&mut |_| "?".into(), false)
+    }
+
+    fn render(&self, unknown: &mut dyn FnMut(u32) -> String, hide_private: bool) -> String {
+        let mut sub = |t: &Type| t.render(unknown, hide_private);
         match self {
             Type::Bool => "bool".into(),
             Type::Int(k) => k.name().into(),
@@ -461,28 +489,22 @@ impl Type {
             Type::Str => "string".into(),
             Type::Void => "void".into(),
             Type::Never => "never".into(),
-            Type::Record(n) | Type::Sum(n) => n.display_with(unknown),
-            Type::Array(t, n) => format!("{}[{}]", t.display_with(unknown), n),
-            Type::Slice(t) => format!("{}[]", t.display_with(unknown)),
-            Type::Tuple(ts) => format!(
-                "[{}]",
-                ts.iter()
-                    .map(|t| t.display_with(unknown))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            Type::Record(n) | Type::Sum(n) => n.render(unknown, hide_private),
+            Type::Array(t, n) => format!("{}[{}]", sub(t), n),
+            Type::Slice(t) => format!("{}[]", sub(t)),
+            Type::Tuple(ts) => format!("[{}]", ts.iter().map(sub).collect::<Vec<_>>().join(", ")),
             Type::Fun(ps, r) => format!(
                 "({}) -> {}",
                 ps.iter()
-                    .map(|p| p.display_with(unknown))
+                    .map(|p| p.render(unknown, hide_private))
                     .collect::<Vec<_>>()
                     .join(", "),
-                r.display_with(unknown)
+                r.render(unknown, hide_private)
             ),
-            Type::Nullable(t) => format!("{}?", t.display_with(unknown)),
-            Type::ConstOf(t) => format!("const {}", t.display_with(unknown)),
-            Type::Mut(t) => format!("mut({})", t.display_with(unknown)),
-            Type::Ref(t) => format!("ref({})", t.display_with(unknown)),
+            Type::Nullable(t) => format!("{}?", sub(t)),
+            Type::ConstOf(t) => format!("const {}", sub(t)),
+            Type::Mut(t) => format!("mut({})", sub(t)),
+            Type::Ref(t) => format!("ref({})", sub(t)),
             Type::Unknown(id) => unknown(*id),
             Type::SelfType => "Self".into(),
         }
@@ -500,6 +522,22 @@ impl Type {
             _ => self.display(),
         }
     }
+}
+
+/// The two strings a "cannot use `X` where `Y` is required" diagnostic should
+/// print for `got` and `want`.
+///
+/// Normally the pretty rendering, which hides a nominal's `_`-prefixed
+/// implementation members. When two *different* types render to the same
+/// string that message says nothing, so both fall back to the unfiltered form
+/// -- the only place a programmer sees a type's private members, and only when
+/// they are what distinguishes it.
+pub fn mismatch_display(got: &Type, want: &Type) -> (String, String) {
+    let (g, w) = (got.display(), want.display());
+    if g == w && got != want {
+        return (got.display_full(), want.display_full());
+    }
+    (g, w)
 }
 
 /// Resolve a syntactic type expression to a `Type`.
@@ -764,50 +802,6 @@ pub fn substitute_vars(ty: &Type, map: &BTreeMap<u32, Type>) -> Type {
     }
 }
 
-/// The return type of a `_plugin_call_<code>` / `_plugin_fcall_<code>`
-/// builtin (the native-plugin dispatch calls the loader synthesizes; see
-/// `prepoly_resolve::plugin`), or `None` when `name` is not one. The suffix is
-/// the plugin value-type code -- one letter per leaf type, with an `a` prefix
-/// per array level (`as` is `string[]`), so it stays a valid identifier
-/// fragment. The `_fcall_` family is fallible and returns `Result<T, string>`.
-/// One decoder shared by the checker (full and light passes) and the back
-/// ends, so the contract cannot drift.
-pub fn plugin_builtin_return(name: &str) -> Option<Type> {
-    let (code, fallible) = if let Some(rest) = name.strip_prefix("_plugin_call_") {
-        (rest, false)
-    } else if let Some(rest) = name.strip_prefix("_plugin_fcall_") {
-        (rest, true)
-    } else {
-        return None;
-    };
-    let mut chars = code.chars();
-    let payload = plugin_type_code(&mut chars)?;
-    if chars.next().is_some() {
-        return None;
-    }
-    Some(if fallible {
-        Type::result(payload, Type::Str)
-    } else {
-        payload
-    })
-}
-
-/// Decode one plugin value-type code from the front of `chars`.
-fn plugin_type_code(chars: &mut std::str::Chars<'_>) -> Option<Type> {
-    Some(match chars.next()? {
-        'v' => Type::Void,
-        'b' => Type::Bool,
-        'i' => Type::Int(IntKind::I64),
-        'f' => Type::Float(FloatKind::F64),
-        's' => Type::Str,
-        // `uint8[]` is its own code: the boundary's only integer is `int64`,
-        // so a byte buffer is not `Array(int)`.
-        'y' => Type::Slice(Box::new(Type::Int(IntKind::U8))),
-        'a' => Type::Slice(Box::new(plugin_type_code(chars)?)),
-        _ => return None,
-    })
-}
-
 /// Collapse nested nullability (`T??` -> `T?`) throughout a type. A nested
 /// nullable carries no extra meaning (there is one `null`), and can arise when
 /// a return wrapped in `?` over an open variable is instantiated with a type
@@ -941,8 +935,8 @@ mod tests {
     use prepoly_parser::ast::TypeExpr;
 
     use super::{
-        IntKind, NominalInfo, NominalType, Substitution, Type, collapse_nullable,
-        plugin_builtin_return, resolve,
+        IntKind, NominalInfo, NominalType, Substitution, Type, collapse_nullable, mismatch_display,
+        resolve,
     };
 
     #[test]
@@ -1002,6 +996,47 @@ mod tests {
         assert!(!all_hidden.same_nominal(&NominalType::new(1, "Table")));
     }
 
+    /// Hiding the private members can make two different instantiations print
+    /// the same string, which would leave a type-mismatch diagnostic saying
+    /// nothing (``cannot use `Box` where `Box` is required``). The mismatch
+    /// renderer falls back to the unfiltered form for exactly that case, and
+    /// only that case -- an ordinary mismatch keeps the pretty rendering.
+    #[test]
+    fn a_mismatch_of_identically_rendered_types_shows_the_private_members() {
+        let boxed = |elem: Type| {
+            Type::Record(NominalType::with_substitution(1, "Box", {
+                let mut subst = Substitution::empty();
+                subst.insert("_data", Type::Slice(Box::new(elem)));
+                subst
+            }))
+        };
+        let strings = boxed(Type::Str);
+        let ints = boxed(Type::Int(IntKind::I32));
+        assert_eq!(
+            (strings.display(), ints.display()),
+            ("Box".into(), "Box".into())
+        );
+        assert_eq!(
+            mismatch_display(&ints, &strings),
+            (
+                "Box<_data=int32[]>".to_string(),
+                "Box<_data=string[]>".to_string()
+            )
+        );
+
+        // Two types that already read differently keep the pretty rendering,
+        // and so does a mismatch against the bare nominal.
+        assert_eq!(
+            mismatch_display(&Type::Str, &Type::Int(IntKind::I32)),
+            ("string".to_string(), "int32".to_string())
+        );
+        let bare = Type::Record(NominalType::new(1, "Box"));
+        assert_eq!(
+            mismatch_display(&ints, &bare),
+            ("Box<_data=int32[]>".to_string(), "Box".to_string())
+        );
+    }
+
     #[test]
     fn result_constructor_uses_substituted_sum_type() {
         let ty = Type::result(Type::Int(IntKind::I32), Type::Str);
@@ -1042,30 +1077,5 @@ mod tests {
 
         let flat = Type::Nullable(Box::new(Type::Str));
         assert_eq!(collapse_nullable(&flat), flat);
-    }
-
-    /// The plugin dispatch builtins carry their return type in the name: one
-    /// letter per leaf, an `a` per array level, and the `_fcall_` family wraps
-    /// in `Result`. A name that is not one of them, or carries a malformed
-    /// code, decodes to nothing.
-    #[test]
-    fn plugin_builtin_names_decode_their_return_type() {
-        let bytes = Type::Slice(Box::new(Type::Int(IntKind::U8)));
-        assert_eq!(
-            plugin_builtin_return("_plugin_call_i"),
-            Some(Type::Int(IntKind::I64))
-        );
-        assert_eq!(plugin_builtin_return("_plugin_call_y"), Some(bytes));
-        assert_eq!(
-            plugin_builtin_return("_plugin_call_aas"),
-            Some(Type::Slice(Box::new(Type::Slice(Box::new(Type::Str)))))
-        );
-        assert_eq!(
-            plugin_builtin_return("_plugin_fcall_s"),
-            Some(Type::result(Type::Str, Type::Str))
-        );
-        assert_eq!(plugin_builtin_return("_plugin_call_a"), None);
-        assert_eq!(plugin_builtin_return("_plugin_call_si"), None);
-        assert_eq!(plugin_builtin_return("_tls_connect"), None);
     }
 }

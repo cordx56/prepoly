@@ -37,6 +37,23 @@ pub fn reachable_blocks(body: &MirBody, local_types: &[Type], ret: &Type) -> Vec
     reached
 }
 
+/// The locals no reachable block assigns: the temporaries of an arm a statically
+/// known `if` folded away. Nothing reads them and no slot is emitted for them, so
+/// monomorphization may leave them untyped rather than failing the instance --
+/// which is what lets a generic body hold an arm that only types for a *different*
+/// instantiation.
+pub fn locals_only_in_dead_blocks(body: &MirBody, reachable: &[bool]) -> Vec<bool> {
+    let mut dead = vec![true; body.locals.len()];
+    for (block, _) in body.blocks.iter().zip(reachable).filter(|(_, r)| **r) {
+        for stmt in &block.stmts {
+            if let MirStmt::Assign(local, _) = stmt {
+                dead[local.index()] = false;
+            }
+        }
+    }
+    dead
+}
+
 /// The effective static truthiness of an `if` condition, used to fold a branch.
 /// Beyond the operand's own static truthiness, a *structural* `if` folds to false
 /// when its then-branch cannot type for this concrete value: its reachable return

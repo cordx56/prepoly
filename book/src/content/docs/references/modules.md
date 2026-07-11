@@ -70,6 +70,23 @@ A name is public unless it starts with `_`:
 
 There is no other visibility control.
 
+## `_PATH`
+
+Every module is loaded with a constant naming its own source file:
+
+```prepoly norun
+println(_PATH)          // /home/you/project/src/main.pp
+```
+
+The path is absolute, so it does not depend on where the program was started.
+`_PATH` follows the visibility rule above -- its leading `_` makes it private --
+so a module always reads its own, never an importer's, and no module can export
+one. A module with no file on disk (an embedded `std` module, a plugin's
+synthesized wrapper) reads its diagnostic label instead, such as `<std/io>`.
+
+To take the path apart, hand it to the [`path` library](/references/stdlib/#path-a-library-not-std):
+`Path.parse(_PATH).parent()` is the directory holding the file you are writing.
+
 ## The standard library
 
 The `std/prelude/` modules (`io`, `array`, `string`, `math`, `conv`,

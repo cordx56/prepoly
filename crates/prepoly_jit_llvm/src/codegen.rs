@@ -2620,8 +2620,10 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
         // Pack the payload into 8-byte stack slots the runtime decodes per the
         // signature string: integers widen to i64 (bools zero-extend), floats
         // store their bits, heap objects their address.
+        // An entry-block alloca: a positional one inside a loop would grow the
+        // stack once per iteration.
         let arr_ty = i64t.array_type(args.len() as u32);
-        let slots = self.builder.build_alloca(arr_ty, "plugin_args").unwrap();
+        let slots = self.typed_alloca(arr_ty.into(), "plugin_args");
         for (i, (v, t)) in args.iter().enumerate() {
             let slot = unsafe {
                 self.builder

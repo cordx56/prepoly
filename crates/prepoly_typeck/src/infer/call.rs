@@ -46,21 +46,21 @@ impl<'a> Checker<'a> {
             // `typeof(x)` in value position: a compile-time string constant, the
             // source name of x's static type (the same construct also names a
             // type in type/receiver position; see resolve_annotation and
-            // static_qualifier). Resolved here and recorded for MIR lowering.
+            // static_qualifier). Only the argument is checked here: the name
+            // itself is derived per monomorphic instance by the back ends
+            // (`Rvalue::TypeName`), never recorded by span -- a generic body is
+            // re-checked once per instantiation at the same span, and a
+            // span-keyed name would leak the last instance's answer into all.
             if name == "typeof" {
-                let [arg] = args else {
+                if args.len() != 1 {
                     self.errors.push(TypeError {
                         message: format!("`typeof` takes 1 argument, found {}", args.len()),
                         span,
                     });
-                    for a in args {
-                        self.check_expr(&a.expr, scopes);
-                    }
-                    return Type::Str;
-                };
-                let arg_ty = self.check_expr(&arg.expr, scopes);
-                self.type_names
-                    .insert(span, self.resolve(&arg_ty).type_name());
+                }
+                for a in args {
+                    self.check_expr(&a.expr, scopes);
+                }
                 return Type::Str;
             }
             if name == "error" {
@@ -200,15 +200,31 @@ impl<'a> Checker<'a> {
         if let Expr::Field(base, method, _) = callee {
             if let Some(qualifier) = self.static_qualifier(base, scopes) {
                 // A `typeof(v)` qualifier resolves to v's type NAME; record it at
-                // the inner `typeof(v)` span so MIR routes the static call (the
-                // same channel that folds a value-position `typeof` to its name).
+                // the inner `typeof(v)` span so MIR routes the static call. The
+                // channel is keyed by span while MIR shares one body across a
+                // generic's instantiations, so a qualifier that resolves to a
+                // DIFFERENT type in another instantiation cannot be represented:
+                // reject it here rather than let the last-checked name silently
+                // dispatch every instance's call.
                 if let Expr::Call(c, cargs, tspan) = &**base
                     && matches!(&**c, Expr::Ident(n, _) if n == "typeof")
                 {
                     for a in cargs {
                         self.check_expr(&a.expr, scopes);
                     }
-                    self.type_names.insert(*tspan, qualifier.clone());
+                    if let Some(prev) = self.type_names.insert(*tspan, qualifier.clone())
+                        && prev != qualifier
+                    {
+                        self.errors.push(TypeError {
+                            message: format!(
+                                "`typeof(..)` resolves to `{prev}` in one instantiation of \
+                                 this generic function and `{qualifier}` in another; a static \
+                                 call through `typeof` must name the same type in every \
+                                 instantiation"
+                            ),
+                            span: *tspan,
+                        });
+                    }
                 }
                 let ret = self.check_static_call(&qualifier, method, args, span, scopes);
                 self.invalidate_narrowed_after_call(scopes);

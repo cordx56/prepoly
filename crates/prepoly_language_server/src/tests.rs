@@ -701,7 +701,10 @@ fn completion_offers_types_and_functions() {
 #[test]
 fn plugin_functions_hover_and_complete() {
     let lib = prepoly_plugin_host::fixture::build_testlib();
-    let root = PathBuf::from("/tmp/prepoly_lsp_plugin_test");
+    // Private to this process: a fixed `/tmp` path races concurrent checkouts
+    // and carries stale state between runs. (`CARGO_TARGET_TMPDIR` is only set
+    // for integration tests, and this is a unit test.)
+    let root = std::env::temp_dir().join(format!("prepoly_lsp_plugin_test-{}", std::process::id()));
     let plugins = root.join("plugins");
     std::fs::create_dir_all(&plugins).expect("create plugin dir");
     let target = plugins.join(format!("mathx{}", std::env::consts::DLL_SUFFIX));
@@ -735,6 +738,9 @@ fn plugin_functions_hover_and_complete() {
     assert!(labels.contains(&"add".to_string()), "{labels:?}");
     assert!(labels.contains(&"checked_div".to_string()), "{labels:?}");
     assert!(labels.contains(&"undocumented".to_string()), "{labels:?}");
+    // The library stays mapped for the process's life, but the directory holding
+    // it need not: nothing reopens it by path after this point.
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// In `import |`, the prelude module names and the `std` namespace are offered.

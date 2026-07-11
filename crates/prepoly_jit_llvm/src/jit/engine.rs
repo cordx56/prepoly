@@ -20,7 +20,6 @@ use prepoly_runtime::symbols;
 #[allow(clippy::too_many_arguments)] // mirrors the checker's channel outputs
 pub fn run(
     program: &Program,
-    _int_lit_types: &std::collections::HashMap<prepoly_hir::Span, prepoly_hir::IntKind>,
     expr_types: &std::collections::HashMap<prepoly_hir::Span, prepoly_hir::Type>,
     view_args: &std::collections::HashSet<prepoly_hir::Span>,
     fields_loops: &std::collections::HashMap<prepoly_hir::Span, Vec<String>>,

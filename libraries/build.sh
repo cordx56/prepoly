@@ -1,20 +1,10 @@
 #!/bin/bash -e
 #
-# Build each library's native plugin and install it beside its Prepoly module,
-# under the name that module imports (`process/process.so`). Cargo names a
-# cdylib `libprocess.so`; the loader accepts either, but the plain name is what
-# the module refers to.
-#
-# Usage: libraries/build.sh [--release]
+# Usage: libraries/build.sh [profile]
 
 cd "$(dirname "$0")/.."
 
-profile_dir=debug
-cargo_args=()
-if [[ "${1:-}" == "--release" ]]; then
-    profile_dir=release
-    cargo_args+=(--release)
-fi
+profile="${1:-"release"}"
 
 case "$(uname -s)" in
 Darwin) suffix=dylib ;;
@@ -22,18 +12,16 @@ MINGW* | MSYS* | CYGWIN*) suffix=dll ;;
 *) suffix=so ;;
 esac
 
-# package name -> library name (the cdylib's `[lib] name`, and the module name)
-libraries=(prepoly_lib_process:process)
+for dirpath in $(find libraries -type f | grep "Cargo.toml$" | xargs -L 1 dirname); do
+    libname="$(basename "$dirpath")"
+    pkgname="prepoly_lib_$libname"
+    cargo build -p "$pkgname" --profile="$profile"
 
-for entry in "${libraries[@]}"; do
-    package="${entry%%:*}"
-    lib="${entry##*:}"
-    cargo build -p "$package" "${cargo_args[@]}"
+    built="target/$profile/lib$libname.$suffix"
+    [[ "$suffix" == dll ]] && built="target/$profile/$libname.$suffix"
 
-    built="target/$profile_dir/lib$lib.$suffix"
-    [[ "$suffix" == dll ]] && built="target/$profile_dir/$lib.$suffix"
-    dest="libraries/$lib/$lib.$suffix"
-
-    cp "$built" "$dest"
-    echo "installed $dest"
+    basedir="$(dirname "$dirpath")"
+    mkdir -p "$basedir"
+    cp "$built" "$basedir/lib$libname.$suffix"
+    echo "lib$libname built"
 done

@@ -67,15 +67,6 @@ impl<'a, 'p> FnLower<'a, 'p> {
                 self.b.emit(Rvalue::Un(*op, v))
             }
             Expr::Binary(op, a, b, _) => self.lower_binary(*op, a, b),
-            // `typeof(x)` in value position folds to the string constant the
-            // checker resolved (its type-name).
-            Expr::Call(callee, _, span)
-                if matches!(&**callee, Expr::Ident(n, _) if n == "typeof")
-                    && self.ctx.type_names.contains_key(span) =>
-            {
-                let name = self.ctx.type_names[span].clone();
-                Operand::Const(Literal::Str(name))
-            }
             Expr::Call(callee, args, span) => {
                 let rv = self.lower_call(callee, args);
                 // A call whose checker-resolved result is a constructed aggregate
@@ -688,6 +679,20 @@ impl<'a, 'p> FnLower<'a, 'p> {
     /// `codegen::gen_call`). Side-effecting sub-expressions (receiver, args) are
     /// evaluated here in source order.
     pub(crate) fn lower_call(&mut self, callee: &Expr, args: &[Arg]) -> Rvalue {
+        // `typeof(x)` in value position: the reflection builtin (the checker
+        // reserves the name before any user binding). The operand is lowered
+        // for its effects and the type NAME is left to the back ends, which
+        // derive it from the operand's per-instance monomorphized type
+        // (`Rvalue::TypeName`) -- baking a name here would fix one shared
+        // answer across every instance of a generic body.
+        if matches!(callee, Expr::Ident(n, _) if n == "typeof") {
+            let op = self
+                .lower_args(args)
+                .into_iter()
+                .next()
+                .unwrap_or_else(Operand::void);
+            return Rvalue::TypeName(op);
+        }
         // `recv.method(args)` or `Type.method(args)`.
         if let Expr::Field(base, method, _) = callee {
             // `typeof(v).method(args)`: a static call on v's type, whose name the

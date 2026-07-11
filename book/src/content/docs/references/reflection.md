@@ -46,16 +46,19 @@ construct with three uses that mirror the way `Self` names the enclosing type:
 **As a string** (value position). A record or sum reports its own name (the
 substitution is dropped, so the name is stable across instantiations);
 primitives and structural forms (`int32[]`, `T?`, ...) report their written
-form:
+form. The name is resolved per monomorphic instance, so a generic function
+reports each caller's own argument type:
 
 ```prepoly
 type Shape = | Circle { r: float64 } | Square
 println(typeof(Shape.Circle { r: 1.0 }))      // Shape
 
 const xs = [1, 2, 3]
-println(typeof(xs))                            // int32[3]
-let ys = [1, 2, 3]
-println(typeof(ys))                            // int32[]
+println(typeof(xs))                            // int32[]
+
+fun name(x) -> string { return typeof(x) }
+println(name(1))                               // int32
+println(name("s"))                             // string
 ```
 
 **As a type** (type position). `typeof(v)` denotes v's type, so a binding or
@@ -74,8 +77,54 @@ const n = typeof(x).from(3.9)!  // the `from` of x's numeric type
 ```
 
 In every value context `typeof(v)` decays to the type's name string, exactly as
-a `fields()` descriptor decays to the field name outside `v[field]`. `x` is
-type-checked but never evaluated at runtime.
+a `fields()` descriptor decays to the field name outside `v[field]`. Only the
+operand's type is consulted -- a bare variable costs nothing at runtime -- but a
+compound operand (a call, an element read) is still evaluated for its effects,
+like any other argument.
+
+## Member presence: `x.m` without a call
+
+An *uncalled* member access asks whether `x`'s type has a member `m`, and the
+answer is fixed at compile time:
+
+- a **field** reads as the field's value, as always;
+- a **method** of a `string` or an array decays to its own **name** as a string,
+  exactly as a `fields()` descriptor does -- a non-null value, so it is truthy;
+- a name the type does not have is `null` (`never?`), which is always falsy.
+
+Because a bare `null` is statically false and any other value statically true,
+an `if` over a member access is decided while checking. The arm that cannot run
+is neither type-checked nor emitted, so a single generic body may hold arms that
+only type for *some* of its instantiations:
+
+```prepoly
+type Segments = { parts: string[] }
+
+const SEP = "/"
+
+fun describe(s) -> string {
+    if s.parts {
+        return "record: {s.parts.join(SEP)}"   // only for Segments
+    } else if s.split {
+        return "string: {s.split(SEP).len()}"  // only for string
+    } else {
+        return "array: {s.len()}"              // only for an array
+    }
+}
+
+println(describe(Segments { parts: ["usr", "lib"] }))
+println(describe("a/b/c"))
+println(describe(["x", "y"]))
+```
+
+`s.split(...)` would not type against `Segments`, and `s.parts` names no member
+of `string` -- but each arm is reached only by the receiver it fits. This is how
+a library takes "a string, an array of strings, or a `Path`" through one
+parameter without overloading or union types.
+
+Presence answers `null` for any name a record, a `string`, or an array does not
+carry. A scalar (`int32`, `bool`, ...) has no members at all, so `x.foo` on one
+stays a hard error rather than quietly reading as null.
 
 ## Building a value field by field
 

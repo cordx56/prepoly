@@ -1,0 +1,52 @@
+// The pure half of `Path`: parsing, taking apart, putting together. Nothing
+// here touches the filesystem, so none of these paths need to exist.
+import path.{ Path }
+
+const p = Path.parse("/usr//lib/")
+println(p.to_string())
+println(p.components())
+println(p.depth())
+println(p.is_absolute())
+println(p.is_root())
+
+// A path-returning method copies: mutating the result cannot reach `p`.
+let parts = p.components()
+parts.push("gone")
+println(p.to_string())
+
+println(p.parent().to_string())
+println(p.basename().to_string())
+println(Path.parse("/").parent().to_string())
+println(Path.parse("a").parent().to_string())
+println(Path.parse("").to_string())
+
+// `join` takes a string, an array of components, or another `Path`. An absolute
+// argument replaces the receiver rather than extending it.
+println(p.join("share/doc").to_string())
+println(p.join(["share", "doc"]).to_string())
+println(p.join(Path.parse("share")).to_string())
+println(p.join("/etc").to_string())
+
+const archive = Path.parse("/tmp/archive.tar.gz")
+println(archive.stem())
+println(archive.extension())
+println(archive.with_extension("bz2").to_string())
+println(archive.with_extension("").to_string())
+println(Path.parse(".gitignore").extension())
+println(Path.parse("/").extension())
+
+println(Path.parse("/a/./b/../c").normalize().to_string())
+println(Path.parse("../x/./y").normalize().to_string())
+println(Path.parse("/../x").normalize().to_string())
+
+println(p.starts_with(Path.parse("/usr")))
+println(p.starts_with(Path.parse("/etc")))
+println(p.equals(Path.parse("/usr/lib")))
+println(p.equals(Path.parse("/usr")))
+
+// Both sides are absolute already, so relativizing never asks for the working
+// directory: the answer is the same wherever the program is started.
+println(Path.parse("/usr/lib/x").to_relative(Path.parse("/usr/share"))!.to_string())
+println(Path.parse("/usr/lib").to_relative(Path.parse("/usr/lib"))!.to_string())
+println(Path.parse("/usr/lib/x").to_relative(Path.parse("/usr"))!.to_string())
+println(Path.parse("/a/b").to_absolute()!.to_string())

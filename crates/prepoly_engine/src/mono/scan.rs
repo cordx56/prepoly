@@ -216,14 +216,19 @@ pub(super) fn body_has_error_source(body: &MirBody) -> bool {
 }
 
 /// Scan a body for indirect (closure) calls, mapping each *defining* closure
-/// local to the argument operands of its call site. Used to type direct-call
-/// closures, whose parameter types come from the call rather than the
+/// local to the argument operands of *every* call site. Used to type direct-call
+/// closures, whose parameter types come from the calls rather than the
 /// definition. A `let g = <closure>` binds through a `Use` copy, so callee
 /// locals are resolved back through `Use` aliases to the local actually holding
 /// the `Closure` rvalue.
-pub(super) fn collect_indirect_args(body: &MirBody) -> HashMap<LocalId, Vec<Operand>> {
+///
+/// Every site is kept because one parameter has one type across all of them: a
+/// closure called once with `null` and once with a `P` takes a `P?`, and typing
+/// it from whichever call the scan met first would compile the other against
+/// the wrong layout.
+pub(super) fn collect_indirect_args(body: &MirBody) -> HashMap<LocalId, Vec<Vec<Operand>>> {
     let alias = use_aliases(body);
-    let mut out: HashMap<LocalId, Vec<Operand>> = HashMap::new();
+    let mut out: HashMap<LocalId, Vec<Vec<Operand>>> = HashMap::new();
     for block in &body.blocks {
         for stmt in &block.stmts {
             let (MirStmt::Assign(_, rv) | MirStmt::Eval(rv)) = stmt else {
@@ -231,7 +236,8 @@ pub(super) fn collect_indirect_args(body: &MirBody) -> HashMap<LocalId, Vec<Oper
             };
             if let Rvalue::Call(Callee::Indirect(Operand::Local(g)), args) = rv {
                 out.entry(resolve_alias(&alias, *g))
-                    .or_insert_with(|| args.clone());
+                    .or_default()
+                    .push(args.clone());
             }
             // `spawn`/`with` call their closure argument: `spawn(f)` invokes a
             // zero-argument `f`; `with(obj, f)` invokes `f(obj)`. Recording the
@@ -247,7 +253,8 @@ pub(super) fn collect_indirect_args(body: &MirBody) -> HashMap<LocalId, Vec<Oper
                     "with" => {
                         if let (Some(obj), Some(Operand::Local(c))) = (args.first(), args.get(1)) {
                             out.entry(resolve_alias(&alias, *c))
-                                .or_insert_with(|| vec![obj.clone()]);
+                                .or_default()
+                                .push(vec![obj.clone()]);
                         }
                     }
                     // `_with_all(f, c0, ...)` invokes a zero-argument `f` (the

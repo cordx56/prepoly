@@ -241,7 +241,16 @@ impl<'a> Checker<'a> {
         // the lookup peels the mode wrappers; otherwise a `ref(mut(T))` base
         // would fall to the permissive arm and skip field type checking.
         let resolved = self.resolve(&base_ty);
-        match prepoly_hir::peel_modes(&resolved).clone() {
+        let peeled = prepoly_hir::peel_modes(&resolved).clone();
+        // A `string`/array receiver carries methods but no fields, so an uncalled
+        // member access on it is a compile-time presence test: a method decays to
+        // its own NAME as a string (exactly as a `fields()` descriptor does), and a
+        // member the class does not have is the always-null `never?`. A generic
+        // body branches on this to pick the arm that fits its instantiation.
+        if let Some(present) = self.program.primitive_member_presence(&peeled, name) {
+            return if present { Type::Str } else { Type::null() };
+        }
+        match peeled {
             Type::Record(record) => {
                 if let Some(ty) = record.substitution.get(name) {
                     return ty.clone();

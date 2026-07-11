@@ -14,6 +14,15 @@ use crate::types::{NominalType, Type};
 /// Reserved id for the built-in `Result` type (matches the runtime).
 pub use crate::types::RESULT_TYPE_ID;
 
+/// Free-function names the runtime and the compiler own. A `.pp` definition of
+/// one is rejected (it would capture the standard library's internal calls, or
+/// -- for `error` -- be dead because `error(x)` desugars to `Result.Err`), and
+/// the plugin-module loader renames a plugin function that lands on one rather
+/// than synthesizing a module that cannot be checked.
+pub const RESERVED_FUNCTION_NAMES: &[&str] = &[
+    "len", "open", "spawn", "with", "sync", "error", "fields", "typeof",
+];
+
 /// The canonical identity of a top-level definition: its local name plus the
 /// module path it is defined in. The storage/codegen key (`symbol`) is its
 /// `Display` form `name@a/b` -- the module path joins with `/`, never `.`, so the
@@ -324,6 +333,16 @@ pub struct Program {
     pub type_aliases: HashMap<String, TypeAlias>,
 }
 
+/// The members a primitive class carries without a `fun T.m` definition: the
+/// growable-array operations and `len`, which the runtime implements directly.
+fn builtin_member(class: &str, name: &str) -> bool {
+    match class {
+        "array" => matches!(name, "push" | "pop" | "insert" | "remove" | "len"),
+        "string" => name == "len",
+        _ => false,
+    }
+}
+
 /// A resolved `type Alias = <type expression>` binding: the module it is
 /// declared in and the concrete type its name expands to.
 #[derive(Clone, Debug)]
@@ -336,6 +355,28 @@ pub struct TypeAlias {
 impl Program {
     pub fn type_by_id(&self, id: i32) -> Option<&TypeInfo> {
         self.types.values().find(|t| t.id == id)
+    }
+
+    /// The compile-time presence of an uncalled member `x.m` whose receiver has a
+    /// method namespace but no fields -- a `string` or an array. `Some(true)` when
+    /// the receiver's class carries a method `m`, `Some(false)` when it carries
+    /// nothing of that name, and `None` for a receiver this rule says nothing
+    /// about (a record, a sum, a scalar).
+    ///
+    /// This is what lets one generic body branch on its argument's concrete type:
+    /// a present member types as its own name (a truthy string constant) and an
+    /// absent one as the always-null `never?`, so the `if` folds statically and
+    /// only the arm that fits the instantiation is checked and emitted.
+    pub fn primitive_member_presence(&self, ty: &Type, name: &str) -> Option<bool> {
+        let class = match ty.primitive_class()? {
+            class @ ("string" | "array") => class,
+            _ => return None,
+        };
+        Some(
+            self.primitive_methods
+                .contains_key(&(class.to_string(), name.to_string()))
+                || builtin_member(class, name),
+        )
     }
 
     pub fn type_ref(&self, name: &str) -> Option<Type> {

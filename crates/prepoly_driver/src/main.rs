@@ -382,7 +382,6 @@ fn install_jit_panic_guard() {
 #[allow(clippy::too_many_arguments)] // mirrors the checker's channel outputs
 fn execute(
     program: &Program,
-    int_lit_types: &HashMap<Span, prepoly_hir::IntKind>,
     expr_types: &HashMap<Span, prepoly_hir::Type>,
     view_args: &HashSet<Span>,
     fields_loops: &HashMap<Span, Vec<String>>,
@@ -393,7 +392,6 @@ fn execute(
     install_jit_panic_guard();
     prepoly_jit_llvm::run(
         program,
-        int_lit_types,
         expr_types,
         view_args,
         fields_loops,
@@ -409,7 +407,6 @@ fn execute(
 #[allow(clippy::too_many_arguments)] // mirrors the checker's channel outputs
 fn execute(
     program: &Program,
-    _int_lit_types: &HashMap<Span, prepoly_hir::IntKind>,
     expr_types: &HashMap<Span, prepoly_hir::Type>,
     view_args: &HashSet<Span>,
     fields_loops: &HashMap<Span, Vec<String>>,
@@ -452,40 +449,6 @@ fn execute_repl(
     )
 }
 
-/// Resolve each integer literal's source span to its inferred integer kind when
-/// that kind is unambiguous across all (re-)inferences, for typed-literal codegen. A span recorded with more than one integer kind (a literal in a
-/// polymorphic context) is left out, so codegen defaults it.
-fn int_literal_types(typed: &prepoly_hir::TypedProgram) -> HashMap<Span, prepoly_hir::IntKind> {
-    use prepoly_hir::{Type, TypedExprKind};
-    let mut per_span: HashMap<Span, Option<prepoly_hir::IntKind>> = HashMap::new();
-    for e in &typed.expressions {
-        if e.kind != TypedExprKind::Int {
-            continue;
-        }
-        let kind = match &e.ty {
-            Type::Int(k) => Some(*k),
-            Type::ConstOf(inner) | Type::Mut(inner) | Type::Ref(inner) => match inner.as_ref() {
-                Type::Int(k) => Some(*k),
-                _ => None,
-            },
-            _ => None,
-        };
-        match (per_span.get(&e.span), kind) {
-            (None, k) => {
-                per_span.insert(e.span, k);
-            }
-            (Some(prev), k) if *prev != k => {
-                per_span.insert(e.span, None);
-            }
-            _ => {}
-        }
-    }
-    per_span
-        .into_iter()
-        .filter_map(|(span, k)| k.map(|k| (span, k)))
-        .collect()
-}
-
 /// Resolve each aggregate-producing expression's source span to its
 /// checker-resolved instance type, for the back end to follow. This carries the
 /// element/field types the checker inferred from use into MIR lowering, so a
@@ -499,12 +462,25 @@ fn aggregate_result_types(
     program: &Program,
 ) -> HashMap<Span, prepoly_hir::Type> {
     use prepoly_hir::TypedExprKind;
-    let mut per_span: HashMap<Span, Option<prepoly_hir::Type>> = HashMap::new();
+    // Per span: the one type every instantiation of the enclosing body agreed on
+    // and whether it may be seeded, or `None` once two instantiations disagreed.
+    //
+    // Seedability is judged AFTER agreement, never before. A generic body checked
+    // once per instantiation reaches the same span at different types -- a call
+    // that yields a `Path` for one receiver and a `string` for another -- and
+    // seeding either onto the shared MIR local would reinterpret the other. Only
+    // FULLY KNOWN types count as observations: a partially inferred sighting of
+    // the same span (an empty `[]` before its element type is fixed) is less
+    // information about the same instantiation, not a disagreement.
+    let mut per_span: HashMap<Span, Option<(prepoly_hir::Type, bool)>> = HashMap::new();
     for e in &typed.expressions {
-        let relevant = match e.kind {
+        // A `ref`/`mut`/`const` view of a value is the same value: the same span
+        // seen once as `int32[]` and once as `const int32[]` agrees with itself.
+        let ty = prepoly_hir::peel_modes(&e.ty);
+        let seedable = match e.kind {
             TypedExprKind::Call
             | TypedExprKind::TypeLiteral(_)
-            | TypedExprKind::VariantLiteral { .. } => is_seedable_instance(&e.ty),
+            | TypedExprKind::VariantLiteral { .. } => is_seedable_instance(ty),
             // An array literal is seeded only when its element representation
             // (a nullable cell, a non-default numeric width) cannot be
             // re-derived from the bare element values, so the checked type must
@@ -512,11 +488,11 @@ fn aggregate_result_types(
             // literal has no element values at all, so any fully-known checked
             // type (an annotation, or inference from a later use) is seeded.
             TypedExprKind::Array { empty } => {
-                is_seedable_array(&e.ty) || (empty && is_seedable_empty_array(&e.ty))
+                is_seedable_array(ty) || (empty && is_seedable_empty_array(ty))
             }
-            _ => false,
+            _ => continue,
         };
-        if !relevant {
+        if !is_fully_known(ty) {
             continue;
         }
         // The checker records only the inferred (unannotated) fields in a record's
@@ -524,12 +500,12 @@ fn aggregate_result_types(
         // it so the seeded type is the same nominal the back end constructs --
         // otherwise the binding's type and its methods key off a sparser type and
         // misresolve the annotated fields.
-        let ty = complete_aggregate(&e.ty, program);
+        let ty = complete_aggregate(ty, program);
         match per_span.get(&e.span) {
             None => {
-                per_span.insert(e.span, Some(ty));
+                per_span.insert(e.span, Some((ty, seedable)));
             }
-            Some(Some(prev)) if *prev != ty => {
+            Some(Some((prev, _))) if *prev != ty => {
                 per_span.insert(e.span, None);
             }
             _ => {}
@@ -537,7 +513,10 @@ fn aggregate_result_types(
     }
     per_span
         .into_iter()
-        .filter_map(|(span, t)| t.map(|t| (span, t)))
+        .filter_map(|(span, t)| match t {
+            Some((ty, true)) => Some((span, ty)),
+            _ => None,
+        })
         .collect()
 }
 
@@ -691,7 +670,6 @@ use prepoly_hir::is_fully_known;
 /// A program that passed every front-end check, ready to run.
 struct Checked {
     program: Program,
-    int_lit_types: HashMap<Span, prepoly_hir::IntKind>,
     /// Checker-resolved instance types of aggregate-producing expressions, keyed
     /// by span; the back-end seeding channel (see [`aggregate_result_types`]).
     expr_types: HashMap<Span, prepoly_hir::Type>,
@@ -737,7 +715,6 @@ fn drive(mode: Mode, file: &str) -> Result<(), u8> {
         }
         Mode::Run => execute(
             &checked.program,
-            &checked.int_lit_types,
             &checked.expr_types,
             &checked.view_args,
             &checked.fields_loops,
@@ -770,7 +747,7 @@ fn drive(mode: Mode, file: &str) -> Result<(), u8> {
 /// Returns the checked program or the rendered diagnostics. Shared by file
 /// execution and the interactive REPL, so both report identical errors.
 fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec<String>> {
-    let packages = prepoly_resolve::parse_packages_env();
+    let search = prepoly_resolve::SearchPaths::from_env();
     let mut sources = prepoly_resolve::SourceMap::default();
     #[allow(unused_mut)]
     let mut modules: Vec<LoadedModule> =
@@ -782,6 +759,14 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         main_src.to_string(),
     );
     let (mut main_ast, parse_errors) = prepoly_parser::parse_recovering(main_src, base);
+    prepoly_resolve::inject_module_path(
+        &mut main_ast,
+        &std::fs::canonicalize(main_label)
+            .unwrap_or_else(|_| PathBuf::from(main_label))
+            .display()
+            .to_string(),
+        Span::new(base, base),
+    );
     if !parse_errors.is_empty() {
         let rendered: Vec<(String, Span)> = parse_errors
             .into_iter()
@@ -795,7 +780,7 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
     let mut deps = Vec::new();
     let mut load_errors = Vec::new();
     for (target, span) in
-        prepoly_resolve::canonicalize_imports(&[], root, &mut main_ast.imports, &packages)
+        prepoly_resolve::canonicalize_imports(&[], root, &mut main_ast.imports, &search)
     {
         prepoly_resolve::load_module(
             &target,
@@ -806,7 +791,7 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
             &mut deps,
             span,
             &mut load_errors,
-            &packages,
+            &search,
         );
     }
     // A broken module graph aborts before lowering: analyzing a partial graph
@@ -895,11 +880,9 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         return Err(render_errors(&errors, &sources));
     }
 
-    let int_lit_types = int_literal_types(&analysis.typed);
     let expr_types = aggregate_result_types(&analysis.typed, &program);
     Ok(Checked {
         program,
-        int_lit_types,
         expr_types,
         view_args: analysis.view_args,
         fields_loops: analysis.fields_loops,

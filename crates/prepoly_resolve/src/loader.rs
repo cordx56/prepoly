@@ -13,7 +13,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use prepoly_hir::LoadedModule;
-use prepoly_parser::ast::{ImportDecl, ImportedName};
+use prepoly_parser::ast::{
+    Expr, ImportDecl, ImportedName, Module, Pattern, Stmt, StrSeg, TopLevel, TypeExpr,
+};
 use prepoly_parser::parse_with_base;
 use prepoly_parser::{Span, line_col};
 
@@ -32,6 +34,40 @@ pub fn prelude_module_names() -> impl Iterator<Item = &'static str> {
 /// The source of an embedded prelude module, for listing its public names.
 pub fn prelude_source(name: &str) -> Option<&'static str> {
     STDLIB.iter().find(|(n, _)| *n == name).map(|(_, src)| *src)
+}
+
+/// The constant every module is given at load time, holding its own source
+/// location. The leading `_` makes it private to the module that declares it, so
+/// each file reads its own and no import ever sees another's.
+pub const MODULE_PATH_CONST: &str = "_PATH";
+
+/// Declare `_PATH` at the top of `ast`. `location` is the module's absolute file
+/// path when it has one on disk, and its diagnostic label (`<std/io>`,
+/// `<plugin:...>`) when it does not -- a module with no file still answers the
+/// question "where am I?" with something a human can read.
+///
+/// This is the loader's job rather than the parser's because only the loader
+/// knows where a module came from: the same source text compiled from a
+/// different directory must report a different `_PATH`.
+pub fn inject_module_path(ast: &mut Module, location: &str, span: Span) {
+    let decl = Stmt::Let {
+        pat: Pattern::Binding(MODULE_PATH_CONST.to_string(), span),
+        ty: Some(TypeExpr::Named("string".to_string(), span)),
+        value: Some(Expr::Str(vec![StrSeg::Lit(location.to_string())], span)),
+        is_const: true,
+        span,
+    };
+    ast.items.insert(0, TopLevel::Stmt(decl));
+}
+
+/// A module's `_PATH` value: its canonical absolute path, falling back to the
+/// path as written when the file cannot be canonicalized (it was deleted, or an
+/// unsaved language-server buffer).
+fn module_location(file: &Path) -> String {
+    std::fs::canonicalize(file)
+        .unwrap_or_else(|_| file.to_path_buf())
+        .display()
+        .to_string()
 }
 
 /// Whether an import path refers to a prelude module supplied as [`STDLIB`]
@@ -88,9 +124,10 @@ pub fn load_std_nested(
         let base = sources.add(None, label.clone(), (*src).to_string());
         // The embedded std sources are known-good, so a parse failure is a build
         // bug; skip on error rather than aborting the user's compile.
-        let Ok(ast) = parse_with_base(src, base) else {
+        let Ok(mut ast) = parse_with_base(src, base) else {
             continue;
         };
+        inject_module_path(&mut ast, &label, Span::new(base, base));
         loaded.insert(path.clone());
         for imp in &ast.imports {
             work.push(imp.path.clone());
@@ -173,24 +210,106 @@ pub struct LoadError {
     pub span: Span,
 }
 
-/// Mapping from external package name to its root directory on disk. Populated
-/// from the `PREPOLY_PACKAGES` environment variable set by the package manager.
-pub type PackageMap = HashMap<String, PathBuf>;
+/// Module roots beyond the project directory, from two environment variables
+/// that may be set together:
+///
+/// - `PREPOLY_PACKAGES` (`name=/dir:name2=/dir2:...`), set by the package
+///   manager: a name-keyed map. An import whose FIRST segment is a declared
+///   name resolves under that entry's directory and nowhere else, so a
+///   manifest scopes exactly which external modules a project sees.
+/// - `PREPOLY_INCLUDE` (`/dir:/dir2:...`), set by the user or a distribution:
+///   ordered open roots. Any module under an include path is importable as if
+///   it sat next to the entry file; the project root is searched first, then
+///   each include path in list order, so a local file shadows an include
+///   module and earlier entries shadow later ones.
+///
+/// A package name binds its imports before any file search runs, so a
+/// declared dependency cannot be shadowed by a same-named local file or
+/// include module.
+#[derive(Clone, Default)]
+pub struct SearchPaths {
+    pub packages: HashMap<String, PathBuf>,
+    pub includes: Vec<PathBuf>,
+}
 
-/// Parse the `PREPOLY_PACKAGES` environment variable into a [`PackageMap`].
-/// The format is `name1=/path/to/pkg1:name2=/path/to/pkg2:...`.
-/// Returns an empty map when the variable is unset or empty.
-pub fn parse_packages_env() -> PackageMap {
-    let val = std::env::var("PREPOLY_PACKAGES").unwrap_or_default();
-    if val.is_empty() {
-        return PackageMap::new();
+impl SearchPaths {
+    /// Read both environment variables, then append the distribution's
+    /// implicit include entry (see [`distribution_libraries_dir`]) so every
+    /// front end -- the compiler and the language server -- resolves imports
+    /// identically. Malformed `PREPOLY_PACKAGES` entries (no `=`) and empty
+    /// entries in either variable are skipped; unset variables contribute
+    /// nothing. The implicit entry comes last, so explicit include paths and
+    /// package declarations always win.
+    pub fn from_env() -> Self {
+        let packages = std::env::var("PREPOLY_PACKAGES")
+            .unwrap_or_default()
+            .split(':')
+            .filter_map(|entry| {
+                let (name, path) = entry.split_once('=')?;
+                Some((name.to_string(), PathBuf::from(path)))
+            })
+            .collect();
+        let mut includes: Vec<PathBuf> = std::env::var("PREPOLY_INCLUDE")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        includes.extend(distribution_libraries_dir());
+        SearchPaths { packages, includes }
     }
-    val.split(':')
-        .filter_map(|entry| {
-            let (name, path) = entry.split_once('=')?;
-            Some((name.to_string(), PathBuf::from(path)))
-        })
-        .collect()
+}
+
+/// The `libraries/` directory a distributed toolchain ships beside its
+/// `bin/` directory: `<dir of the running binary>/../libraries`, when it
+/// exists, so the bundled libraries import with no environment setup
+/// (`bin/prepoly` and `bin/prepoly-lsp` resolve to the same directory).
+/// In-repo builds have no such directory (`target/debug/../libraries`), so
+/// development runs see nothing implicit. Cached: the executable's location
+/// cannot change within a process.
+fn distribution_libraries_dir() -> Option<PathBuf> {
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let exe = std::env::current_exe().ok()?;
+        let dir = exe.parent()?.parent()?.join("libraries");
+        dir.is_dir().then_some(dir)
+    })
+    .clone()
+}
+
+/// What a module path resolved to on disk: a `.pp` source file, or a native
+/// plugin library serving the path as a synthesized module.
+enum ModuleFile {
+    Source(PathBuf),
+    Plugin(PathBuf),
+}
+
+/// The `.pp` file or plugin library serving `segs` under the single root `r`
+/// (a `.pp` file wins over a plugin library).
+fn module_file_under(r: &Path, segs: &[String]) -> Option<ModuleFile> {
+    let mut file = r.to_path_buf();
+    for seg in segs {
+        file.push(seg);
+    }
+    file.set_extension("pp");
+    if file.is_file() {
+        return Some(ModuleFile::Source(file));
+    }
+    crate::plugin::plugin_library_for(r, segs).map(ModuleFile::Plugin)
+}
+
+/// Find the file serving module path `segs`. A path whose first segment is a
+/// declared package name looks ONLY under that package's directory -- a
+/// declared dependency that lacks the module is an error, not a fallthrough.
+/// Any other path searches the project `root` first, then each include
+/// directory in order, so the first root that serves the path wins.
+fn find_module_file(root: &Path, search: &SearchPaths, segs: &[String]) -> Option<ModuleFile> {
+    if let Some(pkg_root) = segs.first().and_then(|s| search.packages.get(s.as_str())) {
+        return module_file_under(pkg_root, segs);
+    }
+    std::iter::once(root)
+        .chain(search.includes.iter().map(PathBuf::as_path))
+        .find_map(|r| module_file_under(r, segs))
 }
 
 /// Parse the embedded prelude into `sources`, returning its modules. The
@@ -201,10 +320,11 @@ pub fn parse_stdlib(sources: &mut SourceMap) -> Result<Vec<LoadedModule>, String
     for (name, src) in STDLIB {
         let label = format!("<std/{name}>");
         let base = sources.add(None, label.clone(), (*src).to_string());
-        let ast = parse_with_base(src, base).map_err(|e| {
+        let mut ast = parse_with_base(src, base).map_err(|e| {
             let (line, col) = line_col(src, e.span.lo - base);
             format!("{label}:{line}:{col}: parse error: {}", e.message)
         })?;
+        inject_module_path(&mut ast, &label, Span::new(base, base));
         let mut path = vec!["std".to_string()];
         path.extend(name.split('/').map(str::to_string));
         modules.push(LoadedModule {
@@ -217,40 +337,55 @@ pub fn parse_stdlib(sources: &mut SourceMap) -> Result<Vec<LoadedModule>, String
 }
 
 /// Resolve an import path, written relative to the importing file, to the
-/// imported module's canonical (root-relative) path. Imports are relative to
-/// the importing file's own directory `base`, so `import b` from `modules/a.pp`
-/// refers to `modules/b.pp`. A `std.*` path or a bare prelude module is global
-/// rather than file-relative and returns `None`, so the caller leaves it
-/// untouched and does not load it from disk.
+/// imported module's canonical path. A path whose first segment is a declared
+/// package name is already canonical (the name roots it). Every other import
+/// is relative to the importing file's own directory `base`, so `import b`
+/// from `modules/a.pp` refers to `modules/b.pp`; the relative form is looked
+/// up across the project root and every include path. When the relative form
+/// names no file and `base` is non-empty, the path as written is tried
+/// instead, so a nested module can still reach a top-level include library
+/// (`import geometry` from `modules/a.pp`). A `std.*` path or a bare prelude
+/// module is global rather than file-relative and returns `None`, so the
+/// caller leaves it untouched and does not load it from disk.
 ///
-/// When the first segment of the import matches an external package in
-/// `packages`, the path is already canonical (rooted at the package name) and
-/// the `base` prefix is NOT prepended.
-fn relativize(base: &[String], imp_path: &[String], packages: &PackageMap) -> Option<Vec<String>> {
+/// An unresolved path keeps its relative form, so the load step reports the
+/// missing module at the location the import most likely meant.
+fn relativize(
+    base: &[String],
+    imp_path: &[String],
+    root: &Path,
+    search: &SearchPaths,
+) -> Option<Vec<String>> {
     if imp_path.first().map(|s| s == "std").unwrap_or(false) || is_prelude_path(imp_path) {
         return None;
     }
-    // Package-rooted imports are already canonical.
     if imp_path
         .first()
-        .is_some_and(|s| packages.contains_key(s.as_str()))
+        .is_some_and(|s| search.packages.contains_key(s.as_str()))
     {
         return Some(imp_path.to_vec());
     }
     let mut canonical = base.to_vec();
     canonical.extend_from_slice(imp_path);
+    if base.is_empty() || find_module_file(root, search, &canonical).is_some() {
+        return Some(canonical);
+    }
+    if find_module_file(root, search, imp_path).is_some() {
+        return Some(imp_path.to_vec());
+    }
     Some(canonical)
 }
 
 /// Classify a brace-less import (`import a.b` / `import a.b.X`) now that the
 /// importing file's directory is known: when the full path names a module -- a
-/// file under `root`, a prelude module, or an embedded nested std module -- it
-/// is a MODULE import, used qualified through its last segment (`import
-/// geometry.vec` -> `vec.dot(..)`); otherwise its last segment is a single
-/// name imported from the enclosing module (`import geometry.vec.dot` ==
-/// `import geometry.vec.{ dot }`). A path that names neither stays a module
-/// import so the load step reports the missing module at this import.
-fn classify_bare(base: &[String], root: &Path, imp: &mut ImportDecl, packages: &PackageMap) {
+/// file under `root`, a package, or an include path, a prelude module, or an
+/// embedded nested std module -- it is a MODULE import, used qualified through
+/// its last segment (`import geometry.vec` -> `vec.dot(..)`); otherwise its
+/// last segment is a single name imported from the enclosing module (`import
+/// geometry.vec.dot` == `import geometry.vec.{ dot }`). A path that names
+/// neither stays a module import so the load step reports the missing module
+/// at this import.
+fn classify_bare(base: &[String], root: &Path, imp: &mut ImportDecl, search: &SearchPaths) {
     let module_exists = |path: &[String]| -> bool {
         if is_prelude_path(path) {
             return true;
@@ -261,32 +396,19 @@ fn classify_bare(base: &[String], root: &Path, imp: &mut ImportDecl, packages: &
         if path.first().is_some_and(|s| s == "std") {
             return false;
         }
-        // Build the full canonical path to decide which root to check.
-        let full: Vec<&str> = if path
+        // Mirror `relativize`: a package name roots the path as written;
+        // otherwise the relative form first, then -- from a nested module --
+        // the path as written, so both agree on what exists.
+        if path
             .first()
-            .is_some_and(|s| packages.contains_key(s.as_str()))
+            .is_some_and(|s| search.packages.contains_key(s.as_str()))
         {
-            path.iter().map(|s| s.as_str()).collect()
-        } else {
-            base.iter().chain(path.iter()).map(|s| s.as_str()).collect()
-        };
-        let effective_root = if let Some(pkg_root) = full.first().and_then(|s| packages.get(*s)) {
-            pkg_root.as_path()
-        } else {
-            root
-        };
-        let mut file = effective_root.to_path_buf();
-        for seg in &full {
-            file.push(seg);
+            return find_module_file(root, search, path).is_some();
         }
-        file.set_extension("pp");
-        if file.is_file() {
-            return true;
-        }
-        // A native plugin library also names a module (`import plugins.math`
-        // with `plugins/math.so` on disk).
-        let full: Vec<String> = full.iter().map(|s| s.to_string()).collect();
-        crate::plugin::plugin_library_for(effective_root, &full).is_some()
+        let mut full = base.to_vec();
+        full.extend_from_slice(path);
+        find_module_file(root, search, &full).is_some()
+            || (!base.is_empty() && find_module_file(root, search, path).is_some())
     };
     if module_exists(&imp.path) {
         // An explicit `as` alias takes precedence over the last-segment default.
@@ -319,24 +441,24 @@ fn classify_bare(base: &[String], root: &Path, imp: &mut ImportDecl, packages: &
     }
 }
 
-/// Rewrite each import's path from importer-relative to canonical
-/// (root-relative) form in place -- so the loaded modules and downstream name
-/// resolution share one path per file -- and return the canonical paths of the
-/// file modules to load, each with the span of the import that requested it
-/// (for error attribution). Brace-less imports are classified against `root`
+/// Rewrite each import's path from importer-relative to canonical form in
+/// place -- so the loaded modules and downstream name resolution share one
+/// path per file -- and return the canonical paths of the file modules to
+/// load, each with the span of the import that requested it (for error
+/// attribution). Brace-less imports are classified against the same roots
 /// first (see [`classify_bare`]).
 pub fn canonicalize_imports(
     base: &[String],
     root: &Path,
     imports: &mut [ImportDecl],
-    packages: &PackageMap,
+    search: &SearchPaths,
 ) -> Vec<(Vec<String>, Span)> {
     let mut targets = Vec::new();
     for imp in imports.iter_mut() {
         if imp.bare {
-            classify_bare(base, root, imp, packages);
+            classify_bare(base, root, imp, search);
         }
-        if let Some(canonical) = relativize(base, &imp.path, packages) {
+        if let Some(canonical) = relativize(base, &imp.path, root, search) {
             imp.path = canonical.clone();
             targets.push((canonical, imp.span));
         }
@@ -344,18 +466,18 @@ pub fn canonicalize_imports(
     targets
 }
 
-/// Load the module at canonical (root-relative) `path` and, transitively, every
-/// module it imports, pushing each onto `out`. Problems are collected into
-/// `errors` rather than aborting, so one bad dependency does not hide the
-/// rest: graph-level problems (missing file, privacy, cycle) are attributed to
+/// Load the module at canonical `path` and, transitively, every module it
+/// imports, pushing each onto `out`. Problems are collected into `errors`
+/// rather than aborting, so one bad dependency does not hide the rest:
+/// graph-level problems (missing file, privacy, cycle) are attributed to
 /// `trigger_span` (the entry-file import that asked for this subgraph), while
 /// a dependency's own syntax errors keep their in-file spans. `std`/prelude
 /// paths never arrive here (they are filtered out as non-file modules during
 /// canonicalization).
 ///
-/// When the first segment of `path` matches an external package in `packages`,
-/// the file is resolved relative to that package's root directory instead of
-/// the local project `root`.
+/// The file serving `path` is found by [`find_module_file`]: a declared
+/// package's directory when the first segment names one, otherwise the
+/// project `root` first and then each include path in order.
 #[allow(clippy::too_many_arguments)]
 pub fn load_module(
     path: &[String],
@@ -366,7 +488,7 @@ pub fn load_module(
     out: &mut Vec<LoadedModule>,
     trigger_span: Span,
     errors: &mut Vec<LoadError>,
-    packages: &PackageMap,
+    search: &SearchPaths,
 ) {
     let key = path.join(".");
     if crate::is_private_module(path) {
@@ -387,39 +509,55 @@ pub fn load_module(
         return;
     }
 
-    let effective_root = path
-        .first()
-        .and_then(|s| packages.get(s.as_str()))
-        .map(|p| p.as_path())
-        .unwrap_or(root);
-
-    let mut file = effective_root.to_path_buf();
-    for seg in path {
-        file.push(seg);
-    }
-    file.set_extension("pp");
-    let src = match std::fs::read_to_string(&file) {
-        Ok(s) => s,
-        Err(_) => {
-            // Not a `.pp` module: a native plugin library may serve the path
-            // instead (`plugins/math.so` for `import plugins.math`), as a
-            // module synthesized from the plugin's manifest.
-            if let Some(lib) = crate::plugin::plugin_library_for(effective_root, path) {
-                match crate::plugin::synthesize_plugin_module(&lib) {
-                    Ok(src) => {
-                        load_synthesized(&lib, src, path, sources, out, trigger_span, errors)
-                    }
-                    Err(message) => errors.push(LoadError {
-                        message,
-                        span: trigger_span,
-                    }),
-                }
+    let (file, src) = match find_module_file(root, search, path) {
+        // A native plugin library may serve the path instead of a `.pp` file
+        // (`plugins/math.so` for `import plugins.math`), as a module
+        // synthesized from the plugin's manifest.
+        Some(ModuleFile::Plugin(lib)) => {
+            match crate::plugin::synthesize_plugin_module(&lib) {
+                Ok(src) => load_synthesized(&lib, src, path, sources, out, trigger_span, errors),
+                Err(message) => errors.push(LoadError {
+                    message,
+                    span: trigger_span,
+                }),
+            }
+            stack.remove(&key);
+            visited.insert(key);
+            return;
+        }
+        Some(ModuleFile::Source(file)) => match std::fs::read_to_string(&file) {
+            Ok(src) => (file, src),
+            Err(e) => {
+                errors.push(LoadError {
+                    message: format!("cannot read module `{key}` (`{}`): {e}", file.display()),
+                    span: trigger_span,
+                });
                 stack.remove(&key);
                 visited.insert(key);
                 return;
             }
+        },
+        None => {
+            // Point at the expected location: a package-rooted path expects
+            // its file under the declared package's directory; anything else
+            // expects the project-root location, with a note when include
+            // paths were searched too.
+            let pkg_root = path.first().and_then(|s| search.packages.get(s.as_str()));
+            let mut expected = pkg_root.map(PathBuf::from).unwrap_or(root.to_path_buf());
+            for seg in path {
+                expected.push(seg);
+            }
+            expected.set_extension("pp");
+            let searched = if pkg_root.is_some() || search.includes.is_empty() {
+                String::new()
+            } else {
+                format!("; also searched {} include path(s)", search.includes.len())
+            };
             errors.push(LoadError {
-                message: format!("cannot find module `{key}` (expected `{}`)", file.display()),
+                message: format!(
+                    "cannot find module `{key}` (expected `{}`{searched})",
+                    expected.display()
+                ),
                 span: trigger_span,
             });
             stack.remove(&key);
@@ -428,6 +566,7 @@ pub fn load_module(
         }
     };
     let label = file.display().to_string();
+    let location = module_location(&file);
     let base = sources.add(Some(file), label, src.clone());
     let (ast, parse_errors) = prepoly_parser::parse_recovering(&src, base);
     if !parse_errors.is_empty() {
@@ -442,8 +581,9 @@ pub fn load_module(
         return;
     }
     let mut ast = ast;
+    inject_module_path(&mut ast, &location, Span::new(base, base));
     let dir = path[..path.len() - 1].to_vec();
-    for (target, _) in canonicalize_imports(&dir, root, &mut ast.imports, packages) {
+    for (target, _) in canonicalize_imports(&dir, root, &mut ast.imports, search) {
         load_module(
             &target,
             root,
@@ -453,7 +593,7 @@ pub fn load_module(
             out,
             trigger_span,
             errors,
-            packages,
+            search,
         );
     }
     stack.remove(&key);
@@ -480,11 +620,14 @@ fn load_synthesized(
     let label = format!("<plugin:{}>", lib.display());
     let base = sources.add(None, label.clone(), src.clone());
     match parse_with_base(&src, base) {
-        Ok(ast) => out.push(LoadedModule {
-            is_prelude: false,
-            path: path.to_vec(),
-            ast,
-        }),
+        Ok(mut ast) => {
+            inject_module_path(&mut ast, &label, Span::new(base, base));
+            out.push(LoadedModule {
+                is_prelude: false,
+                path: path.to_vec(),
+                ast,
+            })
+        }
         Err(e) => errors.push(LoadError {
             message: format!(
                 "internal: synthesized plugin module `{label}` failed to parse: {}",

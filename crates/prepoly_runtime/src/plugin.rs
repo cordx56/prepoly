@@ -112,6 +112,13 @@ mod real {
 
     /// The shared body: decode the strings and slots, call through the host.
     /// Also returns the declared return type and fallibility for shaping.
+    ///
+    /// The signature is re-parsed per call. It cannot be cached by the object's
+    /// address: generated code builds a fresh string object for the literal on
+    /// every evaluation (`pp_str_const` allocates), so an address is reused
+    /// after a free and would answer for a different signature. Keying by
+    /// content would cost a lock and a hash to save parsing a handful of
+    /// self-delimiting characters.
     unsafe fn run(
         path: *mut Header,
         name: *mut Header,
@@ -148,20 +155,23 @@ mod real {
     }
 
     /// A returned string, byte buffer, or array as a heap object. `ret` is the
-    /// declared type: an empty array carries no element type of its own, and
-    /// the element type fixes the buffer's element size.
+    /// declared type, and the returned value must be exactly of it: generated
+    /// code reads the result at the declared type's layout, so accepting a
+    /// string where `uint8[]` was typed (or the reverse) would reinterpret an
+    /// object's header fields. `Bytes` is its own `ValueType`, never an
+    /// `Array`, so no legitimate value satisfies two arms.
     unsafe fn heap_payload(v: Value, ret: &ValueType) -> *mut Header {
         match (v, ret) {
-            (Value::Str(s), _) => unsafe { pp_str_const(s.as_ptr(), s.len() as i64) },
-            (Value::Bytes(b), _) => unsafe {
+            (Value::Str(s), ValueType::Str) => unsafe { pp_str_const(s.as_ptr(), s.len() as i64) },
+            (Value::Bytes(b), ValueType::Bytes) => unsafe {
                 let arr = pp_arr_new(1, b.len() as i64);
                 let data = *((arr as *mut u8).offset(32) as *mut *mut u8);
                 std::ptr::copy_nonoverlapping(b.as_ptr(), data, b.len());
                 arr
             },
             (Value::Array(items), ValueType::Array(elem)) => unsafe { build_array(items, elem) },
-            (other, _) => pp_panic_str(&format!(
-                "plugin returned {other:?} where an object was typed"
+            (other, ret) => pp_panic_str(&format!(
+                "plugin returned {other:?} where {ret:?} was typed"
             )),
         }
     }

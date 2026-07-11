@@ -1,0 +1,31 @@
+// `output()` drains the piped streams while the child runs, so a child that
+// writes far more than a pipe buffer holds (about 64KiB) completes. A plain
+// `wait()` on the same child would block forever: nobody is reading the pipe.
+import process.{ Command, Stdio }
+import std.net.{ to_text }
+
+const big = Command.new("head")
+    .args(["-c", "100000", "/dev/zero"])
+    .stdout(Stdio.Pipe)
+    .stderr(Stdio.Pipe)
+    .spawn()!
+
+const captured = big.output()!
+println("code: {captured.code}")
+println("stdout: {len(captured.stdout)}")
+println("stderr: {len(captured.stderr)}")
+
+// An unpiped stream captures nothing, and stderr is captured on its own.
+const noisy = Command.new("sh")
+    .args(["-c", "echo out; echo err 1>&2"])
+    .stdout(Stdio.Pipe)
+    .stderr(Stdio.Pipe)
+    .spawn()!
+
+const both = noisy.output()!
+print(to_text(both.stdout)!)
+print(to_text(both.stderr)!)
+
+// A second take yields nothing: the buffers moved to the caller.
+const again = noisy.output()!
+println("re-taken: {len(again.stdout)} {len(again.stderr)}, code {again.code}")

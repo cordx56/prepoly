@@ -1,6 +1,5 @@
 mod manifest;
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -137,7 +136,11 @@ fn link_or_copy_agents(claude_path: &Path) -> std::io::Result<()> {
 }
 
 /// Read `package.toml`, fetch dependencies, and return the `PREPOLY_PACKAGES`
-/// env-var value. Shared by `check`/`run`/`lsp`.
+/// env-var value (`name=/dir:...`): each declared dependency name mapped to
+/// its directory. The name-keyed form scopes resolution to exactly the
+/// declared dependencies -- unlike the open `PREPOLY_INCLUDE` list, which the
+/// compiler also honors and which ppm leaves untouched for the child to
+/// inherit. Shared by `check`/`run`/`lsp`.
 fn resolve_packages() -> Result<String, ExitCode> {
     let manifest = Manifest::load(Path::new("package.toml")).map_err(|e| {
         eprintln!("error: {e}");
@@ -149,8 +152,8 @@ fn resolve_packages() -> Result<String, ExitCode> {
         .dependencies
         .values()
         .any(|d| matches!(d, Dependency::Git { .. }));
-    let packages_dir = if needs_cache {
-        Some(packages_root().map_err(|e| {
+    let cache_dir = if needs_cache {
+        Some(cache_root().map_err(|e| {
             eprintln!("error: {e}");
             ExitCode::FAILURE
         })?)
@@ -158,30 +161,47 @@ fn resolve_packages() -> Result<String, ExitCode> {
         None
     };
 
-    let mut pkg_entries: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut entries: Vec<String> = Vec::new();
     for (name, dep) in &manifest.dependencies {
         let dest = match dep {
             Dependency::Git { git, hash } => {
-                let cache = packages_dir.as_ref().expect("created for git dependencies");
+                let cache = cache_dir.as_ref().expect("created for git dependencies");
                 fetch_git(name, git, hash, cache)?
             }
             Dependency::Path { path } => resolve_path_dep(name, path)?,
         };
-        pkg_entries.insert(name.clone(), dest);
+        // A misnamed entry only fails later, at the first import of the
+        // declared name; warning here points at the manifest instead.
+        if !serves_module(&dest, name) {
+            eprintln!(
+                "warning: dependency `{name}`: `{}` contains no `{name}.pp`, `{name}/`, or \
+                 `{name}` plugin",
+                dest.display()
+            );
+        }
+        entries.push(format!("{name}={}", dest.display()));
     }
+    Ok(entries.join(":"))
+}
 
-    Ok(pkg_entries
-        .iter()
-        .map(|(name, path)| format!("{name}={}", path.display()))
-        .collect::<Vec<_>>()
-        .join(":"))
+/// Whether `dir` serves a module named `name`: a `<name>.pp` root file, a
+/// `<name>/` module directory, or a `<name>` plugin library (plain or
+/// `lib`-prefixed cdylib name).
+fn serves_module(dir: &Path, name: &str) -> bool {
+    let dll = std::env::consts::DLL_EXTENSION;
+    dir.join(format!("{name}.pp")).is_file()
+        || dir.join(name).is_dir()
+        || dir.join(format!("{name}.{dll}")).is_file()
+        || dir
+            .join(format!("{}{name}.{dll}", std::env::consts::DLL_PREFIX))
+            .is_file()
 }
 
 /// Clone-and-checkout a git dependency into the shared cache (a no-op when the
 /// `name-git-hash` directory already exists) and return its directory.
-fn fetch_git(name: &str, git: &str, hash: &str, packages_dir: &Path) -> Result<PathBuf, ExitCode> {
+fn fetch_git(name: &str, git: &str, hash: &str, cache_dir: &Path) -> Result<PathBuf, ExitCode> {
     let dir_name = format!("{name}-git-{hash}");
-    let dest = packages_dir.join(&dir_name);
+    let dest = cache_dir.join(&dir_name);
     if dest.exists() {
         return Ok(dest);
     }
@@ -244,7 +264,8 @@ fn resolve_path_dep(name: &str, path: &str) -> Result<PathBuf, ExitCode> {
 
 /// Read `package.toml` in the current directory, fetch dependencies, set
 /// `PREPOLY_PACKAGES`, and invoke `prepoly check` or `prepoly run` on the
-/// root file.
+/// root file. Any `PREPOLY_INCLUDE` in the environment is inherited by the
+/// child untouched, so the two mechanisms compose.
 fn cmd_drive(mode: &str) -> ExitCode {
     let manifest = match Manifest::load(Path::new("package.toml")) {
         Ok(m) => m,
@@ -305,7 +326,7 @@ fn child_exit(status: std::io::Result<std::process::ExitStatus>, tool: &str) -> 
 /// Start `prepoly-lsp`, with `PREPOLY_PACKAGES` set when the current
 /// directory is a ppm project. Without a `package.toml` (the editor opened a
 /// plain directory of .pp files) the server still starts, just without
-/// package resolution: editors run this command at startup, so it must not
+/// dependency resolution: editors run this command at startup, so it must not
 /// die where `prepoly-lsp` itself would come up.
 fn cmd_lsp() -> ExitCode {
     let env_val = if Path::new("package.toml").exists() {
@@ -325,8 +346,9 @@ fn cmd_lsp() -> ExitCode {
     child_exit(cmd.status(), "prepoly-lsp")
 }
 
-/// `$HOME/.prepoly/packages/`, created on demand.
-fn packages_root() -> Result<PathBuf, String> {
+/// `$HOME/.prepoly/packages/` (the git-dependency clone cache), created on
+/// demand.
+fn cache_root() -> Result<PathBuf, String> {
     let home = std::env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
     let dir = PathBuf::from(home).join(".prepoly").join("packages");
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create `{}`: {e}", dir.display()))?;

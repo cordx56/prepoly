@@ -10,8 +10,8 @@ license.workspace = true
 authors.workspace = true
 
 [lib]
-# The library file name is the module name Prepoly imports
-# (`import process.process.{ .. }`).
+# The cdylib is installed as `libraries/libprocess.so`, and the wrapper
+# module imports it by that file name (`import libprocess.{ .. }`).
 name = "process"
 crate-type = ["cdylib"]
 path = "src/lib.rs"

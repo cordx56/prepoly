@@ -43,7 +43,7 @@ pub use boundary::{
     boundary_record_type, boundary_record_type_by_id, boundary_record_type_by_name,
     boundary_record_type_from_fields, parse_structural_descriptor,
 };
-pub use fold::{cond_static_truthiness, reachable_blocks};
+pub use fold::{cond_static_truthiness, locals_only_in_dead_blocks, reachable_blocks};
 pub use rules::binary_operand_type;
 pub(crate) use rules::unwrap_nullable;
 pub use scan::operand_type_of;
@@ -700,11 +700,20 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         // Fixpoint: resolve local and return types until stable. Calls are
         // instantiated as they become resolvable; self-recursion reads the
         // provisional return type computed so far.
+        // A statement's type error is held against its block rather than raised:
+        // a block a statically-known `if` makes unreachable never runs, so an arm
+        // that cannot type for this instantiation (`s.split(..)` where `s` is an
+        // array) must not reject the program. Only the last fixpoint round's
+        // errors stand -- earlier rounds fail merely because types are still
+        // filling in -- and only those in blocks that survive `reachable_blocks`
+        // are reported, below.
+        let mut block_errors: Vec<Option<String>> = vec![None; body.blocks.len()];
         loop {
             let mut changed = false;
-            for block in &body.blocks {
+            block_errors.iter_mut().for_each(|e| *e = None);
+            for (i, block) in body.blocks.iter().enumerate() {
                 for stmt in &block.stmts {
-                    self.type_stmt(
+                    if let Err(e) = self.type_stmt(
                         stmt,
                         body,
                         &sym,
@@ -716,7 +725,10 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                         &mut local_types,
                         &ret,
                         &mut changed,
-                    )?;
+                    ) && block_errors[i].is_none()
+                    {
+                        block_errors[i] = Some(e);
+                    }
                 }
                 // A non-fallible callable's return type is the join of its return
                 // operands'; a fallible one's is `Result<ok, err>`, inferred below.
@@ -751,11 +763,33 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             }
         }
 
+        // Which blocks actually run, judged against the types resolved so far. An
+        // untyped local stands in as `Never`, whose truthiness is unknown, so a
+        // block is called dead only on a condition that really did resolve.
+        let probe: Vec<Type> = local_types
+            .iter()
+            .map(|t| t.clone().unwrap_or(Type::Never))
+            .collect();
+        let reachable = reachable_blocks(body, &probe, ret.as_ref().unwrap_or(&Type::Void));
+        if let Some(e) = reachable
+            .iter()
+            .zip(&block_errors)
+            .find_map(|(live, e)| live.then_some(e.as_ref()).flatten())
+        {
+            return Err(e.clone());
+        }
+
+        let dead_locals = locals_only_in_dead_blocks(body, &reachable);
         let local_types = local_types
             .into_iter()
             .enumerate()
-            .map(|(i, t)| {
-                t.ok_or_else(|| {
+            .map(|(i, t)| match t {
+                Some(t) => Ok(t),
+                // A local no reachable block writes has no runtime slot, so its
+                // type never matters: an unreachable arm's temporaries stay
+                // untyped once that arm's statements were allowed to fail.
+                None if dead_locals[i] => Ok(Type::Void),
+                None => Err({
                     // Name the binding whose type stayed unknown; a bare local
                     // index means nothing to the programmer.
                     match binding_name_of(body, LocalId(i as u32)) {
@@ -764,7 +798,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                             "cannot infer the type of an expression temporary (local _{i}) in `{sym}`"
                         ),
                     }
-                })
+                }),
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -815,7 +849,12 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                 ));
             }
         }
-        self.validate(body, &sym, &local_types)?;
+        self.validate(
+            body,
+            &sym,
+            &local_types,
+            &reachable_blocks(body, &local_types, &ret),
+        )?;
 
         // Validate what mutual recursion assumed about this instance while it
         // was in progress: a mismatch (e.g. a fallible body whose error payload
@@ -971,7 +1010,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         body: &MirBody,
         cur_sym: &str,
         module: &[String],
-        indirect_args: &HashMap<LocalId, Vec<Operand>>,
+        indirect_args: &HashMap<LocalId, Vec<Vec<Operand>>>,
         closure_passes: &HashMap<LocalId, (String, Vec<Operand>, usize)>,
         record_field_closures: &HashMap<LocalId, (LocalId, String, String)>,
         array_pushes: &HashMap<LocalId, Operand>,
@@ -1116,6 +1155,11 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
     ) -> Result<Option<Type>, String> {
         match rv {
             Rvalue::Use(op) => self.operand_type(op, local_types),
+            // `typeof(x)`: always a string. The name itself is derived from the
+            // operand's concrete type by the back ends once the instance is
+            // fully typed; nothing here depends on the operand being resolved
+            // yet, so the result does not wait on it.
+            Rvalue::TypeName(_) => Ok(Some(Type::Str)),
             Rvalue::Bin(op, a, b) => {
                 if is_comparison(*op) || matches!(op, BinOp::And | BinOp::Or) {
                     Ok(Some(Type::Bool))
@@ -1281,11 +1325,6 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                     Type::Str,
                 ))),
                 "_tls_close" => Ok(Some(result_type(Type::Void, Type::Str))),
-                // Native-plugin dispatch (`_plugin_[f]call_<t>`): the return
-                // is encoded in the name's suffix; see the shared decoder.
-                n if prepoly_hir::plugin_builtin_return(n).is_some() => {
-                    Ok(prepoly_hir::plugin_builtin_return(n))
-                }
                 // `to_string` only has a typed conversion for scalars/strings;
                 // other arguments fall back so formatting stays correct.
                 "to_string" => match args.first() {
@@ -1334,9 +1373,16 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                     },
                     None => Err("`_with_all` expects (closure, cowns...)".into()),
                 },
-                other => Err(format!(
-                    "builtin `{other}` is unsupported on the typed backend"
-                )),
+                // Native-plugin dispatch (`_plugin_[f]call_<t>`) carries its
+                // return in the name's suffix; see the shared decoder. Read in
+                // the fallthrough so the name decodes once, and a name that is
+                // neither still reports as unsupported.
+                other => match prepoly_hir::plugin_builtin_return(other) {
+                    Some(ret) => Ok(Some(ret)),
+                    None => Err(format!(
+                        "builtin `{other}` is unsupported on the typed backend"
+                    )),
+                },
             },
             // Indirect (closure) call: the callee local's `Fun` type gives the
             // result. The closure instance was created when the local was typed.
@@ -1361,10 +1407,18 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                     {
                         Some(Type::Record(n)) => self.record_field_type(n, field),
                         Some(Type::Sum(n)) => self.sum_field_type(n, field),
-                        Some(other) => Err(format!(
-                            "field access `.{field}` on non-aggregate `{}`",
-                            other.display()
-                        )),
+                        // A `string`/array receiver has no fields, so the access is
+                        // the compile-time member presence value the checker typed:
+                        // the method's own name, or null when the class has no such
+                        // member (see `Program::primitive_member_presence`).
+                        Some(other) => match self.program.primitive_member_presence(other, field) {
+                            Some(true) => Ok(Some(Type::Str)),
+                            Some(false) => Ok(Some(Type::null())),
+                            None => Err(format!(
+                                "field access `.{field}` on non-aggregate `{}`",
+                                other.display()
+                            )),
+                        },
                         None => Ok(None),
                     }
                 }
@@ -1986,15 +2040,23 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
     }
 
     /// Check operator/type constraints over a fully-typed body (the static
-    /// checking half of monomorphization).
-    fn validate(&self, body: &MirBody, sym: &str, local_types: &[Type]) -> Result<(), String> {
+    /// checking half of monomorphization). Only blocks this instance can reach
+    /// are checked: an arm a statically-known `if` folds away is not emitted, and
+    /// its operators may well be ill-typed for *this* instantiation.
+    fn validate(
+        &self,
+        body: &MirBody,
+        sym: &str,
+        local_types: &[Type],
+        reachable: &[bool],
+    ) -> Result<(), String> {
         let ty = |op: &Operand| -> Type {
             match op {
                 Operand::Local(id) => local_types[id.index()].clone(),
                 Operand::Const(lit) => const_type(lit).unwrap_or(Type::Void),
             }
         };
-        for block in &body.blocks {
+        for (block, _) in body.blocks.iter().zip(reachable).filter(|(_, r)| **r) {
             for stmt in &block.stmts {
                 let (MirStmt::Assign(_, Rvalue::Bin(op, a, b))
                 | MirStmt::Eval(Rvalue::Bin(op, a, b))) = stmt

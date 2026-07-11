@@ -235,11 +235,13 @@ import process.{ Command, Stdio }
 Spawn and control child processes. Unlike the modules above this is not part
 of `std`: its native half is a Rust plugin (a `cdylib` built against the
 `prepoly_plugin` crate) rather than a runtime builtin, so it ships as a
-library under `libraries/`. Build the plugin once with `libraries/build.sh`
-and point `PREPOLY_PACKAGES` at that directory:
+library under `libraries/`. A distributed toolchain finds `libraries/`
+beside its binary automatically; when running from a repo checkout, build
+the plugin once with `libraries/build.sh` and point `PREPOLY_INCLUDE` at
+that directory (one entry serves every library that lives there):
 
 ```
-PREPOLY_PACKAGES=process=/path/to/prepoly/libraries
+PREPOLY_INCLUDE=/path/to/prepoly/libraries
 ```
 
 `Command` is a builder — each method mutates the command and returns it, so
@@ -257,25 +259,107 @@ and `Null` discards it.
 | `cmd.spawn()`                  | `() -> Child!`                | start the process                            |
 | `child.stdin/stdout/stderr()`  | `() -> File!`                 | a piped stream (requires `Stdio.Pipe`)       |
 | `child.wait()`                 | `() -> int32!`                | block for exit; returns the exit code        |
+| `child.output()`               | `() -> Output!`               | drain the piped streams, then wait           |
 
 `Stdio` is `| Inherit | Pipe | Null`. Piped streams are `File`s, so the byte
-helpers `to_bytes`/`to_text` from `std.net` convert their contents.
+helpers `to_bytes`/`to_text` from `std.net` convert their contents. The
+accessors may be called repeatedly: each hands back the same `File`.
+
+`wait` blocks for exit and nothing else, so a child writing more to a pipe
+than the OS buffers (about 64KiB on Linux) blocks on the full pipe while
+`wait` blocks on the child. Read the piped streams before waiting, or use
+`output`, which reads them while the child runs and cannot deadlock:
 
 ```prepoly norun
 import process.{ Command, Stdio }
 import std.net.{ to_text }
 
 let child = Command.new("git")
-    .args(["init"])
+    .args(["log", "--oneline"])
     .stdout(Stdio.Pipe)
     .spawn()!
-print(to_text(child.stdout()!.read(4096)!)!)
-println("exit: {child.wait()!}")
+
+// `Output` is `{ code: int32, stdout: uint8[], stderr: uint8[] }`; a stream
+// that was not piped (or was taken through its accessor) comes back empty.
+let result = child.output()!
+print(to_text(result.stdout)!)
+println("exit: {result.code}")
 ```
+
+Waiting is idempotent: a second `wait` returns the same code, and a piped
+stream stays readable afterwards, since the pipe still holds what the child
+wrote before it exited.
 
 Spawning and waiting work on either back end, but a piped stream is a `File`,
 and file I/O requires the native runtime — so the REPL interpreter refuses the
 stream accessors, like the rest of I/O.
+
+## `path` (a library, not `std`)
+
+```prepoly norun
+import path.{ Path }
+```
+
+Filesystem paths. Like `process` this is a library, not `std`: asking the
+operating system what exists needs native code, so its other half is a plugin
+built by `libraries/build.sh`.
+
+```
+PREPOLY_INCLUDE=/path/to/prepoly/libraries
+```
+
+A `Path` is a sequence of components, absolute exactly when its first component
+is the root `/`. Empty and repeated separators are dropped when a path is
+parsed, so `/usr//lib/` and `/usr/lib` are the same path. Every method that
+answers with a path builds a new one, so a `Path` may be shared freely.
+
+| Method / function            | Signature                  | Behavior                                        |
+| ---------------------------- | -------------------------- | ----------------------------------------------- |
+| `Path.parse(s)`              | `(string) -> Path`         | absolute when `s` starts with `/`               |
+| `Path.current_dir()`         | `() -> Path!`              | the working directory                           |
+| `Path.home()` / `temp_dir()` | `() -> Path!`              | the home / temporary directory                  |
+| `p.to_string()`              | `() -> string`             | `.` for the empty path                          |
+| `p.components()`             | `() -> string[]`           | a copy, the root included as `/`                |
+| `p.depth()`                  | `() -> int64`              | component count (`len` is a reserved builtin)   |
+| `p.is_absolute()` / `is_root()` | `() -> bool`            | shape of the path, not what is on disk          |
+| `p.parent()` / `basename()`  | `() -> Path`               | the root is its own parent                      |
+| `p.join(s)`                  | `(string \| string[] \| Path) -> Path` | absolute `s` replaces `p`           |
+| `p.stem()` / `extension()`   | `() -> string` / `string?` | `.gitignore` is all stem                        |
+| `p.with_extension(ext)`      | `(string) -> Path`         | empty `ext` removes it                          |
+| `p.normalize()`              | `() -> Path`               | drops `.`, resolves `..`, no filesystem access  |
+| `p.to_absolute()`            | `() -> Path!`              | against the working directory; links unresolved |
+| `p.to_relative(base)`        | `(Path) -> Path!`          | so that `base.join(result)` is `p` again        |
+| `p.starts_with(base)` / `equals(other)` | `(Path) -> bool` | component-wise                                  |
+| `p.exists()` / `is_dir()` / `is_file()` | `() -> bool`    | false for a path that is not there              |
+| `p.is_sym_link()`            | `() -> bool`               | about the link itself, not its target           |
+| `p.canonicalize()`           | `() -> Path!`              | resolves links; the path must exist             |
+| `p.read_link()`              | `() -> Path!`              | where a symbolic link points                    |
+| `p.entries()`                | `() -> Path[]!`            | a directory's entries                           |
+| `p.file_size()`              | `() -> int64!`             | size in bytes                                   |
+
+`join` takes a string, an array of components, or another `Path` through one
+parameter. It is not overloading: the argument's members decide which arm of
+the body survives compilation, as described under
+[member presence](/references/reflection/#member-presence-xm-without-a-call).
+
+A file's own location is not a method here. Every module is loaded with a
+private `_PATH` constant holding its absolute source path, so the path of the
+file you are writing is `Path.parse(_PATH)` — and an imported module reads its
+own, not yours.
+
+```prepoly norun
+import path.{ Path }
+
+const here = Path.parse(_PATH).parent()
+for entry in here.join("assets").entries()! {
+    // `extension` is a `string?`: a name without one has no extension to test.
+    if let ext = entry.extension() {
+        if ext == "png" {
+            println(entry.basename().to_string())
+        }
+    }
+}
+```
 
 ## `std.collections`
 

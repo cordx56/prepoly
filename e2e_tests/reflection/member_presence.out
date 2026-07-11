@@ -1,0 +1,7 @@
+record: usr/lib
+string: a/b/c
+array: x/y
+push
+true
+split
+true

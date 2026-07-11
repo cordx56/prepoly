@@ -1,0 +1,20 @@
+# The path library's native half: a prepoly plugin (cdylib) loaded by
+# `libraries/path.pp`. Build and install it with `libraries/build.sh`, which
+# places the cdylib next to this manifest as `path.<dll suffix>`.
+[package]
+name = "prepoly_lib_path"
+description = "prepoly plugin: filesystem queries behind the Path type"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+# The cdylib is installed as `libraries/libpath.so`, and the wrapper
+# module imports it by that file name (`import libpath.{ .. }`).
+name = "path"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+prepoly_plugin = { workspace = true }

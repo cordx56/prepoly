@@ -124,11 +124,8 @@ pub fn analyze(program: &Program) -> Analysis {
 /// (e.g. `len(s)`) or, in the case of `error`, become dead code because
 /// `error(x)` is always desugared to `Result.Err { error: x }`.
 fn check_reserved_names(program: &Program) -> Vec<TypeError> {
-    const RESERVED: &[&str] = &[
-        "len", "open", "spawn", "with", "sync", "error", "fields", "typeof",
-    ];
     let mut errors = Vec::new();
-    for name in RESERVED {
+    for name in prepoly_hir::RESERVED_FUNCTION_NAMES {
         if let Some(info) = program.functions.get(*name) {
             errors.push(TypeError {
                 message: format!("`{name}` is a builtin and cannot be redefined"),
@@ -1721,6 +1718,46 @@ mod tests {
             e.iter().any(|m| m.contains("`int32` has no field `foo`")),
             "{e:?}"
         );
+    }
+
+    #[test]
+    fn absent_member_on_a_string_or_array_prunes_the_arm() {
+        // A scalar has no members at all, so `x.foo` stays an error above. A
+        // string/array carries methods, so the access is a presence test: absent
+        // reads as the always-null `never?`, the `if` folds statically false, and
+        // the arm that could not type for this receiver is never checked.
+        let e = errs(concat!(
+            "fun f(x) -> int64 {\n",
+            "    if x.no_such_member {\n",
+            "        return x.no_such_member(1, 2)\n",
+            "    }\n",
+            "    return 0\n",
+            "}\n",
+            "fun main() {\n",
+            "    let a = f(\"s\")\n",
+            "    let b = f([1, 2])\n",
+            "}\n",
+        ));
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn a_present_primitive_member_is_a_truthy_name_string() {
+        // `push` is a growable-array builtin, so `xs.push` (uncalled) decays to
+        // its own name -- a non-null string, hence a statically true condition
+        // whose else-arm is pruned rather than checked.
+        let e = errs(concat!(
+            "fun f(xs) -> string {\n",
+            "    if xs.push {\n",
+            "        return xs.push\n",
+            "    }\n",
+            "    return xs.anything_at_all(0)\n",
+            "}\n",
+            "fun main() {\n",
+            "    let a = f([1, 2])\n",
+            "}\n",
+        ));
+        assert!(e.is_empty(), "{e:?}");
     }
 
     #[test]
@@ -3501,5 +3538,77 @@ mod tests {
     fn free_len_on_string_is_accepted() {
         let e = errs("fun main() {\n    let n: int64 = len(\"abc\")\n}\n");
         assert!(e.is_empty(), "{e:?}");
+    }
+
+    /// `pick`'s inferred return is re-wrapped as `?` because the body returns
+    /// `null`, over a parameter variable the closure leaves open. Pinning that
+    /// variable to `string?` must not build `string??` -- and a nullable
+    /// argument reaching an open parameter pins it rather than demanding a null
+    /// check, exactly as it does for an unannotated free-function parameter.
+    #[test]
+    fn nullable_inferred_return_over_a_nullable_argument_stays_single() {
+        let e = errs(
+            "fun pick(x) {\n    if 1 == 2 {\n        return null\n    }\n    return x\n}\n\
+             fun main() {\n    let a: string? = \"hi\"\n    let f = (s) -> pick(s)\n    \
+             let r: string? = f(a)\n}\n",
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    /// The plugin dispatch builtins are nameable from source, and the runtime
+    /// reads each payload slot at the signature's type without re-checking it.
+    /// The checker therefore has to type the whole call: string leading
+    /// operands, a literal signature it can read, and a payload matching it.
+    #[test]
+    fn plugin_call_builtin_checks_its_operands_against_the_signature() {
+        let plugin_call = |args: &str| {
+            errs(&format!(
+                "fun main() {{\n    let v = _plugin_call_i({args})\n}}\n"
+            ))
+        };
+
+        // A well-formed direct call still type-checks (the shape the loader's
+        // synthesized wrappers emit).
+        assert!(
+            plugin_call("\"lib.so\", \"add\", \"ii:i\", 1, 2").is_empty(),
+            "a correct call must be accepted"
+        );
+
+        // A non-string leading operand.
+        let e = plugin_call("1, 2, 3");
+        assert!(
+            e.iter().any(|m| m.contains("where `string` is required")),
+            "{e:?}"
+        );
+
+        // The signature must be readable at check time.
+        let e = errs(
+            "fun main() {\n    let s = \"ii:i\"\n    let v = _plugin_call_i(\"l\", \"f\", s, 1, 2)\n}\n",
+        );
+        assert!(
+            e.iter()
+                .any(|m| m.contains("signature must be a string literal")),
+            "{e:?}"
+        );
+
+        let e = plugin_call("\"l\", \"f\", \"zz\", 1");
+        assert!(
+            e.iter()
+                .any(|m| m.contains("malformed plugin call signature")),
+            "{e:?}"
+        );
+
+        // Payload arity and payload types are both fixed by the signature.
+        let e = plugin_call("\"l\", \"f\", \"ii:i\", 1");
+        assert!(
+            e.iter()
+                .any(|m| m.contains("passes 1 argument(s), signature `ii:i` has 2")),
+            "{e:?}"
+        );
+        let e = plugin_call("\"l\", \"f\", \"si:i\", 42, 1");
+        assert!(
+            e.iter().any(|m| m.contains("where `string` is required")),
+            "{e:?}"
+        );
     }
 }

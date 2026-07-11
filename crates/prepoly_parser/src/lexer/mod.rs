@@ -6,7 +6,7 @@ mod scan;
 mod token;
 
 pub use scan::{DocComment, LexError, lex, lex_with_docs};
-pub use token::{Span, StrPart, Token, TokenKind, keyword_or_ident};
+pub use token::{Span, StrPart, Token, TokenKind, is_keyword, keyword_or_ident};
 
 /// Compute a 1-based (line, column) for a byte offset in `src`, for error
 /// reporting. Columns count Unicode scalar values within the line.

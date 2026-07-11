@@ -14,7 +14,7 @@ use std::rc::Rc;
 use prepoly_hir::{
     CallableSignature, Constness, FloatKind, FunInfo, IntKind, NominalType, ParamInfo, Program,
     SchemeMethod, Substitution, Type, TypeInfo, TypeKind, TypeScheme, TypedProgram,
-    int_literal_kind,
+    int_literal_kind, peel_modes,
 };
 use prepoly_parser::Span;
 use prepoly_parser::ast::*;
@@ -353,6 +353,12 @@ struct Checker<'a> {
     /// Resolved binding types of `typeof`-bearing local annotations, keyed by
     /// the annotation span (see [`Inference::typeof_types`]).
     typeof_types: HashMap<Span, Type>,
+    /// `typeof`-bearing annotation spans whose resolved type DIFFERED between
+    /// two checks -- a generic body's instantiations disagreeing. One MIR body
+    /// is shared by every instantiation, so no single slot type is right;
+    /// the entry is dropped (and stays dropped) and the binding's slot is left
+    /// to per-instance inference from its assignments.
+    typeof_poisoned: HashSet<Span>,
     /// Bindings narrowed non-null in the current callable, with their original
     /// nullable types. A call can re-null a narrowed GLOBAL (any callee may
     /// write it) or a narrowed local ASSIGNED INSIDE A CLOSURE of this body (a
@@ -381,11 +387,26 @@ struct Checker<'a> {
     /// the null case propagates as `Result.Null`. MIR lowering emits the
     /// presence-test shape for exactly these spans (see [`Inference::null_props`]).
     null_props: HashSet<Span>,
+    /// The propagation kind each checked `expr!` span resolved to. The
+    /// `null_props` channel is a span SET while one MIR body is shared across a
+    /// generic's instantiations, so a `!` whose operand is a nullable in one
+    /// instantiation and a `Result` in another has no single correct lowering;
+    /// the kinds are tracked here and a disagreement is a checker error
+    /// (`None` marks a span already reported, so re-elaborations stay quiet).
+    prop_kinds: HashMap<Span, Option<PropKind>>,
     /// Whether the body currently being checked is the entry `main` (the root
     /// module's bare `main` symbol). Its `!` propagations abort at runtime
     /// instead of returning a `Result`, so the return-context requirement is
     /// waived for its own body (depth 1 -- closures inside it still propagate).
     in_entry_main: bool,
+}
+
+/// What a checked `expr!` propagates on failure: the null of a nullable
+/// operand, or the `Err` of a `Result` operand. See `Checker::prop_kinds`.
+#[derive(Clone, Copy, PartialEq)]
+enum PropKind {
+    Null,
+    Err,
 }
 
 impl<'a> Checker<'a> {
@@ -415,6 +436,8 @@ impl<'a> Checker<'a> {
             call_expected: None,
             keyed_calls: HashMap::new(),
             typeof_types: HashMap::new(),
+            typeof_poisoned: HashSet::new(),
+            prop_kinds: HashMap::new(),
             narrowed_bindings: Vec::new(),
             closure_write_targets: HashSet::new(),
             rows: prepoly_typesys::RowInfo::analyze(program),
@@ -799,9 +822,28 @@ impl<'a> Checker<'a> {
         // A `typeof`-bearing annotation is not recoverable by MIR's scope-free
         // resolver, so record the resolved type for the back end to seed the
         // binding's slot (needed when the initializer -- e.g. `null` -- does not
-        // itself carry the type).
+        // itself carry the type). The channel is keyed by span while one MIR
+        // body is shared across a generic's instantiations, so it is kept only
+        // while every fully-known observation agrees: a disagreement poisons
+        // the span for good and the slot falls back to per-instance inference
+        // from its assignments (correct whenever the initializer carries the
+        // type). A not-yet-concrete observation -- the template elaboration of
+        // a generic, before any instantiation -- is no information, neither
+        // recorded nor a conflict.
         if contains_typeof(te) {
-            self.typeof_types.insert(te.span(), self.resolve(&resolved));
+            let span = te.span();
+            let concrete = self.resolve(&resolved);
+            if is_concrete_type(&concrete) && !self.typeof_poisoned.contains(&span) {
+                match self.typeof_types.get(&span) {
+                    Some(prev) if peel_modes(prev) != peel_modes(&concrete) => {
+                        self.typeof_types.remove(&span);
+                        self.typeof_poisoned.insert(span);
+                    }
+                    _ => {
+                        self.typeof_types.insert(span, concrete);
+                    }
+                }
+            }
         }
         Ok(resolved)
     }

@@ -156,3 +156,10 @@ pub fn keyword_or_ident(s: &str) -> TokenKind {
         _ => TokenKind::Ident(s.to_string()),
     }
 }
+
+/// Whether `s` lexes as a keyword rather than an identifier, so it cannot name
+/// a binding, parameter, or function. Callers that synthesize source (the
+/// plugin-module loader) consult this instead of keeping their own list.
+pub fn is_keyword(s: &str) -> bool {
+    !matches!(keyword_or_ident(s), TokenKind::Ident(_))
+}

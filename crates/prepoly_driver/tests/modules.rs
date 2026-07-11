@@ -975,6 +975,232 @@ fun main() {
     );
 }
 
+// ===== PREPOLY_INCLUDE / PREPOLY_PACKAGES resolution =====
+
+/// Create a bare file tree (no `main.pp` convention) under the test binary's
+/// temp dir and return its root, for use as a `PREPOLY_INCLUDE` entry or a
+/// `PREPOLY_PACKAGES` directory.
+fn setup_tree(case: &str, files: &[(&str, &str)]) -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(case);
+    let _ = fs::remove_dir_all(&root);
+    for (rel, src) in files {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, src).unwrap();
+    }
+    root
+}
+
+/// Run `prepoly [check] <main>` with the given environment variables set and
+/// return (success, combined output).
+fn with_env(main: &PathBuf, envs: &[(&str, &str)], mode: &str) -> (bool, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_prepoly"));
+    if mode == "check" {
+        cmd.arg("check");
+    }
+    cmd.arg(main);
+    for (key, val) in envs {
+        cmd.env(key, val);
+    }
+    let out = cmd.output().expect("spawn prepoly");
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), combined)
+}
+
+/// Run `prepoly [check] <main>` with `PREPOLY_INCLUDE` set to `include`.
+fn with_include(main: &PathBuf, include: &str, mode: &str) -> (bool, String) {
+    with_env(main, &[("PREPOLY_INCLUDE", include)], mode)
+}
+
+#[test]
+fn include_module_resolves_braced_and_qualified() {
+    // A module under an include path imports exactly like a local file: with
+    // a brace list and as a bare module import used qualified.
+    let inc = setup_tree(
+        "inc_basic_lib",
+        &[("mylib.pp", "fun seven() -> int32 { return 7 }\n")],
+    );
+    let main = setup(
+        "inc_basic",
+        &[(
+            "main.pp",
+            "import mylib.{ seven }\nfun main() { println(seven()) }\n",
+        )],
+    );
+    let (ok, out) = with_include(&main, &inc.display().to_string(), "check");
+    assert!(ok, "expected success, got: {out}");
+    let main = setup(
+        "inc_basic_qualified",
+        &[(
+            "main.pp",
+            "import mylib\nfun main() { println(mylib.seven()) }\n",
+        )],
+    );
+    let (ok, out) = with_include(&main, &inc.display().to_string(), "check");
+    assert!(ok, "expected success, got: {out}");
+}
+
+#[test]
+fn include_submodule_and_sibling_imports_resolve() {
+    // A library under an include path uses the same layout as a local tree:
+    // the root file imports its own submodule, and submodules import their
+    // siblings relative to their own directory.
+    let inc = setup_tree(
+        "inc_lib_tree_lib",
+        &[
+            (
+                "mylib.pp",
+                "import mylib.a.{ a_val }\nfun api() -> int32 { return a_val() }\n",
+            ),
+            (
+                "mylib/a.pp",
+                "import b.{ b_val }\nfun a_val() -> int32 { return b_val() }\n",
+            ),
+            ("mylib/b.pp", "fun b_val() -> int32 { return 41 }\n"),
+        ],
+    );
+    let main = setup(
+        "inc_lib_tree",
+        &[(
+            "main.pp",
+            "import mylib.{ api }\nimport mylib.b.{ b_val }\nfun main() { println(api() + 1) println(b_val()) }\n",
+        )],
+    );
+    let (ok, out) = with_include(&main, &inc.display().to_string(), "");
+    assert!(ok, "expected success, got: {out}");
+    assert_eq!(out.trim(), "42\n41", "{out}");
+}
+
+#[test]
+fn project_file_shadows_include_module() {
+    // The project root is searched before the include paths, so a local file
+    // with the same module path wins over the include one.
+    let inc = setup_tree(
+        "inc_shadow_lib",
+        &[("dup.pp", "fun which() -> string { return \"include\" }\n")],
+    );
+    let main = setup(
+        "inc_shadow",
+        &[
+            ("dup.pp", "fun which() -> string { return \"project\" }\n"),
+            (
+                "main.pp",
+                "import dup.{ which }\nfun main() { println(which()) }\n",
+            ),
+        ],
+    );
+    let (ok, out) = with_include(&main, &inc.display().to_string(), "");
+    assert!(ok, "expected success, got: {out}");
+    assert_eq!(out.trim(), "project", "{out}");
+}
+
+#[test]
+fn earlier_include_entry_wins() {
+    // Include paths are searched in list order; the first entry serving the
+    // path shadows later ones.
+    let first = setup_tree(
+        "inc_order_first",
+        &[("pick.pp", "fun which() -> string { return \"first\" }\n")],
+    );
+    let second = setup_tree(
+        "inc_order_second",
+        &[("pick.pp", "fun which() -> string { return \"second\" }\n")],
+    );
+    let main = setup(
+        "inc_order",
+        &[(
+            "main.pp",
+            "import pick.{ which }\nfun main() { println(which()) }\n",
+        )],
+    );
+    let joined = format!("{}:{}", first.display(), second.display());
+    let (ok, out) = with_include(&main, &joined, "");
+    assert!(ok, "expected success, got: {out}");
+    assert_eq!(out.trim(), "first", "{out}");
+    let joined = format!("{}:{}", second.display(), first.display());
+    let (ok, out) = with_include(&main, &joined, "");
+    assert!(ok, "expected success, got: {out}");
+    assert_eq!(out.trim(), "second", "{out}");
+}
+
+#[test]
+fn nested_project_module_reaches_include_library() {
+    // An import written in a nested module resolves relative to that module
+    // first; when nothing serves the relative form, the path as written is
+    // looked up under the include paths.
+    let inc = setup_tree(
+        "inc_from_nested_lib",
+        &[("mylib.pp", "fun seven() -> int32 { return 7 }\n")],
+    );
+    let main = setup(
+        "inc_from_nested",
+        &[
+            (
+                "modules/a.pp",
+                "import mylib.{ seven }\nfun f() -> int32 { return seven() }\n",
+            ),
+            (
+                "main.pp",
+                "import modules.a.{ f }\nfun main() { println(f()) }\n",
+            ),
+        ],
+    );
+    let (ok, out) = with_include(&main, &inc.display().to_string(), "check");
+    assert!(ok, "expected success, got: {out}");
+}
+
+#[test]
+fn missing_module_error_mentions_include_search() {
+    // With include paths set, the missing-module error says they were
+    // searched, so the user knows the lookup went beyond the project root.
+    let inc = setup_tree(
+        "inc_missing_lib",
+        &[("other.pp", "fun x() -> int32 { return 1 }\n")],
+    );
+    let main = setup(
+        "inc_missing",
+        &[("main.pp", "import nosuch.{ y }\nfun main() { }\n")],
+    );
+    let (ok, out) = with_include(&main, &inc.display().to_string(), "check");
+    assert!(!ok, "expected failure");
+    assert!(out.contains("cannot find module `nosuch`"), "{out}");
+    assert!(out.contains("include path"), "{out}");
+}
+
+#[test]
+fn empty_include_entries_are_skipped() {
+    // Leading, trailing, and doubled colons contribute no include entries and
+    // do not break resolution of what remains.
+    let inc = setup_tree(
+        "inc_empty_entries_lib",
+        &[("mylib.pp", "fun seven() -> int32 { return 7 }\n")],
+    );
+    let main = setup(
+        "inc_empty_entries",
+        &[(
+            "main.pp",
+            "import mylib.{ seven }\nfun main() { println(seven()) }\n",
+        )],
+    );
+    let val = format!("::{}:", inc.display());
+    let (ok, out) = with_include(&main, &val, "check");
+    assert!(ok, "expected success, got: {out}");
+    // An entirely empty variable is the same as an unset one.
+    let main = setup(
+        "inc_empty_var",
+        &[
+            ("lib/util.pp", "fun helper() -> int32 { return 7 }\n"),
+            (
+                "main.pp",
+                "import lib.util.{ helper }\nfun main() { println(helper()) }\n",
+            ),
+        ],
+    );
+    let (ok, out) = with_include(&main, "", "check");
+    assert!(ok, "expected success, got: {out}");
+}
+
 /// `import c.{ X }` + `import a.b` + both `X` and `b.X` used — green, each
 /// resolving to its own definition (bare `X` is c's, `b.X` is a.b's).
 #[test]
@@ -1001,4 +1227,171 @@ fun main() {
     let (ok, out) = run(&main);
     assert!(ok, "expected success, got: {out}");
     assert_eq!(out.trim(), "1\n2");
+}
+
+#[test]
+fn packages_env_scopes_resolution_to_the_declared_name() {
+    // A `PREPOLY_PACKAGES` entry serves imports rooted at its declared name
+    // -- and ONLY those: a second module in the same directory is not
+    // importable, unlike an open include path.
+    let pkg = setup_tree(
+        "pkg_scoped_dir",
+        &[
+            ("mylib.pp", "fun seven() -> int32 { return 7 }\n"),
+            ("other.pp", "fun eight() -> int32 { return 8 }\n"),
+        ],
+    );
+    let packages = format!("mylib={}", pkg.display());
+    let main = setup(
+        "pkg_scoped",
+        &[(
+            "main.pp",
+            "import mylib.{ seven }\nfun main() { println(seven()) }\n",
+        )],
+    );
+    let (ok, out) = with_env(&main, &[("PREPOLY_PACKAGES", &packages)], "check");
+    assert!(ok, "expected success, got: {out}");
+    let main = setup(
+        "pkg_scoped_other",
+        &[(
+            "main.pp",
+            "import other.{ eight }\nfun main() { println(eight()) }\n",
+        )],
+    );
+    let (ok, out) = with_env(&main, &[("PREPOLY_PACKAGES", &packages)], "check");
+    assert!(!ok, "undeclared module must not resolve, got: {out}");
+    assert!(out.contains("cannot find module `other`"), "{out}");
+}
+
+#[test]
+fn package_name_binds_before_a_project_file() {
+    // A declared package name owns its import namespace: it wins over a
+    // same-named file in the project (the opposite of the include rule, where
+    // the project shadows the include).
+    let pkg = setup_tree(
+        "pkg_binds_dir",
+        &[("dup.pp", "fun which() -> string { return \"package\" }\n")],
+    );
+    let packages = format!("dup={}", pkg.display());
+    let main = setup(
+        "pkg_binds",
+        &[
+            ("dup.pp", "fun which() -> string { return \"project\" }\n"),
+            (
+                "main.pp",
+                "import dup.{ which }\nfun main() { println(which()) }\n",
+            ),
+        ],
+    );
+    let (ok, out) = with_env(&main, &[("PREPOLY_PACKAGES", &packages)], "");
+    assert!(ok, "expected success, got: {out}");
+    assert_eq!(out.trim(), "package", "{out}");
+}
+
+#[test]
+fn packages_and_include_coexist() {
+    // Both variables set at once: the package map serves its declared name,
+    // the include path serves everything else.
+    let pkg = setup_tree(
+        "pkg_coexist_pkg",
+        &[("mylib.pp", "fun seven() -> int32 { return 7 }\n")],
+    );
+    let inc = setup_tree(
+        "pkg_coexist_inc",
+        &[("openlib.pp", "fun eight() -> int32 { return 8 }\n")],
+    );
+    let packages = format!("mylib={}", pkg.display());
+    let include = inc.display().to_string();
+    let main = setup(
+        "pkg_coexist",
+        &[(
+            "main.pp",
+            "import mylib.{ seven }\nimport openlib.{ eight }\nfun main() { println(seven() + eight()) }\n",
+        )],
+    );
+    let envs = [
+        ("PREPOLY_PACKAGES", packages.as_str()),
+        ("PREPOLY_INCLUDE", include.as_str()),
+    ];
+    let (ok, out) = with_env(&main, &envs, "");
+    assert!(ok, "expected success, got: {out}");
+    assert_eq!(out.trim(), "15", "{out}");
+}
+
+#[test]
+fn declared_package_missing_module_does_not_fall_through() {
+    // A declared name whose directory lacks the module is an error even when
+    // an include path could serve the same path: the declaration owns it.
+    let pkg = setup_tree("pkg_owns_dir", &[("unrelated.txt", "")]);
+    let inc = setup_tree(
+        "pkg_owns_inc",
+        &[("mylib.pp", "fun seven() -> int32 { return 7 }\n")],
+    );
+    let packages = format!("mylib={}", pkg.display());
+    let include = inc.display().to_string();
+    let main = setup(
+        "pkg_owns",
+        &[(
+            "main.pp",
+            "import mylib.{ seven }\nfun main() { println(seven()) }\n",
+        )],
+    );
+    let envs = [
+        ("PREPOLY_PACKAGES", packages.as_str()),
+        ("PREPOLY_INCLUDE", include.as_str()),
+    ];
+    let (ok, out) = with_env(&main, &envs, "check");
+    assert!(!ok, "expected failure, got: {out}");
+    assert!(out.contains("cannot find module `mylib`"), "{out}");
+}
+
+#[test]
+fn distributed_binary_includes_its_sibling_libraries_dir() {
+    // A toolchain laid out as `bin/prepoly` + `libraries/` makes the shipped
+    // libraries importable with no environment setup: the binary's own
+    // location implies `../libraries` as a trailing include path.
+    let dist = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("dist_layout");
+    let _ = fs::remove_dir_all(&dist);
+    fs::create_dir_all(dist.join("bin")).unwrap();
+    fs::create_dir_all(dist.join("libraries")).unwrap();
+    let bin = dist.join("bin/prepoly");
+    fs::copy(env!("CARGO_BIN_EXE_prepoly"), &bin).unwrap();
+    fs::write(
+        dist.join("libraries/shipped.pp"),
+        "fun greet() -> string { return \"shipped\" }\n",
+    )
+    .unwrap();
+    let main = setup(
+        "dist_layout_case",
+        &[(
+            "main.pp",
+            "import shipped.{ greet }\nfun main() { println(greet()) }\n",
+        )],
+    );
+    let out = Command::new(&bin)
+        .arg(&main)
+        .output()
+        .expect("spawn dist prepoly");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "expected success, got: {stdout}{stderr}"
+    );
+    assert_eq!(stdout.trim(), "shipped", "{stdout}");
+    // An explicit include path is searched before the implicit one.
+    let inc = setup_tree(
+        "dist_layout_inc",
+        &[(
+            "shipped.pp",
+            "fun greet() -> string { return \"explicit\" }\n",
+        )],
+    );
+    let out = Command::new(&bin)
+        .arg(&main)
+        .env("PREPOLY_INCLUDE", &inc)
+        .output()
+        .expect("spawn dist prepoly");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.trim(), "explicit", "{stdout}");
 }

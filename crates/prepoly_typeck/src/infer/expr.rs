@@ -228,6 +228,34 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Record which way the `!` at `span` propagates in this elaboration, and
+    /// reject a generic whose instantiations disagree. The `null_props` channel
+    /// is a span SET consumed by ONE shared MIR lowering, so a `!` that
+    /// unwraps a nullable in one instantiation and a `Result` in another has
+    /// no single correct shape -- left alone, the null-propagation lowering is
+    /// forced onto the `Result` instance, which then returns (or renders) the
+    /// whole `Result` where its Ok payload was meant.
+    fn record_prop_kind(&mut self, span: prepoly_parser::Span, kind: PropKind) {
+        match self.prop_kinds.get(&span) {
+            None => {
+                self.prop_kinds.insert(span, Some(kind));
+            }
+            Some(Some(prev)) if *prev != kind => {
+                self.errors.push(TypeError {
+                    message: "`!` unwraps a nullable in one instantiation of this generic \
+                              function and a `Result` in another; the two propagate \
+                              differently, so `!` must resolve to one kind in every \
+                              instantiation (annotate the parameter to fix it)"
+                        .to_string(),
+                    span,
+                });
+                // Mark reported: further instantiations reaching this span stay quiet.
+                self.prop_kinds.insert(span, None);
+            }
+            _ => {}
+        }
+    }
+
     fn wrap_inferred_fallible_return(&mut self, ok: Type, props: &LightProps) -> Type {
         let base = if props.errors.is_empty() {
             ok
@@ -375,16 +403,19 @@ impl<'a> Checker<'a> {
                 // instead of the `Result` tag-test shape.
                 if let Type::Nullable(inner_ty) = &resolved {
                     self.check_null_propagation_return_context(*span);
+                    self.record_prop_kind(*span, PropKind::Null);
                     self.null_props.insert(*span);
                     return (**inner_ty).clone();
                 }
                 match resolved.result_payloads() {
                     Some((ok, _)) => {
                         self.check_error_propagation_return_context(*span);
+                        self.record_prop_kind(*span, PropKind::Err);
                         ok.clone()
                     }
                     None if resolved.is_result_type() => {
                         self.check_error_propagation_return_context(*span);
+                        self.record_prop_kind(*span, PropKind::Err);
                         self.fresh_unknown()
                     }
                     None if resolved.is_unknown() => self.fresh_unknown(),

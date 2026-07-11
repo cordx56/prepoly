@@ -284,6 +284,8 @@ fn rvalue_reads_only(
             !tracked_op(source)
         }
         Rvalue::Closure { captures, .. } => !captures.iter().any(tracked_op),
+        // `typeof(x)` consults only the operand's type, never its value.
+        Rvalue::TypeName(_) => true,
     }
 }
 

@@ -1,0 +1,17 @@
+# A second fixture plugin, standing in for a rebuilt `prepoly_plugin_testlib`:
+# it keeps `add` and adds `extra`, so a host that revalidates its cache is
+# distinguishable from one that serves the stale manifest.
+[package]
+name = "prepoly_plugin_altlib"
+description = "Fixture Prepoly plugin standing in for a rebuilt testlib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+prepoly_plugin = { workspace = true }

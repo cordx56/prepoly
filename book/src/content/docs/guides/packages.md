@@ -140,5 +140,38 @@ mylib/
 PREPOLY_PACKAGES=geometry=/home/user/.prepoly/packages/geometry-git-a1b2c3d4:utils=/home/user/.prepoly/packages/utils-git-deadbeef
 ```
 
-Both the compiler and the language server read this variable at startup, so
-editor diagnostics and completions work for dependencies too.
+An import whose first segment is a declared name resolves under that entry's
+directory — and only there. The manifest therefore scopes exactly which
+external modules the project sees, and a declared name cannot be shadowed by
+a same-named local file. `ppm` warns when a dependency directory contains no
+module of the declared name (the misnamed entry would otherwise only fail at
+its first import). Both the compiler and the language server read the
+variable at startup, so editor diagnostics and completions work for
+dependencies too.
+
+## Include paths
+
+Outside of `ppm` projects — or alongside them — the compiler also honors
+`PREPOLY_INCLUDE`, a colon-separated list of plain directories:
+
+```
+PREPOLY_INCLUDE=/opt/prepoly/libraries:/home/user/pp-modules
+```
+
+Any `.pp` file, module directory, or plugin under an include path is
+importable directly, no manifest required. An import is resolved relative to
+the importing file first, searched across the project root and then each
+include path in list order; the first directory that serves the path wins. A
+file in the project therefore shadows an include module of the same path, an
+earlier include entry shadows a later one, and a `PREPOLY_PACKAGES` name
+always binds before the include search. Include entries should not nest
+inside each other (or inside the project): a file reachable from two roots
+can be loaded twice under two module paths.
+
+Finally, the toolchain binaries (`prepoly` and `prepoly-lsp`) append one
+implicit include entry: the `libraries/` directory sitting beside their own
+`bin/` directory (`<bin>/../libraries`), when it exists. A distributed
+toolchain therefore serves its bundled libraries (`process`, `path`, ...)
+with no environment setup at all — in the compiler and in the editor alike —
+and explicit include paths and package declarations always take precedence
+over it.

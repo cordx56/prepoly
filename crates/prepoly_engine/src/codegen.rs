@@ -843,6 +843,12 @@ pub trait Codegen {
     ) -> Self::Value {
         match rv {
             Rvalue::Use(op) => self.codegen_operand(program, f, op, dest_ty),
+            // `typeof(x)`: the operand's monomorphized type name, a fresh string
+            // constant per instance. The operand's runtime value is never read.
+            Rvalue::TypeName(op) => {
+                let name = operand_type_of(op, &f.local_types).type_name();
+                self.const_str(&name)
+            }
             Rvalue::Bin(op, a, b) => {
                 // Comparisons yield bool but operate on the operands' type;
                 // arithmetic/bitwise/shift operate on (and yield) the dest type.
@@ -950,7 +956,17 @@ pub trait Codegen {
                 let src_ty = operand_type_of(source, &f.local_types);
                 if !matches!(dest_ty, Type::Record(n) if n.id == prepoly_hir::STRUCTURAL_RECORD_ID)
                 {
-                    return self.codegen_operand(program, f, source, dest_ty);
+                    // The identity result is an ALIAS of the source, but a
+                    // RecordView is otherwise a fresh construction, so the
+                    // binding releases it as an owned value at scope end;
+                    // retain here to balance that release (the union-filled
+                    // view_args channel wraps a generic's NOMINAL instances in
+                    // views too, so this path runs on ordinary records).
+                    let v = self.codegen_operand(program, f, source, dest_ty);
+                    if rc_managed(dest_ty) && operand_is_alias(source) {
+                        self.retain(v);
+                    }
+                    return v;
                 }
                 let src = self.codegen_operand(program, f, source, &src_ty);
                 let plans = view_field_plans(dest_ty, &src_ty);
@@ -1068,8 +1084,20 @@ pub trait Codegen {
             // (`a: T?` proven non-null by a guard) is unwrapped to its inner value.
             Rvalue::Load(place) => match place.proj.as_slice() {
                 [Projection::Field(field)] => {
-                    let base = self.load_local(place.local);
                     let raw_ty = f.local_type(place.local).clone();
+                    // A `string`/array receiver has no fields: the access is the
+                    // compile-time member presence value, already decided into
+                    // `dest_ty` by monomorphization -- the member's own name when
+                    // the class carries it, otherwise null. The `if` that tests it
+                    // folds statically, so this constant only has to type.
+                    if matches!(raw_ty.primitive_class(), Some("string" | "array")) {
+                        let lit = match dest_ty {
+                            Type::Str => Literal::Str(field.clone()),
+                            _ => Literal::Null,
+                        };
+                        return self.codegen_operand(program, f, &Operand::Const(lit), dest_ty);
+                    }
+                    let base = self.load_local(place.local);
                     let (base, base_ty) = self.unwrap_narrowed(base, &raw_ty);
                     self.load_field(base, &base_ty, field)
                 }
@@ -1256,6 +1284,34 @@ pub trait Codegen {
         name: &str,
         args: &[Operand],
     ) -> Self::Value {
+        // Native-plugin dispatch: three leading string operands (library path,
+        // function name, encoded signature) then the payload arguments, whose
+        // MIR types drive the slot packing. The runtime symbol is picked by
+        // return class: scalars come back in an i64 (void/bool/int), floats in
+        // an f64, and strings/byte arrays/Results as object pointers. Decoded
+        // here rather than as a match guard, which would decode twice.
+        if let Some(ret) = prepoly_hir::plugin_builtin_return(name) {
+            let strings = [
+                self.codegen_operand(program, f, &args[0], &Type::Str),
+                self.codegen_operand(program, f, &args[1], &Type::Str),
+                self.codegen_operand(program, f, &args[2], &Type::Str),
+            ];
+            let payload: Vec<(Self::Value, Type)> = args[3..]
+                .iter()
+                .map(|a| {
+                    let t = operand_type_of(a, &f.local_types);
+                    (self.codegen_operand(program, f, a, &t), t)
+                })
+                .collect();
+            let rt = match &ret {
+                Type::Float(_) => "pp_plugin_call_float",
+                Type::Void | Type::Bool | Type::Int(_) => "pp_plugin_call_int",
+                // Strings, byte arrays, and every fallible call (a Result is a
+                // heap object).
+                _ => "pp_plugin_call_obj",
+            };
+            return self.plugin_call(rt, strings, &payload, &ret);
+        }
         match name {
             "value_matches" => {
                 let subj_ty = operand_type_of(&args[0], &f.local_types);
@@ -1631,35 +1687,6 @@ pub trait Codegen {
                 } else {
                     self.int_narrow(x, from, to, signed)
                 }
-            }
-            // Native-plugin dispatch: three leading string operands (library
-            // path, function name, encoded signature) then the payload
-            // arguments, whose MIR types drive the slot packing. The runtime
-            // symbol is picked by return class: scalars come back in an i64
-            // (void/bool/int), floats in an f64, and strings/byte arrays/
-            // Results as object pointers.
-            n if prepoly_hir::plugin_builtin_return(n).is_some() => {
-                let ret = prepoly_hir::plugin_builtin_return(n).expect("checked in guard");
-                let strings = [
-                    self.codegen_operand(program, f, &args[0], &Type::Str),
-                    self.codegen_operand(program, f, &args[1], &Type::Str),
-                    self.codegen_operand(program, f, &args[2], &Type::Str),
-                ];
-                let payload: Vec<(Self::Value, Type)> = args[3..]
-                    .iter()
-                    .map(|a| {
-                        let t = operand_type_of(a, &f.local_types);
-                        (self.codegen_operand(program, f, a, &t), t)
-                    })
-                    .collect();
-                let rt = match &ret {
-                    Type::Float(_) => "pp_plugin_call_float",
-                    Type::Void | Type::Bool | Type::Int(_) => "pp_plugin_call_int",
-                    // Strings, byte arrays, and every fallible call (a Result
-                    // is a heap object).
-                    _ => "pp_plugin_call_obj",
-                };
-                self.plugin_call(rt, strings, &payload, &ret)
             }
             // Every builtin the front end accepts has an arm above; MIR lowering
             // turns any unresolved name into `Callee::Builtin`, so a name landing
@@ -2125,10 +2152,9 @@ fn builtin_result_type(name: &str, args: &[Operand], local_types: &[Type]) -> Op
         "_int_to_string" | "_float_to_string" => Some(Type::Str),
         "_int_to_float" => Some(Type::Float(prepoly_hir::FloatKind::F64)),
         // Native-plugin dispatch: the result shape is in the name's suffix.
-        n if prepoly_hir::plugin_builtin_return(n).is_some() => {
-            prepoly_hir::plugin_builtin_return(n)
-        }
-        _ => None,
+        // Every other name has an arm above, so this decodes once and yields
+        // `None` for a non-plugin builtin.
+        n => prepoly_hir::plugin_builtin_return(n),
     }
 }
 

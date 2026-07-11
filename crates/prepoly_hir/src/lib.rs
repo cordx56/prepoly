@@ -6,6 +6,7 @@ pub mod expand;
 pub mod hir;
 pub mod lower;
 pub mod mutation;
+pub mod plugin;
 pub mod typed;
 pub mod typedecl;
 pub mod types;
@@ -15,19 +16,20 @@ pub use expand::{
 };
 pub use hir::{
     CallableSignature, FieldInfo, FunInfo, LoadedModule, MethodInfo, ModuleInit, ParamInfo,
-    Program, QualifiedName, RESULT_TYPE_ID, SchemeMethod, TypeAlias, TypeInfo, TypeKind,
-    TypeScheme, VariantInfo, qualify, resolve_qualified,
+    Program, QualifiedName, RESERVED_FUNCTION_NAMES, RESULT_TYPE_ID, SchemeMethod, TypeAlias,
+    TypeInfo, TypeKind, TypeScheme, VariantInfo, qualify, resolve_qualified,
 };
 pub use lower::{LowerError, lower};
 pub use mutation::{
     MutationInfo, annotated_type_passes_by_copy, mutates_root, param_infers_pass_mode,
     param_is_immutable_ref, param_is_infer, param_is_mut_ref, param_receives_copy, root_ident,
 };
+pub use plugin::{plugin_builtin_code, plugin_builtin_return, plugin_sig_types, plugin_type_code};
 pub use typed::{Constness, Ownership, RegionId, TypedExpr, TypedExprKind, TypedProgram};
 pub use types::{
     FloatKind, INFER_VAR, IntKind, NominalInfo, NominalKind, NominalType, STRUCTURAL_RECORD_ID,
     STRUCTURAL_RECORD_NAME, Substitution, Type, collapse_nullable, freshen_infer, index_element,
-    int_literal_kind, is_fully_known, peel_modes, plugin_builtin_return, prim_method_symbol,
+    int_literal_kind, is_fully_known, mismatch_display, peel_modes, prim_method_symbol,
     primitive_kind_conflict, resolve, structural_record, substitute_vars, type_key,
 };
 

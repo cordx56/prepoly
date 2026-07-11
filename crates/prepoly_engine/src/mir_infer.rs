@@ -480,6 +480,8 @@ impl BodyTyper {
             // the destination local's type, so stay open here.
             Rvalue::RecordView { .. } => self.fresh(),
             Rvalue::Closure { .. } => self.fresh(),
+            // `typeof(x)` is a string constant; the operand only donates its type.
+            Rvalue::TypeName(_) => Type::Str,
         }
     }
 

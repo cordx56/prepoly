@@ -165,6 +165,13 @@ pub enum Rvalue {
         id: ClosureId,
         captures: Vec<Operand>,
     },
+    /// `typeof(x)`: the source name of the operand's static type, as a string.
+    /// The name is NOT baked into the (instance-shared) body: each back end
+    /// derives it from the operand's monomorphized type, so every instance of a
+    /// generic body reports its own type. The operand's value is never read at
+    /// runtime -- only its type -- but the operand expression is still
+    /// evaluated for its effects like any other argument.
+    TypeName(Operand),
 }
 
 impl fmt::Display for Literal {
@@ -262,6 +269,7 @@ impl fmt::Display for Rvalue {
             Rvalue::Closure { id, captures } => {
                 write!(f, "{id}[{}]", join_operands(captures))
             }
+            Rvalue::TypeName(op) => write!(f, "typename {op}"),
         }
     }
 }

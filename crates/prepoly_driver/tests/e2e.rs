@@ -26,7 +26,9 @@ fn e2e_root() -> PathBuf {
 /// Every `*.pp` under `dir`, recursively, in sorted order (so failures are stable).
 /// `concurrency/`, `net/`, and `process/` are skipped without the `jit`
 /// feature: those cases need real threads, sockets, and child processes that
-/// only the JIT back end provides.
+/// only the JIT back end provides. `path/` is skipped too -- not because the
+/// interpreter cannot run it, but because only the JIT configuration builds the
+/// native plugin the library imports.
 fn collect_cases(dir: &Path, out: &mut Vec<PathBuf>) {
     let mut entries: Vec<PathBuf> = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
@@ -36,9 +38,9 @@ fn collect_cases(dir: &Path, out: &mut Vec<PathBuf>) {
     for path in entries {
         if path.is_dir() {
             if !cfg!(feature = "jit")
-                && path
-                    .file_name()
-                    .is_some_and(|n| n == "concurrency" || n == "net" || n == "process")
+                && path.file_name().is_some_and(|n| {
+                    n == "concurrency" || n == "net" || n == "process" || n == "path"
+                })
             {
                 continue;
             }
@@ -49,22 +51,38 @@ fn collect_cases(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The in-repo `libraries/` directory, whose modules are reachable as
-/// packages (`process=<libraries>` makes `import process.{ .. }` resolve).
+/// The in-repo `libraries/` directory, exposed to every case as the one
+/// `PREPOLY_INCLUDE` entry -- the same layout a distributed toolchain ships,
+/// so the cases exercise exactly what users get.
 fn libraries_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../libraries")
 }
 
-/// Run a case, exposing `libraries/` as packages so a case may import a
-/// library (`process/` does). Cases that import nothing from there are
-/// unaffected.
+/// The libraries whose native halves the suite builds: the cargo package
+/// building each plugin, and the module/library name it is imported under.
+const NATIVE_LIBRARIES: &[(&str, &str)] = &[
+    ("prepoly_lib_process", "process"),
+    ("prepoly_lib_path", "path"),
+];
+
+/// Build each library's plugin and install it as `libraries/lib<name>.so`,
+/// where `libraries/build.sh` puts it (a debug build here replaces a prior
+/// release install). Installed once, before any case process runs, so no
+/// running process has an older library mapped.
+#[cfg(feature = "jit")]
+fn install_library_plugins() {
+    for (package, library) in NATIVE_LIBRARIES {
+        prepoly_plugin_host::fixture::install_plugin(package, library, &libraries_root());
+    }
+}
+
+/// Run a case with `libraries/` on the include path, so a case may import a
+/// library (`process/` and `path/` do). Cases that import nothing from there
+/// are unaffected.
 fn run_case(bin: &str, pp: &Path) -> std::process::Output {
     Command::new(bin)
         .arg(pp)
-        .env(
-            "PREPOLY_PACKAGES",
-            format!("process={}", libraries_root().display()),
-        )
+        .env("PREPOLY_INCLUDE", libraries_root())
         .output()
         .expect("spawn prepoly")
 }
@@ -111,15 +129,13 @@ fn check_error(bin: &str, pp: &Path, expected: &str) {
 #[test]
 fn e2e_cases_produce_expected_output() {
     let bin = env!("CARGO_BIN_EXE_prepoly");
-    // The `process/` cases import the process library, whose native half is a
-    // plugin; install it as `libraries/build.sh` would. Those cases only run
-    // with the JIT back end (the interpreter has no file I/O for the pipes).
+    // The `process/` and `path/` cases import libraries whose native halves
+    // are plugins; build them into `libraries/` as `libraries/build.sh`
+    // would. Those cases only run with the JIT back end (the interpreter has
+    // no file I/O for the pipes, and only this configuration builds the
+    // plugins).
     #[cfg(feature = "jit")]
-    prepoly_plugin_host::fixture::install_plugin(
-        "prepoly_lib_process",
-        "process",
-        &libraries_root().join("process"),
-    );
+    install_library_plugins();
     let root = e2e_root();
     let mut cases = Vec::new();
     collect_cases(&root, &mut cases);

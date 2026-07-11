@@ -1,0 +1,45 @@
+// A closure's parameter annotation is authoritative, and a call site need not
+// match it exactly: the checker widens a value into a nullable parameter and
+// converts between numeric widths. The closure's function type has to carry the
+// annotation, because it is what the call site coerces its arguments to -- a
+// bare `string` reaching a `string?` parameter unwrapped would be read as a
+// nullable cell.
+type P = { x: int32 }
+
+fun main() {
+    let greet = (s: string?) -> {
+        if let text = s {
+            return "hi {text}"
+        }
+        return "hi nobody"
+    }
+    println(greet("ada"))
+    println(greet(null))
+
+    // A closure parameter has one type across every call site, so the sites'
+    // argument types are joined: `null` here and a bare `P` there make `P?`.
+    let peek = (q: P?) -> {
+        if let p = q {
+            return p.x
+        }
+        return -1
+    }
+    let maybe: P? = P { x: 7 }
+    println(peek(null))
+    println(peek(maybe))
+    println(peek(P { x: 3 }))
+
+    // A narrower literal converts into the annotated width.
+    let widen = (n: int64) -> n * 2
+    println(widen(21))
+
+    // Only the annotated parameter is fixed; the other still comes from the call.
+    let tag = (label: string?, count) -> {
+        if let l = label {
+            return "{l}={count}"
+        }
+        return "none={count}"
+    }
+    println(tag("n", 4))
+    println(tag(null, 5))
+}

@@ -478,12 +478,9 @@ impl<'p> Hm<'p> {
         if crate::structural::types_compatible(self.program, &h, &w) {
             return;
         }
+        let (h, w) = prepoly_hir::mismatch_display(&h, &w);
         self.errors.push(TypeError {
-            message: format!(
-                "cannot use `{}` where `{}` is required",
-                h.display(),
-                w.display()
-            ),
+            message: format!("cannot use `{h}` where `{w}` is required"),
             span,
         });
     }

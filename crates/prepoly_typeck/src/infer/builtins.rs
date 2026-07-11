@@ -83,23 +83,75 @@ impl<'a> Checker<'a> {
             return Some(ret);
         }
         if let Some(ret) = prepoly_hir::plugin_builtin_return(name) {
-            // `_plugin_[f]call_<t>(path, name, sig, payload...)`: the loader
-            // synthesizes these with three leading string literals; the
-            // payload arguments are checked against the wrapper's annotated
-            // parameters at its own call sites, so here each argument is
-            // simply visited. The return is fixed by the name's suffix.
-            if args.len() < 3 {
-                self.errors.push(TypeError {
-                    message: format!("`{name}` expects at least 3 arguments (path, name, sig)"),
-                    span,
-                });
-            }
-            for a in args {
-                self.check_expr(&a.expr, scopes);
-            }
+            self.check_plugin_call(name, args, span, scopes);
             return Some(ret);
         }
         None
+    }
+
+    /// `_plugin_[f]call_<t>(path, name, sig, payload...)`: the loader
+    /// synthesizes these with three leading string literals, but the builtin is
+    /// nameable from user source, and the runtime reads each payload slot as
+    /// the signature's type without re-checking it. A wrong slot is therefore
+    /// undefined behaviour, so the payload is typed here against the signature
+    /// -- which must be a literal for that to be possible at all.
+    fn check_plugin_call(
+        &mut self,
+        name: &str,
+        args: &[Arg],
+        span: prepoly_parser::Span,
+        scopes: &mut ScopeStack,
+    ) {
+        if args.len() < 3 {
+            self.errors.push(TypeError {
+                message: format!("`{name}` expects at least 3 arguments (path, name, sig)"),
+                span,
+            });
+            for a in args {
+                self.check_expr(&a.expr, scopes);
+            }
+            return;
+        }
+        for a in &args[..3] {
+            self.check_expr_against(&a.expr, &Type::Str, scopes);
+        }
+        let payload = &args[3..];
+        let Some(sig) = str_literal(&args[2].expr) else {
+            self.errors.push(TypeError {
+                message: format!("`{name}` signature must be a string literal"),
+                span: args[2].expr.span(),
+            });
+            for a in payload {
+                self.check_expr(&a.expr, scopes);
+            }
+            return;
+        };
+        let Some((params, _, _)) = prepoly_hir::plugin_sig_types(&sig) else {
+            self.errors.push(TypeError {
+                message: format!("malformed plugin call signature `{sig}`"),
+                span: args[2].expr.span(),
+            });
+            for a in payload {
+                self.check_expr(&a.expr, scopes);
+            }
+            return;
+        };
+        if payload.len() != params.len() {
+            self.errors.push(TypeError {
+                message: format!(
+                    "`{name}` passes {} argument(s), signature `{sig}` has {}",
+                    payload.len(),
+                    params.len()
+                ),
+                span,
+            });
+        }
+        for (a, want) in payload.iter().zip(&params) {
+            self.check_expr_against(&a.expr, want, scopes);
+        }
+        for a in payload.iter().skip(params.len()) {
+            self.check_expr(&a.expr, scopes);
+        }
     }
 
     /// Static contracts for the network runtime primitives (see
@@ -777,6 +829,21 @@ pub(super) fn builtin_method_return(recv_ty: &Type, method: &str) -> Option<Type
             Type::Str,
         )),
         "close" | "seek" => Some(Type::result(Type::Void, Type::Str)),
+        _ => None,
+    }
+}
+
+/// The text of `expr` when it is an interpolation-free string literal. `""`
+/// lexes to no segments at all, so an empty segment list is the empty string.
+fn str_literal(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Str(segs, _) => segs
+            .iter()
+            .map(|s| match s {
+                StrSeg::Lit(t) => Some(t.as_str()),
+                StrSeg::Expr(_) => None,
+            })
+            .collect(),
         _ => None,
     }
 }

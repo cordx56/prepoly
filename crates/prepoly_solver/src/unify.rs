@@ -40,11 +40,22 @@ impl Subst {
     }
 
     /// Follow substitutions to a representative type.
+    ///
+    /// A `Nullable` is looked through as well, because `T??` is not a type the
+    /// language can distinguish from `T?` (there is one `null`) yet it is
+    /// exactly what a `?`-wrapped inference variable becomes once that variable
+    /// pins to a nullable type -- see the return re-wrap in the checker's
+    /// `check_block_root`. Collapsing here, rather than at each consumer, keeps
+    /// the nesting from ever escaping the substitution.
     pub fn resolve(&self, t: &Type) -> Type {
         match t {
             Type::Unknown(id) => match self.table.get(id) {
                 Some(bound) => self.resolve(bound),
                 None => t.clone(),
+            },
+            Type::Nullable(inner) => match self.resolve(inner) {
+                nested @ Type::Nullable(_) => nested,
+                other => Type::Nullable(Box::new(other)),
             },
             _ => t.clone(),
         }
@@ -60,7 +71,13 @@ impl Subst {
         match self.resolve(t) {
             Type::Array(inner, n) => Type::Array(Box::new(self.resolve_deep(&inner)), n),
             Type::Slice(inner) => Type::Slice(Box::new(self.resolve_deep(&inner))),
-            Type::Nullable(inner) => Type::Nullable(Box::new(self.resolve_deep(&inner))),
+            // The shallow `resolve` above already collapsed a variable that
+            // pinned to a nullable; deep-resolving the payload can expose one
+            // more level (a variable bound to `T?` reached only now).
+            Type::Nullable(inner) => match self.resolve_deep(&inner) {
+                nested @ Type::Nullable(_) => nested,
+                other => Type::Nullable(Box::new(other)),
+            },
             Type::ConstOf(inner) => Type::ConstOf(Box::new(self.resolve_deep(&inner))),
             Type::Mut(inner) => Type::Mut(Box::new(self.resolve_deep(&inner))),
             Type::Ref(inner) => Type::Ref(Box::new(self.resolve_deep(&inner))),
@@ -231,5 +248,51 @@ impl Subst {
             }
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use prepoly_hir::{IntKind, Type};
+
+    use super::Subst;
+
+    fn nullable(t: Type) -> Type {
+        Type::Nullable(Box::new(t))
+    }
+
+    /// A `?` wrapped over a variable that later pins to a nullable type must
+    /// not resolve to `T??`: the language has one `null`, and generated code
+    /// would build a cell holding a cell. Both the shallow and the deep
+    /// resolution normalize it, at any nesting depth.
+    #[test]
+    fn nullable_over_a_variable_pinned_to_a_nullable_collapses() {
+        let mut s = Subst::new();
+        let var = Type::Unknown(0);
+        s.unify(&var, &nullable(Type::Str)).unwrap();
+
+        let wrapped = nullable(var.clone());
+        assert_eq!(s.resolve(&wrapped), nullable(Type::Str));
+        assert_eq!(s.resolve_deep(&wrapped), nullable(Type::Str));
+        // Through a chain of variables, and under a component of a larger type.
+        let outer = Type::Unknown(1);
+        s.unify(&outer, &wrapped).unwrap();
+        assert_eq!(s.resolve(&nullable(outer.clone())), nullable(Type::Str));
+        assert_eq!(
+            s.resolve_deep(&Type::Slice(Box::new(nullable(outer)))),
+            Type::Slice(Box::new(nullable(Type::Str)))
+        );
+    }
+
+    /// Collapsing is confined to nested nullables: a single `?` over a concrete
+    /// or still-open payload is preserved.
+    #[test]
+    fn a_single_nullable_is_preserved() {
+        let mut s = Subst::new();
+        assert_eq!(s.resolve(&nullable(Type::Str)), nullable(Type::Str));
+        let var = Type::Unknown(0);
+        assert_eq!(s.resolve(&nullable(var.clone())), nullable(var.clone()));
+        s.unify(&var, &Type::Int(IntKind::I32)).unwrap();
+        assert_eq!(s.resolve(&nullable(var)), nullable(Type::Int(IntKind::I32)));
     }
 }

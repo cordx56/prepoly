@@ -2,8 +2,30 @@
 
 #![cfg(not(target_family = "wasm"))]
 
-use prepoly_plugin_host::fixture;
-use prepoly_resolve::plugin::synthesize_plugin_module;
+use std::fs;
+use std::path::PathBuf;
+
+use prepoly_plugin_host::{PluginFunction, PluginManifest, ValueType, fixture};
+use prepoly_resolve::plugin::{synthesize_plugin_module, synthesize_source};
+
+/// A manifest holding one exported function of `name` taking no arguments and
+/// returning nothing, optionally documented.
+fn manifest_of(names: &[&str], doc: Option<&str>) -> PluginManifest {
+    PluginManifest {
+        functions: names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| PluginFunction {
+                name: (*name).to_string(),
+                doc: doc.map(str::to_string),
+                params: Vec::new(),
+                ret: ValueType::Void,
+                fallible: false,
+                index: i as u32,
+            })
+            .collect(),
+    }
+}
 
 /// The generated module is valid Prepoly source carrying, per plugin
 /// function: the Rust doc comment, a fully annotated signature, and a body
@@ -62,6 +84,63 @@ fn fixture_manifest_synthesizes_wrappers() {
         "{src}"
     );
 
+    // A Prepoly keyword and a runtime builtin are legal Rust function names.
+    // Their wrappers are renamed, but each still dispatches to the plugin's
+    // own name, which the call carries as a string.
+    assert!(src.contains("fun match_(a0: int64) -> int64 {"), "{src}");
+    assert!(src.contains("\"match\", \"i:i\", a0)"), "{src}");
+    assert!(src.contains("fun len_(a0: string) -> int64 {"), "{src}");
+    assert!(src.contains("\"len\", \"s:i\", a0)"), "{src}");
+
+    // A `/*` in a doc comment would open a nested block comment the wrapper's
+    // `*/` then only half-closes; both delimiters are neutralized.
+    assert!(src.contains("nested / * block comment * /"), "{src}");
+
     // The whole module parses.
+    prepoly_parser::parse(&src).expect("synthesized module parses");
+}
+
+/// The library path is embedded in a Prepoly string literal, where `{` opens
+/// interpolation. A checkout under a `{`-containing directory must still
+/// synthesize a module that parses and names the right library.
+#[test]
+fn a_brace_in_the_library_path_is_escaped() {
+    let lib = fixture::build_testlib();
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("plug{in}s");
+    fs::create_dir_all(&dir).expect("create the brace-named directory");
+    let placed = dir.join(lib.file_name().expect("library file name"));
+    fs::copy(&lib, &placed).expect("copy the library");
+
+    let src = synthesize_plugin_module(&placed).expect("synthesize");
+    assert!(src.contains("plug\\{in}s"), "{src}");
+    prepoly_parser::parse(&src).expect("synthesized module parses");
+}
+
+/// Renaming can make two exported functions collide (`match` and `match_`).
+/// That is a per-plugin error naming both, not a duplicate-definition error
+/// inside a module the user never sees.
+#[test]
+fn a_rename_collision_is_reported() {
+    let err = synthesize_source(&manifest_of(&["match", "match_"], None), "lib.so")
+        .expect_err("collision");
+    assert!(
+        err.contains("collides with another exported function"),
+        "{err}"
+    );
+
+    // Distinct names that need no renaming still synthesize.
+    synthesize_source(&manifest_of(&["a", "b"], None), "lib.so").expect("no collision");
+}
+
+/// A doc comment consisting of a lone `/*` has no closer to rewrite, yet still
+/// raises the nesting depth of the wrapper's own block comment.
+#[test]
+fn an_unbalanced_block_comment_opener_in_a_doc_is_neutralized() {
+    let src = synthesize_source(
+        &manifest_of(&["f"], Some("Strips /* comments */ and a lone /*")),
+        "l",
+    )
+    .expect("synthesize");
+    assert!(!src.contains("/*\n"), "no bare opener survives:\n{src}");
     prepoly_parser::parse(&src).expect("synthesized module parses");
 }

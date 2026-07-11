@@ -1,0 +1,22 @@
+// A child's table entry outlives its `wait`: the exit code is cached, so a
+// second `wait` answers from it, and a small piped output stays readable
+// because the pipe still holds what the child wrote before exiting. The
+// stream accessors memoize the adopted `File`, so calling one twice is not an
+// error -- the plugin gives each descriptor up exactly once.
+import process.{ Command, Stdio }
+import std.net.{ to_text }
+
+const child = Command.new("echo")
+    .args(["buffered"])
+    .stdout(Stdio.Pipe)
+    .spawn()!
+
+println("first wait: {child.wait()!}")
+println("second wait: {child.wait()!}")
+
+const out = child.stdout()!
+print(to_text(out.read(64)!)!)
+
+// The same `File` comes back, already at end of input.
+const same = child.stdout()!
+println("re-read: {len(same.read(64)!)}")

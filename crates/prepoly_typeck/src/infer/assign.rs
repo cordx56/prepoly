@@ -234,7 +234,14 @@ impl<'a> Checker<'a> {
             });
             return;
         }
-        if matches!(got, Type::Nullable(_)) && !matches!(want, Type::Nullable(_)) {
+        // A nullable value in a required non-null position must be narrowed
+        // first -- unless the requirement is still an open variable (an
+        // unannotated closure parameter), which the nullable simply pins, the
+        // way passing it to an unannotated function parameter does.
+        if matches!(got, Type::Nullable(_))
+            && !matches!(want, Type::Nullable(_))
+            && !want.is_unknown()
+        {
             self.report_nullable_use(span);
             return;
         }
@@ -273,12 +280,9 @@ impl<'a> Checker<'a> {
             });
             return;
         }
+        let (got, want) = prepoly_hir::mismatch_display(&got, &want);
         self.errors.push(TypeError {
-            message: format!(
-                "cannot use `{}` where `{}` is required",
-                got.display(),
-                want.display()
-            ),
+            message: format!("cannot use `{got}` where `{want}` is required"),
             span,
         });
     }
@@ -375,12 +379,9 @@ impl<'a> Checker<'a> {
     }
 
     fn report_element_mismatch(&mut self, got: &Type, want: &Type, span: prepoly_parser::Span) {
+        let (got, want) = prepoly_hir::mismatch_display(got, want);
         self.errors.push(TypeError {
-            message: format!(
-                "cannot use `{}` where `{}` is required",
-                got.display(),
-                want.display()
-            ),
+            message: format!("cannot use `{got}` where `{want}` is required"),
             span,
         });
     }

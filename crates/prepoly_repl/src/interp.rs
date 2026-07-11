@@ -259,6 +259,11 @@ impl<'p, 'm> Interp<'p, 'm> {
     ) -> Result<Value, String> {
         match rv {
             Rvalue::Use(op) => self.eval_operand(f, frame, op, dest_ty),
+            // `typeof(x)`: the operand's static (per-instance) type name; the
+            // operand's runtime value is never read.
+            Rvalue::TypeName(op) => Ok(Value::Str(
+                operand_type_of(op, &f.local_types).type_name().into(),
+            )),
             Rvalue::Bin(op, a, b) => {
                 let operand_ty = if is_comparison(*op) {
                     binary_operand_type(a, b, &f.local_types)
@@ -412,6 +417,17 @@ impl<'p, 'm> Interp<'p, 'm> {
     ) -> Result<Value, String> {
         match place.proj.as_slice() {
             [Projection::Field(field)] => {
+                // A `string`/array receiver has no fields: the access is the
+                // compile-time member presence value -- the member's own name when
+                // the class carries it, otherwise null.
+                let base_ty = f.local_type(place.local);
+                if let Some(present) = self.hir.primitive_member_presence(base_ty, field) {
+                    return Ok(if present {
+                        Value::str(field.to_string())
+                    } else {
+                        Value::Null
+                    });
+                }
                 let base = frame.locals[place.local.index()].clone();
                 Ok(load_field(&base, field))
             }
@@ -451,9 +467,24 @@ impl<'p, 'm> Interp<'p, 'm> {
         let name = self.eval_operand(f, frame, &args[1], &Type::Str)?;
         let sig = self.eval_operand(f, frame, &args[2], &Type::Str)?;
         let (params, _, fallible) = prepoly_plugin_host::parse_sig(sig.as_str())?;
+        // The MIR type each payload operand evaluates at, from the one shared
+        // code decoder rather than a second mapping of the same letters.
+        let (param_types, _, _) = prepoly_hir::plugin_sig_types(sig.as_str())
+            .ok_or_else(|| format!("malformed signature `{}`", sig.as_str()))?;
+        // The same guard the typed back end applies (`decode_args`), with the
+        // same wording: without it a short payload reaches the plugin as a
+        // contract violation and a long one is silently dropped.
+        let payload = &args[3..];
+        if payload.len() != params.len() {
+            return Err(format!(
+                "plugin call passes {} argument(s), signature has {}",
+                payload.len(),
+                params.len()
+            ));
+        }
         let mut plugin_args = Vec::with_capacity(params.len());
-        for (t, op) in params.iter().zip(&args[3..]) {
-            let v = self.eval_operand(f, frame, op, &plugin_param_type(t))?;
+        for ((t, mir_ty), op) in params.iter().zip(&param_types).zip(payload) {
+            let v = self.eval_operand(f, frame, op, mir_ty)?;
             plugin_args.push(to_plugin_value(t, &v)?);
         }
         let outcome = prepoly_plugin_host::call(
@@ -1297,20 +1328,6 @@ fn make_variant(variant: &str, fields: &[(&str, Value)]) -> Value {
         variant: variant.to_string(),
         fields: RefCell::new(m),
     }))
-}
-
-/// The MIR type a plugin parameter of `t` evaluates at.
-fn plugin_param_type(t: &prepoly_plugin_host::ValueType) -> Type {
-    use prepoly_plugin_host::ValueType as VT;
-    match t {
-        VT::Void => Type::Void,
-        VT::Bool => Type::Bool,
-        VT::Int => Type::Int(IntKind::I64),
-        VT::Float => Type::Float(FloatKind::F64),
-        VT::Str => Type::Str,
-        VT::Bytes => Type::Slice(Box::new(Type::Int(IntKind::U8))),
-        VT::Array(elem) => Type::Slice(Box::new(plugin_param_type(elem))),
-    }
 }
 
 /// An interpreter value as the plugin boundary value the signature declares.

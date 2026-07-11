@@ -3,7 +3,20 @@
 
 #![cfg(not(target_family = "wasm"))]
 
+use std::fs;
+use std::path::PathBuf;
+
 use prepoly_plugin_host::{CallFailure, Value, ValueType, call, fixture, load_manifest};
+
+/// A private copy of `lib` under `<tmp>/<name>/`, so a test may delete or
+/// overwrite it without disturbing the built artifact or another test.
+fn private_copy(lib: &std::path::Path, name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    fs::create_dir_all(&dir).expect("create the test directory");
+    let dest = dir.join(format!("plug{}", std::env::consts::DLL_SUFFIX));
+    fs::copy(lib, &dest).expect("copy the library");
+    dest
+}
 
 /// The manifest carries every function with its doc comment, parameter
 /// names/types, return type, and fallibility.
@@ -100,5 +113,75 @@ fn calls_cross_the_boundary() {
     match call(&lib, "no_such_fn", &[]) {
         Err(CallFailure::Host(msg)) => assert!(msg.contains("no function"), "{msg}"),
         other => panic!("expected a host error, got {other:?}"),
+    }
+}
+
+/// A running program pins the library it was compiled against: once loaded,
+/// `call` answers from the cache without a filesystem syscall, so a cleanup
+/// step or a rebuild that deletes-then-recreates the `.so` cannot abort it.
+#[test]
+fn calls_survive_the_library_file_disappearing() {
+    let lib = private_copy(&fixture::build_testlib(), "pinned_plugin");
+    assert_eq!(
+        call(&lib, "add", &[Value::Int(40), Value::Int(2)]).expect("first call"),
+        Value::Int(42)
+    );
+
+    fs::remove_file(&lib).expect("delete the library mid-run");
+    assert_eq!(
+        call(&lib, "add", &[Value::Int(1), Value::Int(1)]).expect("call after deletion"),
+        Value::Int(2)
+    );
+}
+
+/// The front end revalidates: a language server or REPL that outlives a plugin
+/// rebuild must see the new manifest, not the one it read at startup. A
+/// manifest already handed out keeps describing the build it came from (it is
+/// host-owned data), and a later call reaches the new code.
+#[test]
+fn load_manifest_sees_a_rebuilt_library() {
+    let lib = private_copy(&fixture::build_testlib(), "revalidated_plugin");
+    let before = load_manifest(&lib).expect("initial manifest");
+    assert!(before.function("add").is_some());
+    assert!(before.function("extra").is_none());
+
+    // An unchanged file is not reloaded: the same manifest object comes back.
+    let cached = load_manifest(&lib).expect("cached manifest");
+    assert!(
+        std::sync::Arc::ptr_eq(&before, &cached),
+        "no needless reload"
+    );
+
+    // Swap through a rename, the way a linker installs a rebuilt library:
+    // writing over the mapped file in place would fault the old mapping.
+    let staged = lib.with_extension("new");
+    fs::copy(fixture::build_altlib(), &staged).expect("stage the rebuilt library");
+    fs::rename(&staged, &lib).expect("install the rebuilt library");
+
+    let after = load_manifest(&lib).expect("manifest after the rebuild");
+    assert!(
+        after.function("extra").is_some(),
+        "the new function is seen"
+    );
+    // The old manifest is still readable, and still describes the old build.
+    assert!(before.function("extra").is_none());
+
+    // Calls now reach the new code (the stale entry was purged, not just the
+    // canonical key), and the superseded library was retired, not unloaded.
+    assert_eq!(call(&lib, "extra", &[]).expect("extra"), Value::Int(7));
+}
+
+/// A plugin whose registration panics is a load error, not a process abort:
+/// `load_manifest` runs inside the compiler and the language server, and the
+/// raw ABI's only failure channel is a null manifest. Retrying is well defined
+/// (the panicking initializer leaves the plugin's `OnceLock` empty).
+#[test]
+fn a_panicking_registration_reports_a_load_error() {
+    let lib = fixture::build_faultylib();
+    for _ in 0..2 {
+        match load_manifest(&lib) {
+            Err(msg) => assert!(msg.contains("failed to initialize"), "{msg}"),
+            Ok(_) => panic!("a panicking `entry` must not yield a manifest"),
+        }
     }
 }

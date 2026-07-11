@@ -75,16 +75,33 @@ impl Monomorphizer<'_, '_> {
         out.into_iter().collect()
     }
 
+    /// The type each parameter's own annotation fixes, positionally, `None` for
+    /// an unannotated one. Lowering records a closure parameter's annotation on
+    /// its local declaration, and a nominal annotation is resolved against the
+    /// declaration so the type is self-describing -- exactly what the body is
+    /// typed against (see `type_and_store_inner`, where a declared local's type
+    /// overrides the seeded argument type). `None` when `id` names no closure.
+    fn closure_param_annotations(&self, id: ClosureId) -> Option<Vec<Option<Type>>> {
+        let clo = self.by_closure.get(&id)?;
+        Some(
+            clo.params
+                .iter()
+                .map(|p| {
+                    clo.body.locals[p.index()]
+                        .ty
+                        .as_known()
+                        .map(|t| resolve_nominal(self.program, t))
+                })
+                .collect(),
+        )
+    }
+
     /// The closure's parameter types from its own annotations, when every parameter
     /// is annotated. This types an *escaping* closure (returned, so neither called
     /// in-body nor passed to a function) -- e.g. `make_accumulator`'s returned
     /// `(amount: int32) -> ...`. `None` if any parameter is unannotated.
     fn closure_annotated_params(&self, id: ClosureId) -> Option<Vec<Type>> {
-        let clo = self.by_closure.get(&id)?;
-        clo.params
-            .iter()
-            .map(|p| clo.body.locals[p.index()].ty.as_known().cloned())
-            .collect()
+        self.closure_param_annotations(id)?.into_iter().collect()
     }
 
     /// Type a closure local: its captures come from the creation site and its
@@ -101,7 +118,7 @@ impl Monomorphizer<'_, '_> {
         captures: &[Operand],
         local: LocalId,
         module: &[String],
-        indirect_args: &HashMap<LocalId, Vec<Operand>>,
+        indirect_args: &HashMap<LocalId, Vec<Vec<Operand>>>,
         closure_passes: &HashMap<LocalId, (String, Vec<Operand>, usize)>,
         record_field_closures: &HashMap<LocalId, (LocalId, String, String)>,
         local_types: &[Option<Type>],
@@ -115,15 +132,11 @@ impl Monomorphizer<'_, '_> {
         }
         // Parameter types: from a direct in-body call, else from a higher-order
         // callee's use of the parameter the closure is passed as.
-        let param_types = if let Some(call_args) = indirect_args.get(&local) {
-            let mut pt = Vec::with_capacity(call_args.len());
-            for a in call_args {
-                match self.operand_type(a, local_types)? {
-                    Some(t) => pt.push(t),
-                    None => return Ok(None),
-                }
+        let mut param_types = if let Some(call_sites) = indirect_args.get(&local) {
+            match self.joined_arg_types(call_sites, local_types)? {
+                Some(pt) => pt,
+                None => return Ok(None),
             }
-            pt
         } else if let Some((base, pass_args, idx)) = closure_passes.get(&local) {
             match self.probe_callee_param_types(base, pass_args, *idx, local_types)? {
                 Some(pt) => pt,
@@ -177,6 +190,22 @@ impl Monomorphizer<'_, '_> {
                 local.index()
             ));
         };
+        // A parameter's own annotation is authoritative, and the use site does
+        // not have to agree with it: the checker accepts a `string` argument for
+        // a `(s: string?)` parameter, widening it. The body is typed against the
+        // annotation, so the closure's `Fun` type -- which the call site coerces
+        // its arguments to, and which keys the instance symbol -- has to carry
+        // the annotation too. Otherwise a bare `string` reaches a `string?`
+        // parameter unwrapped and the body reads the value as a nullable cell.
+        // The annotation loses no information the argument type has: it is the
+        // very type the instance ends up with either way.
+        if let Some(annotations) = self.closure_param_annotations(id) {
+            for (pt, annotated) in param_types.iter_mut().zip(annotations) {
+                if let Some(t) = annotated {
+                    *pt = t;
+                }
+            }
+        }
         let ret = self.instantiate_closure(id, &capture_types, &param_types)?;
         Ok(Some(Type::Fun(param_types, Box::new(ret))))
     }
@@ -242,17 +271,52 @@ impl Monomorphizer<'_, '_> {
             return Ok(None);
         };
         let indirect = collect_indirect_args(body);
-        let Some(call_args) = indirect.get(p_local) else {
+        let Some(call_sites) = indirect.get(p_local) else {
             return Ok(None);
         };
-        let mut pt = Vec::with_capacity(call_args.len());
-        for a in call_args {
-            match self.operand_type(a, &lt)? {
-                Some(t) => pt.push(t),
-                None => return Ok(None),
+        self.joined_arg_types(call_sites, &lt)
+    }
+
+    /// The type of each parameter position across the call sites: one closure
+    /// parameter has one type, so the sites' argument types are joined (`null`
+    /// at one site and a `P` at another give `P?`).
+    ///
+    /// A site whose arguments are not all typed yet is skipped rather than
+    /// deferring the whole answer, because it may never type on its own: an
+    /// argument that is the closure's *own* result (`g(g(v))`) waits on the
+    /// return type this very call is needed to infer. `None` only when no site
+    /// contributes, which leaves the closure for a later pass. A zero-argument
+    /// closure has no positions, so it types immediately.
+    fn joined_arg_types(
+        &self,
+        call_sites: &[Vec<Operand>],
+        local_types: &[Option<Type>],
+    ) -> Result<Option<Vec<Type>>, String> {
+        let mut joined: Vec<Type> = Vec::new();
+        let mut any = false;
+        for args in call_sites {
+            let mut site = Vec::with_capacity(args.len());
+            for a in args {
+                match self.operand_type(a, local_types)? {
+                    Some(t) => site.push(t),
+                    None => break,
+                }
+            }
+            if site.len() != args.len() {
+                continue;
+            }
+            any = true;
+            for (i, t) in site.into_iter().enumerate() {
+                match joined.get_mut(i) {
+                    Some(cur) => *cur = merge_return_types(cur, &t),
+                    None => joined.push(t),
+                }
             }
         }
-        Ok(Some(pt))
+        if !any && !call_sites.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(joined))
     }
 
     /// A lightweight, non-instantiating fixpoint that resolves local types from

@@ -1,0 +1,34 @@
+// A generic body reached at several types must not let one instantiation's
+// types leak into another's code. `s.join(SEP)` is a `string` where `s` is an
+// array and a `Wrap` where `s` is a `Wrap` (it recurses); the two share one MIR
+// body, so seeding either result type onto the shared local would reinterpret
+// the other value's representation. Both arms must run, and agree.
+type Wrap = { _parts: string[] }
+
+const SEP = "/"
+
+fun Wrap._extend(self, parts: string[]) -> Wrap {
+    let out = self._parts.slice(0, len(self._parts))
+    for p in parts {
+        out.push(p)
+    }
+    return Wrap { _parts: out }
+}
+
+fun Wrap.join(self, s) -> Wrap {
+    if s._parts {
+        return self._extend(s._parts)
+    } else if s.split {
+        return self._extend(s.split(SEP))
+    } else {
+        // For an array receiver `s.join(SEP)` is the stdlib `string[].join`; for
+        // a `Wrap` receiver -- in the arm above, never reached here -- it would
+        // be this very method.
+        return self._extend(s.join(SEP).split(SEP))
+    }
+}
+
+const base = Wrap { _parts: ["usr"] }
+println(base.join(["a", "b"])._parts)
+println(base.join(Wrap { _parts: ["c"] })._parts)
+println(base.join("d/e")._parts)

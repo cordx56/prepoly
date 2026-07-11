@@ -45,6 +45,13 @@ export! {
     fn is_even(v: i64) -> bool { v % 2 == 0 }
 
     fn undocumented() {}
+
+    /// Negates `v`.
+    ///
+    /// Documented with a nested /* block comment */ that the synthesized
+    /// module must neutralize: Prepoly's block comments nest, so the bare
+    /// opener would leave the wrapper's doc block unterminated.
+    fn negate(v: i64) -> i64 { -v }
 }
 
 struct TestLib;
@@ -61,6 +68,12 @@ impl PrepolyLib for TestLib {
         reg.export(decl!(scale));
         reg.export(decl!(is_even));
         reg.export(decl!(undocumented));
+        // Names that are legal in Rust but cannot name a Prepoly function: a
+        // keyword, and a builtin the runtime owns. Both import under a
+        // `_`-suffixed wrapper and still dispatch here.
+        reg.function("match", |v: i64| v * 2);
+        reg.function("len", |text: String| text.len() as i64);
+        reg.export(decl!(negate));
     }
 }
 

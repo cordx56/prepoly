@@ -41,11 +41,11 @@
 //!
 //! Supported types, as parameters and as returns: `bool`, `i64`, `f64`,
 //! `String`, [`Bytes`], and `Vec<T>` of any of them, nesting freely (Prepoly
-//! `bool`, `int64`, `float64`, `string`, `uint8[]`, `T[]` — so `Vec<String>`
+//! `bool`, `int64`, `float64`, `string`, `uint8[]`, `T[]` -- so `Vec<String>`
 //! is `string[]` and `Vec<Vec<bool>>` is `bool[][]`). A byte buffer is
 //! [`Bytes`], not `Vec<u8>`: `Vec<T>` is the general array, and the boundary's
 //! only integer is `int64`. Returns additionally allow `()` and
-//! `Result<T, impl Display>` — a `Result` function is fallible in Prepoly
+//! `Result<T, impl Display>` -- a `Result` function is fallible in Prepoly
 //! (`-> T!`).
 //!
 //! The host loads the library and runs its registration when the program (or
@@ -205,7 +205,19 @@ pub fn __entry<L: PrepolyLib>(host_abi: u32) -> *const raw::RawManifest {
     if host_abi != raw::ABI_VERSION {
         return core::ptr::null();
     }
-    STATE.get_or_init(build_state::<L>).manifest as *const raw::RawManifest
+    // `entry` is arbitrary plugin code reached through the plain `extern "C"`
+    // `prepoly_entry`, and this runs inside the compiler and the language
+    // server: a panic escaping here would abort the editor session. Report the
+    // failure through the only channel the raw ABI has, a null manifest.
+    // `OnceLock::get_or_init` leaves the cell empty when its initializer
+    // panics, so a later retry is well defined.
+    let state = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        STATE.get_or_init(build_state::<L>)
+    }));
+    match state {
+        Ok(s) => s.manifest as *const raw::RawManifest,
+        Err(_) => core::ptr::null(),
+    }
 }
 
 /// # Safety

@@ -416,7 +416,8 @@ import geometry.vec as g
   then mirrors `Tcp` (`read`/`write`/`close`). Networking does not run on
   `prepoly repl`.
 - Processes: a LIBRARY, not `std` -- its native half is a plugin. Build it with
-  `libraries/build.sh`, set `PREPOLY_PACKAGES=process=<repo>/libraries`, then
+  `libraries/build.sh`, set `PREPOLY_INCLUDE=<repo>/libraries` (unneeded
+  for a distributed toolchain, which finds `libraries/` beside its binary), then
   `import process.{ Command, Stdio }`. `Command.new(prog)`
   then chained builder methods `arg(s)`/`args(ss)`/`stdin/stdout/stderr(Stdio)`
   (`Stdio` is `| Inherit | Pipe | Null`), then `spawn() -> Child!`. On a

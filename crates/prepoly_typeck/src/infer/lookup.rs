@@ -394,12 +394,9 @@ impl<'a> Checker<'a> {
             match constraint {
                 ShapeConstraint::Equals(expected) => {
                     if !self.can_unify(&got, &expected) {
+                        let (got, expected) = prepoly_hir::mismatch_display(&got, &expected);
                         self.errors.push(TypeError {
-                            message: format!(
-                                "cannot use `{}` where `{}` is required",
-                                got.display(),
-                                expected.display()
-                            ),
+                            message: format!("cannot use `{got}` where `{expected}` is required"),
                             span,
                         });
                     }

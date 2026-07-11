@@ -280,11 +280,7 @@ fn typedef_method_signatures(
             match_type_vars(fty, declared, &scheme.params, &mut map);
         }
     }
-    for (fname, fty) in &scheme.fields {
-        if let Some(actual) = substitution.get(fname) {
-            match_type_vars(fty, actual, &scheme.params, &mut map);
-        }
-    }
+    pin_scheme_params(scheme, substitution, &mut map);
     for (name, m) in methods {
         let Some(sm) = scheme.methods.get(name) else {
             continue;
@@ -346,12 +342,24 @@ fn receiver_scheme<'a>(
 /// string>[]` gives `K -> string`, `V -> string`).
 fn instance_param_map(scheme: &TypeScheme, recv: &NominalType) -> BTreeMap<u32, Type> {
     let mut map = BTreeMap::new();
+    pin_scheme_params(scheme, &recv.substitution, &mut map);
+    map
+}
+
+/// Pin every scheme parameter that `substitution` fixes: for each field the
+/// substitution gives a type, match it against the field's scheme type and
+/// record what each parameter variable stands for. Layered by callers that
+/// pin from more than one source (a declaration, then an instance).
+fn pin_scheme_params(
+    scheme: &TypeScheme,
+    substitution: &Substitution,
+    map: &mut BTreeMap<u32, Type>,
+) {
     for (fname, fty) in &scheme.fields {
-        if let Some(actual) = recv.substitution.get(fname) {
-            match_type_vars(fty, actual, &scheme.params, &mut map);
+        if let Some(actual) = substitution.get(fname) {
+            match_type_vars(fty, actual, &scheme.params, map);
         }
     }
-    map
 }
 
 /// A copy of `sig` with each unannotated (still-`unknown`) parameter resolved to
