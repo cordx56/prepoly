@@ -81,17 +81,37 @@ impl<'a> Checker<'a> {
         }
         let type_name = self.resolve_self_name(qualifier);
         let symbol = self.resolve_type_symbol(&type_name)?;
-        let TypeKind::Record { methods, .. } = &self.program.types.get(&symbol)?.kind else {
-            return None;
-        };
-        let type_name = symbol;
-        let method = methods.get(method)?;
-        Some(ResolvedMethod {
-            qualifier: type_name.clone(),
-            self_type: type_name,
-            signature: method.signature.clone(),
-            method: method.decl.as_ref().clone(),
-        })
+        match &self.program.types.get(&symbol)?.kind {
+            TypeKind::Record { methods, .. } => {
+                let method = methods.get(method)?;
+                Some(ResolvedMethod {
+                    qualifier: symbol.clone(),
+                    self_type: symbol,
+                    signature: method.signature.clone(),
+                    method: method.decl.as_ref().clone(),
+                })
+            }
+            // A method declared on a SUM (`fun TomlValue.parse`) is lowered into
+            // every variant's table, so the bare type name is answered by any
+            // variant -- they hold the same declaration. This is the only way to
+            // reach a sum's STATIC method: with no `self` there is no receiver to
+            // dispatch through, so `methods_for_type` never runs. Keying the
+            // resolution as `Sum.Variant` matches what the receiver path and
+            // `precompute_method_returns` file sum methods under, so the call
+            // mangles to the same symbol. Without this the call typed as an
+            // unknown, and anything reading the result's type -- notably keying a
+            // reflective `-> infer!` call on it -- silently lost the receiver.
+            TypeKind::Sum { variants } => {
+                let variant = variants.iter().find(|v| v.methods.contains_key(method))?;
+                let m = variant.methods.get(method)?;
+                Some(ResolvedMethod {
+                    qualifier: format!("{symbol}.{}", variant.name),
+                    self_type: symbol,
+                    signature: m.signature.clone(),
+                    method: m.decl.as_ref().clone(),
+                })
+            }
+        }
     }
 
     pub(super) fn check_common_method_signatures(

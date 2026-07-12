@@ -1226,6 +1226,136 @@ fn completion_offers_sum_variants() {
     );
 }
 
+/// After `v.` on a value whose type is a SUM, offer that sum's instance methods.
+/// A sum's methods are lowered into every variant's table, so they are reached
+/// through the variants rather than a record's method map -- member completion
+/// only looked at records and offered nothing at all here.
+#[test]
+fn completion_offers_sum_value_methods() {
+    let src = concat!(
+        "type Shape =\n",
+        "    | Circle { radius: float64 }\n",
+        "    | Square { side: float64 }\n",
+        "\n",
+        "/** The shape's area. */\n",
+        "fun Shape.area(self) -> float64 {\n",
+        "    match self {\n",
+        "        Shape.Circle { radius } => { return radius }\n",
+        "        Shape.Square { side } => { return side }\n",
+        "    }\n",
+        "}\n",
+        "\n",
+        "fun Shape.make(side: float64) -> Shape {\n",
+        "    return Shape.Square { side: side }\n",
+        "}\n",
+        "\n",
+        "fun main() {\n",
+        "    let s = Shape.Square { side: 2.0 }\n",
+        "    s.\n",
+        "}\n",
+    );
+    let analyzer = DocAnalyzer::new(path());
+    let doc = Document::new(src.to_string(), 1);
+    let off = src.find("s.\n").unwrap() + 2;
+    let items = completion::completion(&doc, &analyzer, &path(), doc.position_at(off));
+    let labels = labels(&items);
+    assert!(
+        labels.contains(&"area".to_string()),
+        "sum instance method: {labels:?}"
+    );
+    // A static has no receiver, so it is not callable on a value.
+    assert!(
+        !labels.contains(&"make".to_string()),
+        "static must not appear on a value: {labels:?}"
+    );
+    let area = items
+        .iter()
+        .find(|i| i.label == "area")
+        .expect("the area item");
+    assert!(
+        area.detail
+            .as_deref()
+            .is_some_and(|d| d.contains("float64")),
+        "signature detail: {:?}",
+        area.detail
+    );
+}
+
+/// After a type name (`Shape.`), offer its STATIC methods next to its variants.
+/// Only a static is callable there -- an instance method needs a receiver.
+#[test]
+fn completion_offers_static_methods_after_type_name() {
+    let src = concat!(
+        "type Shape =\n",
+        "    | Circle { radius: float64 }\n",
+        "    | Square { side: float64 }\n",
+        "\n",
+        "fun Shape.area(self) -> float64 {\n",
+        "    return 0.0\n",
+        "}\n",
+        "\n",
+        "fun Shape.parse(text: string) -> Shape! {\n",
+        "    return Shape.Square { side: 1.0 }\n",
+        "}\n",
+        "\n",
+        "fun main() {\n",
+        "    Shape.\n",
+        "}\n",
+    );
+    let analyzer = DocAnalyzer::new(path());
+    let doc = Document::new(src.to_string(), 1);
+    let off = src.find("    Shape.\n").unwrap() + "    Shape.".len();
+    let items = completion::completion(&doc, &analyzer, &path(), doc.position_at(off));
+    let labels = labels(&items);
+    assert!(
+        labels.contains(&"parse".to_string()),
+        "sum static method: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"Circle".to_string()),
+        "variants still offered: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"area".to_string()),
+        "instance method must not appear after a type name: {labels:?}"
+    );
+}
+
+/// The same for a RECORD's static constructor.
+#[test]
+fn completion_offers_record_static_methods_after_type_name() {
+    let src = concat!(
+        "type Point = {\n",
+        "    x: int32\n",
+        "}\n",
+        "\n",
+        "fun Point.origin() -> Point {\n",
+        "    return Point { x: 0 }\n",
+        "}\n",
+        "\n",
+        "fun Point.dist(self) -> int32 {\n",
+        "    return self.x\n",
+        "}\n",
+        "\n",
+        "fun main() {\n",
+        "    Point.\n",
+        "}\n",
+    );
+    let analyzer = DocAnalyzer::new(path());
+    let doc = Document::new(src.to_string(), 1);
+    let off = src.find("    Point.\n").unwrap() + "    Point.".len();
+    let items = completion::completion(&doc, &analyzer, &path(), doc.position_at(off));
+    let labels = labels(&items);
+    assert!(
+        labels.contains(&"origin".to_string()),
+        "record static method: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"dist".to_string()),
+        "instance method must not appear after a type name: {labels:?}"
+    );
+}
+
 /// `s: ref(mut(infer[]))` with `s.push("b")` infers `ref(mut(string[]))`: the
 /// push pins the element through the `ref`/`mut` wrappers, and the final
 /// re-resolution makes every occurrence of `s` reflect it.

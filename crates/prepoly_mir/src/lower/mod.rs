@@ -766,6 +766,7 @@ pub fn lower_program_with_types(
                             None,
                             &method.decl.name,
                             &method.decl.params,
+                            method.decl.ret.as_ref(),
                             body,
                             self_type.clone(),
                         ));
@@ -788,6 +789,7 @@ pub fn lower_program_with_types(
                                 Some(v.name.clone()),
                                 &method.decl.name,
                                 &method.decl.params,
+                                method.decl.ret.as_ref(),
                                 body,
                                 self_type.clone(),
                             ));
@@ -823,6 +825,7 @@ fn lower_method(
     variant: Option<String>,
     method: &str,
     params: &[Param],
+    ret: Option<&prepoly_parser::ast::TypeExpr>,
     body: &Block,
     self_type: Option<String>,
 ) -> MirMethod {
@@ -841,21 +844,15 @@ fn lower_method(
         method: method.to_string(),
         self_type,
         module: info.module.clone(),
-        fallible: method_fallible(params, body, ctx.null_props),
+        // A method's fallibility follows exactly the same rule as a free
+        // function's: a declared `-> T!` wraps plain returns in `Result.Ok` even
+        // when the body never builds an error itself. Judging a method by its body
+        // alone left `fun C.k(self) -> string[]!` returning the bare array where
+        // the caller's `!` expected a `Result` -- the value read back as `never`
+        // (or, for a scalar payload, as `null`).
+        fallible: function_fallible(ret, body, ctx.null_props),
         body: mir_body,
     }
-}
-
-/// A method auto-wraps plain returns in `Result.Ok` when it has no declared
-/// return type and its body uses `error`/`expr!` (matches codegen). An `expr!`
-/// on a nullable operand (a `null_props` span) does not count: its failure arm
-/// returns `null`, making the return type nullable rather than a `Result`.
-fn method_fallible(
-    _params: &[Param],
-    body: &Block,
-    null_props: &std::collections::HashSet<Span>,
-) -> bool {
-    crate::analysis::fallible_block_except(body, null_props)
 }
 
 /// A free function auto-wraps plain returns in `Result.Ok` (and propagates

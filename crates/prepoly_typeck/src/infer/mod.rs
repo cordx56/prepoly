@@ -65,6 +65,9 @@ struct MethodCall<'a> {
     declared_ret: Option<Type>,
     fallback_ret: Type,
     arg_types: &'a [Type],
+    /// The call site, so a re-elaboration that runs out of budget is reported
+    /// somewhere the user can act on.
+    span: prepoly_parser::Span,
     /// For each non-`self` parameter, the type it instantiates to for this
     /// receiver instance (from the type's scheme), when fully known. An
     /// unannotated parameter takes this over the argument's own type, so the
@@ -160,23 +163,12 @@ pub struct Inference {
     pub null_props: HashSet<Span>,
 }
 
-pub fn analyze(program: &Program) -> Inference {
-    let mut checker = Checker::new(program);
-    checker.validate_param_declarations();
-    checker.precompute_global_bindings();
-    checker.precompute_function_returns();
-    // Twice: a method's inferred return may depend on another type's method
-    // (`Tcp.close` propagating `File.close`); the second pass sees every
-    // first-pass entry, so cross-type chains converge.
-    checker.precompute_method_returns();
-    checker.precompute_method_returns();
-    // Check each type's method bodies first, then generalize each record type into
-    // a scheme. The method loop binds `self` to the bare type, so a type's methods
-    // share one field variable and their parameter/return variables are linked
-    // through the bodies. Generalizing before the function bodies are checked makes
-    // the schemes available at call sites (a function instantiates a method's
-    // scheme to type the call's result) and keeps the generic field variable read
-    // here free of any concrete use.
+/// Check every type's method bodies in the shared per-type environment. Binding
+/// `self` to the bare type makes a type's methods share one field variable, so
+/// the bodies' stores and reads link each field's element to the methods'
+/// parameter and return variables -- the linkage [`Checker::build_schemes`] then
+/// generalizes.
+fn check_method_bodies(checker: &mut Checker, program: &Program) {
     checker.co_checking = true;
     for t in program.types.values() {
         checker.current_module = t.module.clone();
@@ -233,6 +225,55 @@ pub fn analyze(program: &Program) -> Inference {
         }
     }
     checker.co_checking = false;
+}
+
+/// Generalize every record into a [`TypeScheme`] on a throwaway checker, so the
+/// real pass has the schemes in hand *while* it checks method bodies.
+///
+/// A scheme can only be built after the method bodies have been checked (that is
+/// what links a field's element type to its methods' parameter variables), so the
+/// real pass cannot build them any earlier than it already does. But a method
+/// body that calls ANOTHER type's method needs that type's scheme to pin the
+/// call's parameters from the receiver -- `map.set(k, 100)` on a width-pinned
+/// `HashMap` types the bare literal as the map's `int64`, not the literal's
+/// default `int32`. Until the schemes existed only from the function-body phase
+/// onward, so the same call inside a method body typed the literal from the
+/// argument and clashed with the receiver's slot.
+///
+/// The preliminary run's diagnostics and solver are discarded; only the schemes
+/// are kept, and the real pass rebuilds them once its own method bodies are done.
+/// It therefore does only the work a scheme needs: the declaration validation is
+/// pure diagnostics, and the second `precompute_method_returns` exists to converge
+/// cross-type *return* chains, which generalization does not read -- both are the
+/// real pass's job.
+fn seed_schemes(program: &Program) -> HashMap<String, TypeScheme> {
+    let mut pre = Checker::new(program);
+    pre.precompute_global_bindings();
+    pre.precompute_function_returns();
+    pre.precompute_method_returns();
+    check_method_bodies(&mut pre, program);
+    pre.build_schemes()
+}
+
+pub fn analyze(program: &Program) -> Inference {
+    let seeded = seed_schemes(program);
+    let mut checker = Checker::new(program);
+    checker.schemes = seeded;
+    checker.validate_param_declarations();
+    checker.precompute_global_bindings();
+    checker.precompute_function_returns();
+    // Twice: a method's inferred return may depend on another type's method
+    // (`Tcp.close` propagating `File.close`); the second pass sees every
+    // first-pass entry, so cross-type chains converge.
+    checker.precompute_method_returns();
+    checker.precompute_method_returns();
+    // Check each type's method bodies, then generalize each record type into a
+    // scheme. Generalizing before the function bodies are checked makes the
+    // schemes available at call sites (a function instantiates a method's scheme
+    // to type the call's result) and keeps the generic field variable read here
+    // free of any concrete use. The bodies below are checked against the seeded
+    // schemes; this rebuild replaces them with the ones this pass linked.
+    check_method_bodies(&mut checker, program);
     checker.schemes = checker.build_schemes();
 
     for (symbol, f) in &program.functions {
@@ -336,7 +377,25 @@ struct Checker<'a> {
     /// local to that type's scheme, never a shared-solver binding, which would
     /// leak into unrelated bodies' cached signature variables.
     co_return_links: HashMap<(String, String), Vec<(Type, Type)>>,
+    /// Callables whose body is currently being re-elaborated at a call site,
+    /// keyed by `fn:<symbol>` / `method:<self type>.<name>`. Re-entering one is a
+    /// recursive call: re-checking the body again would not terminate, so the
+    /// call falls back to the declared (or precomputed) return type.
+    ///
+    /// A method is keyed by its RECEIVER TYPE, not by the `Sum.Variant` qualifier
+    /// the call resolved through. A sum's methods are lowered into every variant's
+    /// table, so one `v.render()` resolves to one candidate per variant, all
+    /// sharing the same body. Keyed per qualifier, a recursive call re-entered
+    /// through a *different* variant's key and the guard never fired: each level
+    /// re-elaborated the body once per not-yet-entered variant, so the work grew
+    /// factorially in the variant count and a wide sum's self-recursive method
+    /// effectively hung the compiler.
     instantiating: HashSet<String>,
+    /// How many callable bodies have been re-elaborated at call sites so far, and
+    /// whether the budget below has already been reported. Inference that fails to
+    /// converge must not hang the compiler: it stops re-elaborating and says so.
+    elaborations: u64,
+    elaboration_budget_reported: bool,
     /// Deferred structural constraints on inference variables, keyed by the
     /// variable's `Unknown` id. Recorded while checking a body that uses an
     /// unknown-typed value (a closure parameter) and verified when the variable
@@ -456,6 +515,8 @@ impl<'a> Checker<'a> {
             current_co_method: None,
             co_return_links: HashMap::new(),
             instantiating: HashSet::new(),
+            elaborations: 0,
+            elaboration_budget_reported: false,
             shape_constraints: HashMap::new(),
             solver: {
                 // Fresh variables must not collide with the ids lowering

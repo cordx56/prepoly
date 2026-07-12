@@ -8,10 +8,13 @@
 //! next to the document, include paths, and declared packages -- with the brace
 //! names carrying the signatures and docs of the analyzed module.
 //! After a `.` (`a.|`) the cursor is offered the members reachable on the
-//! receiver -- the receiver type's record fields and methods, and built-in and
-//! stdlib methods for its kind -- or, when the receiver is a type name
-//! (`Shape.|`), that type's variants and methods. Everywhere else the cursor is
-//! offered the types and functions visible from the document.
+//! receiver -- a record's fields, a record's or a sum's INSTANCE methods, and the
+//! built-in and stdlib methods for the receiver's kind -- or, when the receiver is
+//! a type name (`Shape.|`), what that name can be qualified with: a sum's variants
+//! and, for either kind of nominal, its STATIC methods. The instance/static split
+//! is what a call site can actually reach: a value has no static, and a type name
+//! has no receiver to bind `self` to. Everywhere else the cursor is offered the
+//! types and functions visible from the document.
 //!
 //! The member case needs the receiver's inferred type, but `a.` does not parse,
 //! so the source is re-analyzed with a probe identifier spliced in at the cursor
@@ -470,30 +473,35 @@ fn value_member_items(
         _ => {}
     }
 
-    if let Type::Record(n) = &base
+    // A nominal receiver -- record OR sum. A record also offers its fields; a
+    // sum's payloads are only reachable by matching, so it offers methods alone.
+    if let Type::Record(n) | Type::Sum(n) = &base
         && let Some(info) = full.program.type_by_id(n.id)
-        && let TypeKind::Record { fields, .. } = &info.kind
     {
-        // Fields, typed for this instance: the receiver's substitution carries
-        // the concrete type an open (inferred/slot-dependent) field was pinned
-        // to; a still-open slot variable renders as `Self.<slot>`.
-        let mut namer = UnknownNamer::default();
-        for (slot, var) in &info.slots {
-            namer.fix(*var, format!("Self.{slot}"));
-        }
-        for f in fields {
-            if !include_private && !is_public_member(&f.name) {
-                continue;
+        if let TypeKind::Record { fields, .. } = &info.kind {
+            // Fields, typed for this instance: the receiver's substitution carries
+            // the concrete type an open (inferred/slot-dependent) field was pinned
+            // to; a still-open slot variable renders as `Self.<slot>`.
+            let mut namer = UnknownNamer::default();
+            for (slot, var) in &info.slots {
+                namer.fix(*var, format!("Self.{slot}"));
             }
-            let resolved = n.substitution.get(&f.name).or(f.resolved_ty.as_ref());
-            let detail = resolved.map(|t| format!("{}: {}", f.name, render_type(t, &mut namer)));
-            items.push(item(f.name.clone(), CompletionItemKind::FIELD, detail));
+            for f in fields {
+                if !include_private && !is_public_member(&f.name) {
+                    continue;
+                }
+                let resolved = n.substitution.get(&f.name).or(f.resolved_ty.as_ref());
+                let detail =
+                    resolved.map(|t| format!("{}: {}", f.name, render_type(t, &mut namer)));
+                items.push(item(f.name.clone(), CompletionItemKind::FIELD, detail));
+            }
         }
-        items.extend(record_method_items(
+        items.extend(type_method_items(
             full,
             info,
             &n.substitution,
             include_private,
+            MethodKind::Instance,
         ));
     }
 
@@ -517,24 +525,50 @@ fn value_member_items(
     dedup_by_label(items)
 }
 
-/// Completion items for a record type's methods, with each signature resolved
-/// against `substitution` through the type's scheme (see
-/// [`typedef_method_signatures`]) -- so a `HashMap<string, int32>` receiver
-/// shows `get` returning `int32?` rather than an open variable.
-fn record_method_items(
+/// Which methods a position can actually call. A value receiver (`v.`) reaches
+/// only the methods that take a `self`; a type name (`Shape.`) reaches only the
+/// statics, since there is no receiver to bind `self` to.
+#[derive(Clone, Copy, PartialEq)]
+enum MethodKind {
+    Instance,
+    Static,
+}
+
+impl MethodKind {
+    fn matches(self, m: &prepoly_hir::MethodInfo) -> bool {
+        let has_self = m.signature.params.first().is_some_and(|p| p.name == "self");
+        match self {
+            MethodKind::Instance => has_self,
+            MethodKind::Static => !has_self,
+        }
+    }
+}
+
+/// Completion items for a type's methods of the requested kind, with each
+/// signature resolved against `substitution` through the type's scheme (see
+/// [`typedef_method_signatures`]) -- so a `HashMap<string, int32>` receiver shows
+/// `get` returning `int32?` rather than an open variable.
+///
+/// Both kinds of nominal are served. A SUM's methods are not in a method map of
+/// its own: lowering copies each `fun Shape.m` into EVERY variant's table, so
+/// they are reached through the variants (any one of them answers -- they hold
+/// the same declarations). Looking only at records left a sum value with no
+/// members at all.
+fn type_method_items(
     full: &FullAnalysis,
     info: &TypeInfo,
     substitution: &prepoly_hir::Substitution,
     include_private: bool,
+    want: MethodKind,
 ) -> Vec<CompletionItem> {
-    let TypeKind::Record { methods, .. } = &info.kind else {
-        return Vec::new();
-    };
     let resolved = typedef_method_signatures(full, info, substitution);
     let mut items = Vec::new();
-    for (name, m) in methods {
+    let mut push = |name: &String, m: &prepoly_hir::MethodInfo| {
         if !include_private && !is_public_member(name) {
-            continue;
+            return;
+        }
+        if !want.matches(m) {
+            return;
         }
         let sig = resolved.get(name).unwrap_or(&m.signature);
         items.push(doc_item(
@@ -543,12 +577,29 @@ fn record_method_items(
             Some(render_signature(sig)),
             m.decl.doc.as_deref(),
         ));
+    };
+    match &info.kind {
+        TypeKind::Record { methods, .. } => {
+            for (name, m) in methods {
+                push(name, m);
+            }
+        }
+        TypeKind::Sum { variants } => {
+            for v in variants {
+                for (name, m) in &v.methods {
+                    push(name, m);
+                }
+            }
+        }
     }
-    items
+    dedup_by_label(items)
 }
 
 /// When the text before the `.` at `dot` is a standalone identifier naming a
-/// type, the members are that type's variants (sum) or methods (record).
+/// type, the members are what that name can be qualified with: a sum's variants
+/// (`Shape.Circle { .. }`) and, for either kind of nominal, its STATIC methods
+/// (`TomlValue.parse(..)`, `Point.origin()`). An instance method is not offered
+/// here -- there is no receiver to bind its `self` to, so it is not callable.
 fn type_qualified_items(
     full: &FullAnalysis,
     text: &str,
@@ -573,22 +624,24 @@ fn type_qualified_items(
     let name = &text[start..dot];
     let info = full.program.resolve_type(&["main".to_string()], name)?;
     let mut items = Vec::new();
-    match &info.kind {
-        TypeKind::Sum { variants } => {
-            for v in variants {
-                if !include_private && !is_public_member(&v.name) {
-                    continue;
-                }
-                items.push(item(v.name.clone(), CompletionItemKind::ENUM_MEMBER, None));
+    if let TypeKind::Sum { variants } = &info.kind {
+        for v in variants {
+            if !include_private && !is_public_member(&v.name) {
+                continue;
             }
-        }
-        TypeKind::Record { .. } => {
-            // The declaration view: no instance, so an empty substitution shows
-            // signatures over the declaration's own slots (`Self.<slot>`).
-            let empty = prepoly_hir::Substitution::empty();
-            items.extend(record_method_items(full, info, &empty, include_private));
+            items.push(item(v.name.clone(), CompletionItemKind::ENUM_MEMBER, None));
         }
     }
+    // The declaration view: no instance, so an empty substitution shows signatures
+    // over the declaration's own slots (`Self.<slot>`).
+    let empty = prepoly_hir::Substitution::empty();
+    items.extend(type_method_items(
+        full,
+        info,
+        &empty,
+        include_private,
+        MethodKind::Static,
+    ));
     Some(items)
 }
 

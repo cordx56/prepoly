@@ -1,0 +1,10 @@
+// Importing one name from a module must not leak the module's other public names
+// into bare scope: only the prelude is import-free, and a library module is not
+// the prelude. `index_of` lives in the url.text library module alongside the
+// imported `substr` and is not imported here, so calling it is an error naming
+// the module that has it.
+import url.text.{ substr }
+
+let cs = ["a", "b", "c"]
+let at = index_of(cs, "b", 0, 3)
+println(at)

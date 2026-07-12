@@ -1,0 +1,70 @@
+// A branch that LEAVES -- `return`, `break`, `continue` -- produces no value, so
+// its type is `Never`, which a branch join absorbs. It must not constrain the
+// other branch.
+//
+// The `infer` checker typed such a block `void` (only the HM checker gave it
+// `Never`), so an arm that bailed out clashed with the arm that produced the
+// value: "`match` branches have incompatible types `int32` and `void`". Every
+// form below was rejected for that reason alone.
+
+fun mk(bad: bool) -> int32! {
+    if bad {
+        return error("boom")
+    }
+    return 9
+}
+
+// A match arm that returns, in VALUE position.
+fun from_result(r: int32!) -> int32 {
+    let v = match r {
+        Ok { value } => value,
+        Err { error } => { return -1 }
+    }
+    return v * 2
+}
+
+// An `if` whose else returns.
+fun positive_or_bail(x: int32) -> int32 {
+    let v = if x > 0 { x } else { return 0 }
+    return v + 100
+}
+
+// An `if let` whose else returns.
+fun unwrap_or_bail(x: int32?) -> int32 {
+    let v = if let y = x { y } else { return -1 }
+    return v + 1000
+}
+
+// `break` and `continue` diverge too: the arm that takes them yields nothing.
+fun first_even(xs: int32[]) -> int32 {
+    let found: int32 = -1
+    for x in xs {
+        let keep = if x % 2 == 0 { x } else { continue }
+        found = keep
+        break
+    }
+    return found
+}
+
+// A `return` that is not the block's LAST statement still makes it diverge --
+// what follows is unreachable.
+fun early(x: int32) -> int32 {
+    let v = if x > 0 {
+        x
+    } else {
+        return 42
+    }
+    return v
+}
+
+fun main() {
+    println(from_result(mk(false)))
+    println(from_result(mk(true)))
+    println(positive_or_bail(3))
+    println(positive_or_bail(-3))
+    println(unwrap_or_bail(7))
+    println(unwrap_or_bail(null))
+    println(first_even([1, 3, 6, 8]))
+    println(early(1))
+    println(early(-1))
+}

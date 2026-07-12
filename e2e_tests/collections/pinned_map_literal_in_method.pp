@@ -1,0 +1,56 @@
+// A bare integer literal stored into a width-pinned container must take the
+// receiver's width, and that must hold inside a METHOD body just as it does
+// inside a function body.
+//
+// Pinning a call's parameters from the receiver needs the receiver type's scheme,
+// and a scheme can only be generalized once the method bodies have been checked
+// (that is what links a field's element type to its methods' parameter
+// variables). So the schemes only existed from the function-body phase onward,
+// and the same `set` inside a method body typed the literal from the ARGUMENT --
+// `int32` -- clashing with the map's `int64` slot:
+//
+//     cannot use `_Entry<key=string, value=int32>` where
+//     `_Entry<key=string, value=int64>?` is required
+//
+// The checker now seeds the schemes from a preliminary pass, so a method body
+// sees them too.
+
+import std.collections.{ HashMap }
+
+type Counts = HashMap {
+    key: string
+    value: int64
+}
+
+type Tally = { runs: int64 }
+
+// The literals here are checked inside a METHOD body.
+fun Tally.build(self) -> Counts {
+    self.runs += 1
+    let c: Counts = HashMap.new()
+    c.set("a", 10)
+    c.set("b", 32)
+    return c
+}
+
+// A parameter annotated with the refinement is width-pinned too.
+fun Tally.bump(self, c: Counts, key: string) {
+    c.set(key, 100)
+}
+
+fun total(c: Counts) -> int64 {
+    let sum: int64 = 0
+    for v in c.values() {
+        sum += v
+    }
+    return sum
+}
+
+fun main() {
+    let t = Tally { runs: 0 }
+    let c = t.build()
+    println(total(c))
+    t.bump(c, "c")
+    println(total(c))
+    println(t.runs)
+}

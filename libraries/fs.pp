@@ -1,6 +1,6 @@
 // File handles and byte I/O. A `File` holds an OS file descriptor privately;
-// `open` produces one from a path, and other libraries adopt descriptors they
-// obtained elsewhere (a child's pipe, a socket) through `File.from_fd`, so
+// `File.open` produces one from a path, and other libraries adopt descriptors
+// they obtained elsewhere (a child's pipe, a socket) through `File.from_fd`, so
 // the ordinary read/write/close methods drive any byte stream.
 //
 // This is a library rather than part of `std`: asking the operating system to
@@ -8,7 +8,7 @@
 // a runtime builtin. Point `PREPOLY_INCLUDE` at this directory and import it:
 //
 //     PREPOLY_INCLUDE=/path/to/libraries
-//     import fs.{ File, open, read_file, write_file }
+//     import fs.{ File, read_file, write_file }
 //
 // Build the plugin once with `libraries/build.sh`. Sizes are the path
 // library's business (a size needs no open file, only a name), so `size`
@@ -47,7 +47,7 @@ fun File.from_fd(fd: int64) -> File {
  * Open the file at `path`. Modes: `"r"` read, `"w"` truncate+create write,
  * `"a"` append+create.
  */
-fun open(path: string, mode: string) -> File! {
+fun File.open(path: string, mode: string) -> File! {
     return File { _fd: fd_open(path, mode)!, _path: path }
 }
 
@@ -108,7 +108,7 @@ fun File.close(self) {
 
 /** Read the whole file at `path` as text. Fallible: returns a `Result`. */
 fun read_file(path: string) {
-    let f = open(path, "r")!
+    let f = File.open(path, "r")!
     let size = f.size()!
     let bytes = f.read(size)!
     f.close()!
@@ -117,7 +117,7 @@ fun read_file(path: string) {
 
 /** Write `content` to the file at `path`, truncating it. Fallible: returns a `Result`. */
 fun write_file(path: string, content: string) {
-    let f = open(path, "w")!
+    let f = File.open(path, "w")!
     f.write(to_bytes(content))!
     f.close()!
 }

@@ -1,0 +1,55 @@
+// The published test vectors, through the prepoly surface: a wrong digest is
+// indistinguishable from a right one by inspection, so the vectors -- RFC 1321
+// (MD5), RFC 3174 (SHA-1), FIPS 180-4 (SHA-2), RFC 4231 (HMAC) -- are the only
+// real check that the bytes cross the plugin boundary intact.
+import hash.{
+    md5,
+    sha1,
+    sha224,
+    sha256,
+    sha384,
+    sha512,
+    hmac_sha256,
+    hex,
+    unhex,
+    equal,
+    Hasher,
+}
+
+fun main() {
+    const abc = to_bytes("abc")
+    println(hex(md5(abc)))
+    println(hex(sha1(abc)))
+    println(hex(sha224(abc)))
+    println(hex(sha256(abc)))
+    println(hex(sha384(abc)))
+    println(hex(sha512(abc)))
+
+    // The empty message has a digest too (a common off-by-one in a hand-rolled
+    // implementation: the padding block is the whole message).
+    println(hex(sha256([])))
+
+    // RFC 4231 test case 2.
+    const mac = hmac_sha256(to_bytes("Jefe"), to_bytes("what do ya want for nothing?"))
+    println(hex(mac))
+
+    // Streaming must agree with one-shot however the input is cut up, and the
+    // digest is the same 32 bytes either way.
+    let h = Hasher.sha256()!
+    h.update(to_bytes("a"))!
+    h.update(to_bytes(""))!
+    h.update(to_bytes("bc"))!
+    const streamed = h.finalize()!
+    println(equal(streamed, sha256(abc)))
+    println(len(streamed))
+
+    // hex/unhex round-trip, upper case accepted on the way in.
+    println(hex(unhex("DEADbeef")!))
+    println(equal(unhex(hex(sha256(abc)))!, sha256(abc)))
+
+    // The constant-time compare answers like `==` would: equal digests, a
+    // different message, and a length mismatch.
+    println(equal(sha256(abc), sha256(abc)))
+    println(equal(sha256(abc), sha256(to_bytes("abd"))))
+    println(equal(sha256(abc), sha1(abc)))
+}

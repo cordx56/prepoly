@@ -1,0 +1,72 @@
+// A `type Alias = Base { .. }` refinement naming a concrete instance must resolve
+// in a callable's SIGNATURE, not just in a `let` annotation or a sum variant's
+// field. Signature annotations went through the plain resolver, which knows
+// nominal types but not aliases, so `_Tbl` failed as an unknown name and the
+// annotation was dropped. Two things broke:
+//
+//   * a parameter so annotated read back as `void` inside a METHOD, so the method
+//     could not touch it (``void` has no method `set``), and the collapse spread
+//     to every function sharing the alias;
+//   * a declared `-> _Tbl!` lost its `!`, so the caller's `!` had no `Result` to
+//     unwrap ("error propagation requires `Result` ... found `HashMap<..>`").
+//
+// A free function's parameter merely went untyped rather than void, so there the
+// annotation was silently ignored -- `total(t)` accepted any map at all.
+
+import std.collections.HashMap
+
+type _Tbl = HashMap {
+    key: string
+    value: int64
+}
+
+type Cursor = { at: int64 }
+
+// Free function: parameter and fallible return both name the alias.
+fun _child(parent: _Tbl, key: string, weight: int64) -> _Tbl! {
+    if parent.contains_key(key) {
+        return error("duplicate key '{key}'")
+    }
+    parent.set(key, weight)
+    return parent
+}
+
+// Method: alias parameter (used to be `void`) and alias fallible return.
+fun Cursor.grow(self, parent: _Tbl, key: string) -> _Tbl! {
+    self.at += 1
+    let w: int64 = 2
+    return _child(parent, key, w)!
+}
+
+// Method: alias return with NO error path -- the declared `!` must still wrap.
+fun Cursor.fresh(self) -> _Tbl! {
+    let seed: int64 = 100
+    let t: _Tbl = HashMap.new()
+    t.set("seed", seed)
+    return t
+}
+
+// Free function: the alias parameter is a real constraint now.
+fun total(t: _Tbl) -> int64 {
+    let sum: int64 = 0
+    for v in t.values() {
+        sum += v
+    }
+    return sum
+}
+
+fun main() {
+    let c = Cursor { at: 0 }
+    let m = c.fresh()!
+    println(total(m))
+
+    let grown = c.grow(m, "a")!
+    println(total(grown))
+    println(c.at)
+
+    // The alias-annotated fallible return really is a `Result`.
+    match c.grow(grown, "a") {
+        Ok { value } => println("unexpected"),
+        Err { error } => println("err: {error}"),
+    }
+}

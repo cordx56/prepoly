@@ -1,0 +1,73 @@
+// A reflective `-> infer!` call must key off a receiver produced by a SUM's
+// STATIC method. A sum's static has no `self`, so it never resolves through the
+// receiver path; the static path only knew how to answer for records, so the call
+// typed as an unknown, the `into` below was never keyed, and it reached the back
+// end as an undeclared method (`no method `into` for `Doc``).
+type Doc =
+    | Text { value: string }
+    | Num { value: int64 }
+    | Fields { values: Doc[] }
+
+type Pair = { name: string, count: int64 }
+
+fun Doc.make(name: string, count: int64) -> Doc! {
+    if count < 0 {
+        return error("negative count")
+    }
+    let parts: Doc[] = []
+    parts.push(Doc.Text { value: name })
+    parts.push(Doc.Num { value: count })
+    return Doc.Fields { values: parts }
+}
+
+fun Doc.get(self, key: string) -> Doc! {
+    match self {
+        Doc.Fields { values } => {
+            if key == "name" {
+                return values[0]
+            }
+            if key == "count" {
+                return values[1]
+            }
+            return error("missing key '{key}'")
+        }
+        _ => {}
+    }
+    return error("not a field set")
+}
+
+fun Doc.into(self) -> infer! {
+    match self {
+        Doc.Text { value } => { return infer.from(value) }
+        Doc.Num { value } => { return infer.from(value) }
+        Doc.Fields { values } => {
+            let ret: infer
+            for field in fields(ret) {
+                ret[field] = self.get(field)!.into()!
+            }
+            return ret
+        }
+    }
+}
+
+fun main() {
+    // Bound, then decoded.
+    const d = Doc.make("widget", 7)!
+    const p: Pair = d.into()!
+    println("{p.name} {p.count}")
+
+    // Chained straight off the static call.
+    const q: Pair = Doc.make("gadget", 2)!.into()!
+    println("{q.name} {q.count}")
+
+    // The static's `!` must also make this unannotated caller fallible.
+    match named(-1) {
+        Ok { value } => println("unexpected"),
+        Err { error } => println("err: {error}"),
+    }
+}
+
+fun named(count: int64) {
+    const d = Doc.make("thing", count)!
+    return d.get("name")!
+}

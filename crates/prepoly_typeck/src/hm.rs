@@ -1339,23 +1339,33 @@ impl<'p> Hm<'p> {
 
     /// Infer the value of a block: the trailing statement's type if it is a bare
     /// expression, otherwise `void`. Used for `if`/block expressions.
+    ///
+    /// A block that LEAVES produces no value at all, so its type is `Never`, which
+    /// [`Self::join_branches`] absorbs -- the branch that bails out must not force
+    /// the other to `void` (`if { return 1 } else { error("x")! }`). Every way out
+    /// counts: `return`, and `break`/`continue` (`if even { x } else { continue }`
+    /// used to fail as "cannot unify `int32` with `void`"). So does a trailing
+    /// expression that itself diverges, such as a `match` whose every arm returns.
+    /// And divergence anywhere in the block counts, not just in its last statement:
+    /// whatever follows a `return` is unreachable, so the block still yields
+    /// nothing.
     fn infer_block_value(&mut self, block: &Block) -> Type {
         self.scopes.push(HashMap::new());
         let mut value = Type::Void;
+        let mut diverges = false;
         for (i, stmt) in block.stmts.iter().enumerate() {
             if i + 1 == block.stmts.len()
                 && let Stmt::Expr(e) = stmt
             {
                 value = self.infer_expr(e);
+                diverges |= matches!(self.solver.resolve(&value), Type::Never);
                 continue;
             }
+            diverges |= matches!(stmt, Stmt::Return(..) | Stmt::Break(_) | Stmt::Continue(_));
             self.infer_stmt(stmt);
         }
         self.scopes.pop();
-        // A block whose last statement is a `return` diverges: it produces no
-        // value for the surrounding branch join, so it must not force the
-        // other branch to `void` (`if { return 1 } else { error("x")! }`).
-        if matches!(block.stmts.last(), Some(Stmt::Return(..))) {
+        if diverges {
             return Type::Never;
         }
         value

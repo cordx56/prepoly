@@ -1,7 +1,13 @@
 // A refinement alias `type Alias = Base { slot: T, .. }` pins a slotted record's
 // type parameters, naming a concrete instance. `Counts` is a fully concrete
-// `string -> int64` box; a value built by the witness-free constructor unifies
-// with the refined type, so it may be passed where `Counts` is annotated.
+// `string -> int64` box; a value built by the witness-free constructor and
+// annotated `Counts` is pinned to those types -- the bare literals below store as
+// `int64` -- so it may be passed where `Counts` is required.
+//
+// The binding's annotation is what pins the width. Without it the first `put`
+// would fix the value type to the literal's default `int32`, and passing that box
+// to `sum_values` would be a genuine mismatch: the slot array's element layout
+// differs, so it is rejected rather than adapted.
 
 type _Entry = {
     key
@@ -47,7 +53,7 @@ fun sum_values(c: Counts) -> int64 {
 }
 
 fun main() {
-    let b = Box.new()
+    let b: Counts = Box.new()
     b.put(0, "a", 10)
     b.put(1, "b", 32)
     println(sum_values(b))

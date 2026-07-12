@@ -321,6 +321,29 @@ impl<'a> Checker<'a> {
                 if let Some(ret) = ret {
                     return ret;
                 }
+                // A user type's STATIC method (`File.open(..)`): the base names a
+                // type rather than a value, so there is no receiver to infer and
+                // the receiver-keyed lookup below cannot fire. Take the method's
+                // DECLARED return, so a body propagating an annotated static's
+                // `!` (`fun File.open(..) -> File!`) infers fallible exactly as it
+                // does for a free function.
+                //
+                // Only a declared return is used. An unannotated static's
+                // precomputed return carries the inference variables of one shared
+                // instantiation, and a witness-free constructor (`HashMap.new()`,
+                // whose key/value slots are meant to be fixed by each binding's
+                // use) would have those slots pinned by the first call site instead
+                // of freshly per site -- leaving later ones unrefined. Falling
+                // through to a fresh unknown keeps that inference intact.
+                if self.program.types.contains_key(tname)
+                    && let Some(resolved) = self.method_for_qualifier(tname, method)
+                    && let Some(ret) = resolved.signature.ret_ty.clone()
+                {
+                    args.iter().for_each(|arg| {
+                        self.infer_expr_light(&arg.expr, env, props);
+                    });
+                    return ret;
+                }
             }
             let recv = self.infer_expr_light(base, env, props);
             // A user method's precomputed return: methods of a nominal

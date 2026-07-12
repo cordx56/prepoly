@@ -2,7 +2,7 @@
 // reflective decoder into typed structures. A library (pure prepoly, no plugin) --
 // import it explicitly:
 //
-//     import data.toml.{ TomlValue, parse }
+//     import data.toml.{ TomlValue }
 //
 // The value tree mirrors TOML's scalar and container kinds. A Table keeps its
 // entries in a string -> TomlValue `HashMap` (the `_TomlTable` refinement below
@@ -19,11 +19,10 @@
 // of tables]]` headers. Offset/local date-times, dates and times are recognized
 // structurally and stored as `Datetime` strings without calendar validation.
 //
-// Table navigation deliberately uses FREE functions over the `_TomlTable` map
-// (`_child`, `_append_array_table`) rather than methods that return the map: a
-// method returning the map-refinement type does not resolve at its call site under
-// the current checker, so the map type is only ever produced by free functions and
-// the parser's cursor methods return only scalars, strings, and `TomlValue`s.
+// Table navigation is done by the free `_child` / `_append_array_table` over the
+// `_TomlTable` map. They cannot be methods: `_TomlTable` is a refinement ALIAS,
+// which names a concrete instance of `HashMap` rather than a nominal type of its
+// own, and only a nominal type carries methods.
 
 import std.collections.HashMap
 
@@ -34,9 +33,9 @@ type _TomlTable = HashMap {
 
 /**
  * A parsed TOML value, one variant per TOML kind. Obtain the document root (a
- * `Table`) with `parse`, inspect it with the accessors (`get`, `at`, `as_*`),
- * decode it into a typed structure with `into`, and render it back to text with
- * `stringify`. A `Datetime` holds the source date/time text verbatim.
+ * `Table`) with `TomlValue.parse`, inspect it with the accessors (`get`, `at`,
+ * `as_*`), decode it into a typed structure with `into`, and render it back to
+ * text with `stringify`. A `Datetime` holds the source date/time text verbatim.
  */
 type TomlValue =
     | String { value: string }
@@ -131,13 +130,9 @@ fun TomlValue.at(self, index: int64) -> TomlValue! {
     return error("expected a TOML array")
 }
 
-// `as_array` and `keys` are free functions, not methods: a method returning an
-// array type does not resolve at its call site under the current checker (the
-// result reads back as `never`), whereas a free function does.
-
 /** The elements of an `Array` value, or an error for any other kind. */
-fun as_array(value: TomlValue) -> TomlValue[]! {
-    match value {
+fun TomlValue.as_array(self) -> TomlValue[]! {
+    match self {
         TomlValue.Array { value } => { return value }
         _ => {}
     }
@@ -145,8 +140,8 @@ fun as_array(value: TomlValue) -> TomlValue[]! {
 }
 
 /** The keys of a `Table` value, in the map's (unspecified) slot order. */
-fun keys(value: TomlValue) -> string[]! {
-    match value {
+fun TomlValue.keys(self) -> string[]! {
+    match self {
         TomlValue.Table { values } => { return values.keys() }
         _ => {}
     }
@@ -189,14 +184,18 @@ fun TomlValue.into(self) -> infer! {
 // `stringify` renders the top-level table as `key = value` lines; nested tables
 // and arrays render in inline form (`{ .. }` / `[ .. ]`), so the whole document
 // is valid TOML on a bounded number of lines. `_inline` is the recursive renderer
-// and, like json's `stringify`, is a FREE function rather than a method: the
-// checker's per-call re-elaboration does not converge for a self-recursive method
-// over a sum this wide, but a free function recursing by name does.
+// for that inline form -- a distinct rendering, not a helper `stringify` could
+// fold into itself.
+//
+// It is a free function rather than a private method purely for compile time: a
+// method call on a sum resolves to one candidate per variant and re-elaborates
+// each, so putting a hot recursive helper on the type multiplies the checker's
+// work by the variant count for no gain in the public surface.
 
 /** Render a `TomlValue` back to TOML text. A `Table` becomes `key = value` lines;
  * every other kind (and every nested value) renders in inline form. */
-fun stringify(value: TomlValue) -> string {
-    match value {
+fun TomlValue.stringify(self) -> string {
+    match self {
         TomlValue.Table { values } => {
             let out = ""
             for k in values.keys() {
@@ -208,12 +207,11 @@ fun stringify(value: TomlValue) -> string {
         }
         _ => {}
     }
-    return _inline(value)
+    return _inline(self)
 }
 
 // Render any value in single-expression (inline) form: scalars as literals, an
-// array as `[a, b]`, a table as `{ k = v }`. Recurses by name (see the note on
-// `stringify`).
+// array as `[a, b]`, a table as `{ k = v }`.
 fun _inline(value: TomlValue) -> string {
     match value {
         TomlValue.String { value } => { return _quote(value) }
@@ -292,7 +290,7 @@ fun _quote(s: string) -> string {
 //
 // A single-pass recursive-descent parser. `_Cursor` carries the text and the
 // current byte offset; its methods advance it and return scalars/strings/values.
-// `parse` walks statements (key/value pairs, `[table]` headers, `[[array of
+// `TomlValue.parse` walks statements (key/value pairs, `[table]` headers, `[[array of
 // tables]]` headers), building the tree into a root `_TomlTable` and tracking a
 // `current` table that bare key/value pairs are stored into. Dotted keys are read
 // one part at a time and navigated with the free `_child`.
@@ -306,7 +304,7 @@ type _Cursor = {
  * Parse `text` as a TOML document, returning its root as a `Table`. Errors on the
  * first malformed statement, naming the byte offset.
  */
-fun parse(text: string) -> TomlValue! {
+fun TomlValue.parse(text: string) -> TomlValue! {
     let cur = _Cursor { text: text, pos: 0 }
     let root: _TomlTable = HashMap.new()
     let current = root

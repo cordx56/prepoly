@@ -254,7 +254,7 @@ for entry in here.join("assets").entries()! {
 ## `fs` (a library, not `std`)
 
 ```prepoly norun
-import fs.{ File, open, read_file, write_file }
+import fs.{ File, read_file, write_file }
 ```
 
 File handles and byte I/O. Like the other libraries this is a plugin under
@@ -263,7 +263,7 @@ File handles and byte I/O. Like the other libraries this is a plugin under
 
 | Function / method           | Signature                   | Behavior                                          |
 | --------------------------- | --------------------------- | -------------------------------------------------- |
-| `open(path, mode)`          | `(string, string) -> File!` | `"r"` read, `"w"` truncate+create, `"a"` append   |
+| `File.open(path, mode)`     | `(string, string) -> File!` | `"r"` read, `"w"` truncate+create, `"a"` append   |
 | `read_file(path)`           | `(string) -> string!`       | whole file as text                                 |
 | `write_file(path, content)` | `(string, string) -> void!` | write text, truncating                             |
 | `f.read(n)`                 | `(int64) -> uint8[]!`       | up to `n` bytes; fewer at end-of-file              |
@@ -314,6 +314,60 @@ gives `args() == ["main.pp", "--verbose", "input.txt"]` — the program file
 as written, then the arguments (index `0` is the program, as in C's `argv`).
 The same holds for `prepoly repl main.pp ...`. In an interactive REPL
 session, or under an embedder that passes no arguments, `args()` is empty.
+
+## `hash` (a library, not `std`)
+
+```prepoly norun
+import hash.{ sha256, hmac_sha256, hex, equal, Hasher }
+```
+
+Message digests (MD5, SHA-1, SHA-2) and HMAC. A plugin under `libraries/`
+wrapping the RustCrypto implementations — these algorithms are built from
+wrapping 32/64-bit arithmetic, which prepoly does not have, so a prepoly
+implementation would be a hand-masked emulation whose failure mode is a
+silently wrong digest.
+
+A digest is a `uint8[]`: the algorithm's raw bytes. Hash text by its UTF-8
+bytes with the prelude's `to_bytes`, and render the result with `hex`:
+
+```prepoly norun
+println(hex(sha256(to_bytes("abc"))))
+// ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+```
+
+| Function                       | Signature                            | Digest size |
+| ------------------------------ | ------------------------------------ | ----------- |
+| `md5(data)`                    | `(uint8[]) -> uint8[]`               | 16 bytes    |
+| `sha1(data)`                   | `(uint8[]) -> uint8[]`               | 20 bytes    |
+| `sha224` / `sha256`            | `(uint8[]) -> uint8[]`               | 28 / 32     |
+| `sha384` / `sha512`            | `(uint8[]) -> uint8[]`               | 48 / 64     |
+| `hmac_sha1/sha256/sha512(k,d)` | `(uint8[], uint8[]) -> uint8[]`      | 20 / 32 / 64 |
+| `hex(bytes)`                   | `(uint8[]) -> string`                | lowercase   |
+| `unhex(text)`                  | `(string) -> uint8[]!`               | inverse of `hex` |
+| `equal(a, b)`                  | `(uint8[], uint8[]) -> bool`         | constant-time |
+
+For input that is not in memory at once (a file read in chunks, a socket
+stream), `Hasher` is the incremental form. `finalize` **consumes** the hasher
+— a digest cannot be resumed once taken, so a second call is an error rather
+than a meaningless second answer:
+
+```prepoly norun
+let h = Hasher.sha256()!      // also .md5() .sha1() .sha224() .sha384() .sha512()
+h.update(chunk)!
+h.update(next)!
+println(hex(h.finalize()!))
+```
+
+**Security.** `md5` and `sha1` are broken against collision attacks: use them
+only to interoperate with something that already speaks them (a published MD5
+checksum, a git object id), never to decide whether two inputs are "the same".
+Prefer `sha256`/`sha512`. Authenticate a message with `hmac_sha256`, not
+`sha256(key + data)` (which is forgeable by length extension). Compare a
+digest or MAC against an attacker-supplied one with `equal`, not `==`: an
+early-exit comparison leaks how many leading bytes of a forgery were right.
+All of these are **fast** hashes — storing a password needs a purpose-built
+slow KDF (argon2, scrypt, bcrypt), which this library deliberately does not
+offer, so that a fast hash cannot be mistaken for one.
 
 ## `net` (a library, not `std`)
 
@@ -441,10 +495,11 @@ arguments** — the key/value types are inferred from the first `set` or
 ## `data.json` (a library, not `std`)
 
 ```prepoly norun
-import data.json.{ JsonValue, parse, stringify }
+import data.json.{ JsonValue }
 ```
 
 A JSON value tree, parser, accessors, serializer, and a reflective decoder.
+The whole surface hangs off `JsonValue`, so the type is the only name to import.
 A pure-prepoly library (no plugin) under `libraries/`, with the same setup
 as the others — automatic for a distributed toolchain, `PREPOLY_INCLUDE`
 from a repo checkout.
@@ -466,8 +521,8 @@ not the source document's ordering (stable for a given input).
 
 | Function / method                                 | Signature                           | Behavior                                                                                                             |
 | ------------------------------------------------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `parse(text)`                                     | `(string) -> JsonValue!`            | whole input must be one JSON value                                                                                   |
-| `stringify(j)`                                    | `(JsonValue) -> string`             | serialize back to JSON text (a free function)                                                                        |
+| `JsonValue.parse(text)`                           | `(string) -> JsonValue!`            | whole input must be one JSON value                                                                                   |
+| `j.stringify()`                                   | `-> string`                         | serialize back to JSON text                                                                                          |
 | `j.as_bool()` / `j.as_number()` / `j.as_string()` | `-> bool!` / `float64!` / `string!` | payload, or a decode error naming the expected kind                                                                  |
 | `j.is_null()`                                     | `-> bool`                           |                                                                                                                      |
 | `j.get(key)`                                      | `(string) -> JsonValue!`            | object field, or an error naming the missing field                                                                   |
@@ -477,12 +532,12 @@ not the source document's ordering (stable for a given input).
 Decoding a whole document into a typed structure combines `parse` and `into`:
 
 ```prepoly norun
-import data.json.{ JsonValue, parse }
+import data.json.{ JsonValue }
 
 type Address = { city: string, zip: int64 }
 type User = { name: string, age: int64, address: Address }
 
 const src = "\{\"name\": \"Aki\", \"age\": 30, \"address\": \{\"city\": \"Tokyo\", \"zip\": 100\}\}"
-const u: User = parse(src)!.into()!
+const u: User = JsonValue.parse(src)!.into()!
 println("{u.name} {u.age} {u.address.city}")   // Aki 30 Tokyo
 ```

@@ -512,10 +512,10 @@ own absolute source path, so "the file I am in" is `Path.parse(_PATH)`.
   `p.entries() -> Path[]!` (directory listing, OS order);
   `p.file_size() -> int64!`
 
-### fs -- `import fs.{ File, open, read_file, write_file }`
+### fs -- `import fs.{ File, read_file, write_file }`
 
 - `read_file(path) -> string!`; `write_file(path, content) -> void!`
-- `open(path, mode) -> File!` -- mode `"r"` read, `"w"` truncate+create,
+- `File.open(path, mode) -> File!` -- mode `"r"` read, `"w"` truncate+create,
   `"a"` append+create
 - `f.read(max) -> uint8[]!` -- up to `max` bytes, fewer on a short read,
   empty at end-of-file; `f.write(data: uint8[]) -> int64!`;
@@ -546,6 +546,30 @@ println(to_text(out.stdout)!)
   fills unread (~64KiB), so drain pipes first or use `output()`
 - `child.stdin()/stdout()/stderr() -> File!` -- the pipe as an fs `File`
   (requires that stream be `Stdio.Pipe`); write to stdin, read the others
+
+### hash -- `import hash.{ sha256, hmac_sha256, hex, equal, Hasher }`
+
+Message digests and HMAC. A digest is a `uint8[]` (raw bytes); hash text by
+its UTF-8 bytes and render with `hex`:
+`println(hex(sha256(to_bytes("abc"))))`.
+
+- `md5`, `sha1`, `sha224`, `sha256`, `sha384`, `sha512` -- all
+  `(uint8[]) -> uint8[]`, INFALLIBLE (16/20/28/32/48/64 bytes)
+- `hmac_sha1`, `hmac_sha256`, `hmac_sha512` -- `(key: uint8[], data: uint8[])
+  -> uint8[]`; any key length works
+- `hex(bytes) -> string` (lowercase); `unhex(text) -> uint8[]!` (the inverse;
+  accepts upper case, fails on an odd length or a non-hex character)
+- `equal(a, b) -> bool` -- CONSTANT-TIME digest/MAC comparison
+- `Hasher` -- the incremental form when the input is not in memory at once:
+  `let h = Hasher.sha256()!` (also `.md5()/.sha1()/.sha224()/.sha384()/
+  .sha512()`), then `h.update(bytes)!` repeatedly, then `h.finalize()!`.
+  `finalize` CONSUMES the hasher: a second call is an error.
+
+SECURITY: `md5`/`sha1` are broken against collisions -- interop only, never a
+security decision; prefer `sha256`. Authenticate with `hmac_sha256`, NOT
+`sha256(key + data)` (length-extension forgeable). Compare a MAC with
+`equal`, not `==`. These are FAST hashes: password storage needs a slow KDF
+(argon2/scrypt/bcrypt), which this library deliberately does not provide.
 
 ### net -- `import net.{ Tcp, TcpListener, Udp, TlsStream }`
 
@@ -603,7 +627,7 @@ connection close); chunked transfer coding is NOT decoded.
 - `request(req) -> HttpResponse!` -- plain HTTP; the host comes from the
   request's `Host` header
 
-### JSON -- `import data.json.{ JsonValue, parse, stringify }`
+### JSON -- `import data.json.{ JsonValue }`
 
 Pure prepoly (no plugin).
 
@@ -617,10 +641,9 @@ type JsonValue =
     | Object { values }              // a string -> JsonValue HashMap
 ```
 
-- `parse(text) -> JsonValue!` -- the whole input must be one JSON value
-- `stringify(v) -> string` -- a FREE function (`stringify(v)`, NOT
-  `v.stringify()`); compact output; object members render in the map's slot
-  order, not the source document's order
+- `JsonValue.parse(text) -> JsonValue!` -- the whole input must be one JSON value
+- `v.stringify() -> string` -- compact output; object members render in the map's
+  slot order, not the source document's order
 - Accessors on a `JsonValue`: `get(key) -> JsonValue!` (objects),
   `at(index) -> JsonValue!` (arrays), `as_bool() -> bool!`,
   `as_number() -> float64!`, `as_string() -> string!`, `is_null() -> bool`
@@ -647,7 +670,6 @@ of `main`, so insert `sync()` before a read that may race ahead.
 - `print`/`println` take exactly one argument; interpolate instead.
 - `map`/`filter`/`sort`/`reverse`/`slice` return NEW arrays; only
   `push`/`pop`/`insert`/`remove` mutate.
-- JSON: `stringify(v)` is a free function, not a method.
 - Use `==` for equality, not `=`.
 - A nullable (`T?`) value cannot be used until narrowed by an `if` guard.
 - Match `Result` with the field names `Ok { value }` / `Err { error }`.

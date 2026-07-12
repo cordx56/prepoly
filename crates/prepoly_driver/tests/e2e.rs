@@ -45,6 +45,7 @@ fn collect_cases(dir: &Path, out: &mut Vec<PathBuf>) {
                         || n == "fs"
                         || n == "http"
                         || n == "env"
+                        || n == "hash"
                 })
             {
                 continue;
@@ -71,6 +72,7 @@ const NATIVE_LIBRARIES: &[(&str, &str)] = &[
     ("prepoly_lib_net", "net"),
     ("prepoly_lib_fs", "fs"),
     ("prepoly_lib_env", "env"),
+    ("prepoly_lib_hash", "hash"),
 ];
 
 /// Build each library's plugin and install it as `libraries/lib<name>.so`,

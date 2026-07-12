@@ -4,7 +4,50 @@
 
 use super::*;
 
+/// How deep the re-elaboration of callee bodies at call sites may nest. Each
+/// level is a distinct callable (a repeat is already caught as recursion), so a
+/// real program's chain is short; this only bounds a pathological one.
+const MAX_ELABORATION_DEPTH: usize = 64;
+
+/// How many callee bodies may be re-elaborated across one analysis. Generous
+/// enough that no converging program comes near it -- the heaviest case in the
+/// e2e suite and examples (the http library) settles at ~34k, some sixty times
+/// under -- and low enough that a chain which expands instead of converging is
+/// reported rather than left to run forever.
+const ELABORATION_BUDGET: u64 = 2_000_000;
+
 impl<'a> Checker<'a> {
+    /// Whether another callee body may be re-elaborated: recursion is guarded per
+    /// callable by `instantiating`, but a call graph can still expand faster than
+    /// it converges. Rather than hang, stop re-elaborating (call sites fall back
+    /// to declared/precomputed returns) and report it once.
+    ///
+    /// The depth check is separate from the budget so a runaway *nesting* is cut
+    /// immediately instead of only once the total is spent.
+    fn elaboration_allowed(&mut self, what: &str, span: prepoly_parser::Span) -> bool {
+        if self.instantiating.len() >= MAX_ELABORATION_DEPTH {
+            tracing::debug!(callee = %what, "elaboration depth limit, using fallback return type");
+            return false;
+        }
+        self.elaborations += 1;
+        if self.elaborations <= ELABORATION_BUDGET {
+            return true;
+        }
+        if !self.elaboration_budget_reported {
+            self.elaboration_budget_reported = true;
+            self.errors.push(TypeError {
+                message: format!(
+                    "type inference gave up while re-elaborating `{what}`: the calls it \
+                     expands into keep growing instead of settling. Annotate the return \
+                     types of the callables in this chain so each call can be typed from \
+                     its signature instead of its body"
+                ),
+                span,
+            });
+        }
+        false
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn instantiate_function_call(
         &mut self,
@@ -15,6 +58,7 @@ impl<'a> Checker<'a> {
         declared_ret: Option<Type>,
         fallback_ret: Type,
         arg_types: &[Type],
+        span: prepoly_parser::Span,
     ) -> Type {
         if params.len() != arg_types.len() {
             return fallback_ret;
@@ -24,6 +68,10 @@ impl<'a> Checker<'a> {
             // Recursive call: re-checking the body again would not terminate, so
             // fall back to the declared/precomputed return type.
             tracing::debug!(symbol = %symbol, "recursive call, using fallback return type");
+            return fallback_ret;
+        }
+        if !self.elaboration_allowed(symbol, span) {
+            self.instantiating.remove(&key);
             return fallback_ret;
         }
         tracing::debug!(
@@ -159,13 +207,24 @@ impl<'a> Checker<'a> {
             fallback_ret,
             arg_types,
             scheme_params,
+            span,
         } = call;
         let has_self = signature_params.first().is_some_and(|p| p.name == "self");
         if signature_params.len().saturating_sub(usize::from(has_self)) != arg_types.len() {
             return fallback_ret;
         }
-        let key = format!("method:{owner}.{method_name}");
+        // Keyed by the receiver TYPE, not by `owner` (the `Sum.Variant` qualifier
+        // this call resolved through): a sum's method lives in every variant's
+        // table, so one call resolves to one candidate per variant, all sharing
+        // the same body. Per-qualifier keys let a recursive call re-enter through
+        // a variant not yet on the stack, and the work grew factorially in the
+        // variant count -- see `Checker::instantiating`.
+        let key = format!("method:{self_type}.{method_name}");
         if !self.instantiating.insert(key.clone()) {
+            return fallback_ret;
+        }
+        if !self.elaboration_allowed(&format!("{owner}.{method_name}"), span) {
+            self.instantiating.remove(&key);
             return fallback_ret;
         }
         let saved = self.self_type.replace(self_type.to_string());

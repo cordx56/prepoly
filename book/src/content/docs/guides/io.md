@@ -66,7 +66,7 @@ match read_file("missing.txt") {
 }
 ```
 
-For finer control, `open(path, mode)` returns a `File!`; a `File` has
+For finer control, `File.open(path, mode)` returns a `File!`; a `File` has
 `read(n)`, `write(bytes)`, `seek`, `size()`, and `close()`, all returning
 Results, plus the `File.stdin()` / `File.stdout()` / `File.stderr()`
 constructors. See the

@@ -2,7 +2,7 @@
 // a reflective decoder into typed structures. A library (pure prepoly, no
 // plugin) -- import it explicitly:
 //
-//     import data.json.{ JsonValue, parse }
+//     import data.json.{ JsonValue }
 //
 // The value tree mirrors the six JSON kinds. An Object keeps its members in a
 // string -> JsonValue `HashMap` (the `_JsonObject` refinement below pins the
@@ -18,7 +18,7 @@ type _JsonObject = HashMap {
 }
 
 /**
- * A parsed JSON value, one variant per JSON kind. Obtain one with `parse`,
+ * A parsed JSON value, one variant per JSON kind. Obtain one with `JsonValue.parse`,
  * inspect it with the accessors (`get`, `at`, `as_*`), decode it into a typed
  * structure with `into`, and render it back to text with `stringify`.
  */
@@ -126,13 +126,19 @@ fun JsonValue.into(self) -> infer! {
 
 // ----- serialization -----
 //
-// A free function, not a method, on purpose: the checker's per-call
-// re-elaboration currently does not converge for a SELF-RECURSIVE method over a
-// sum with six or more variants (a free function recurses fine), so `stringify`
-// is called as `stringify(value)` rather than `value.stringify()`.
+// `stringify` is the method; `_render` is the recursion. Keeping the hot
+// recursive core a free function is a compile-time choice: a method call on a sum
+// resolves to one candidate per variant and the checker re-elaborates each, so a
+// recursive method multiplies its own work by the variant count. The public
+// surface is unaffected -- callers write `j.stringify()` either way.
 
 /** Render a `JsonValue` back to compact JSON text (no added whitespace). */
-fun stringify(value: JsonValue) -> string {
+fun JsonValue.stringify(self) -> string {
+    return _render(self)
+}
+
+// The recursive renderer. See the note above on why this is not a method.
+fun _render(value: JsonValue) -> string {
     match value {
         JsonValue.Null => { return "null" }
         JsonValue.Bool { value } => {
@@ -146,7 +152,7 @@ fun stringify(value: JsonValue) -> string {
             let first = true
             for elem in value {
                 if !first { out = out + "," }
-                out = out + stringify(elem)
+                out = out + _render(elem)
                 first = false
             }
             return out + "]"
@@ -157,7 +163,7 @@ fun stringify(value: JsonValue) -> string {
             for k in values.keys() {
                 if !first { out = out + "," }
                 if let v = values.get(k) {
-                    out = out + _quote(k) + ":" + stringify(v)
+                    out = out + _quote(k) + ":" + _render(v)
                 }
                 first = false
             }
@@ -167,10 +173,9 @@ fun stringify(value: JsonValue) -> string {
 }
 
 // Wrap a string in double quotes with the JSON escapes the parser accepts.
-// Iterated by byte index rather than `s.chars()` on purpose: the checker's
-// per-call re-elaboration does not converge when a recursive method
-// (`stringify`) calls a helper that in turn builds an inferred `[]` array (as
-// `chars` does), so this stays index-based.
+// Iterated by byte index rather than `s.chars()`: building an inferred `[]` per
+// character, once per string rendered, is wasted work when a byte walk answers
+// the same question.
 fun _quote(s: string) -> string {
     let out = "\""
     let i: int64 = 0
@@ -198,8 +203,8 @@ fun _quote(s: string) -> string {
 // ----- parsing -----
 //
 // A single-pass recursive-descent parser. `_Cursor` carries the text and the
-// current byte offset; its methods advance it. `parse` requires the whole input
-// to be one JSON value (trailing content is an error).
+// current byte offset; its methods advance it. `JsonValue.parse` requires the
+// whole input to be one JSON value (trailing content is an error).
 
 type _Cursor = {
     text: string
@@ -210,7 +215,7 @@ type _Cursor = {
  * Parse `text` as one JSON value. The whole input must be consumed: trailing
  * content is an error.
  */
-fun parse(text: string) -> JsonValue! {
+fun JsonValue.parse(text: string) -> JsonValue! {
     let cur = _Cursor { text: text, pos: 0 }
     cur._skip_ws()
     const value = cur._value()!

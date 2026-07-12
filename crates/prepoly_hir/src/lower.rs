@@ -9,7 +9,7 @@ use prepoly_parser::Span;
 use prepoly_parser::ast::{Member, TopLevel, TypeBody, TypeDecl};
 
 use crate::hir::*;
-use crate::types::{NominalInfo, Type, resolve};
+use crate::types::{NominalInfo, Type};
 
 /// A collection error (duplicate name).
 #[derive(Clone, Debug)]
@@ -651,6 +651,7 @@ fn resolve_program_annotations(
                     resolve_signature_annotations(
                         &mut method.signature,
                         &nominal,
+                        &alias,
                         &mut next_unknown,
                         true,
                         assign_ret_unknown,
@@ -667,6 +668,7 @@ fn resolve_program_annotations(
                         resolve_signature_annotations(
                             &mut method.signature,
                             &nominal,
+                            &alias,
                             &mut next_unknown,
                             true,
                             assign_ret_unknown,
@@ -680,9 +682,20 @@ fn resolve_program_annotations(
     program.functions.values_mut().for_each(|fun| {
         let module = fun.module.clone();
         let nominal = |name: &str| resolve_nominal(&module, name);
+        let alias = |name: &str| -> Option<Type> {
+            crate::hir::resolve_qualified(
+                &alias_types,
+                &import_origins,
+                &import_renames_snap,
+                &module,
+                name,
+            )
+            .cloned()
+        };
         resolve_signature_annotations(
             &mut fun.signature,
             &nominal,
+            &alias,
             &mut next_unknown,
             false,
             false,
@@ -717,16 +730,24 @@ fn resolve_variant_field_annotation(
     };
 }
 
+/// Resolve a callable's declared parameter and return annotations. Aliases are
+/// consulted like they are for a sum variant's fields: an annotation naming a
+/// `type Alias = Base { .. }` refinement (`_TomlTable`) must resolve to the
+/// alias's substituted type. Without that, `resolve` failed as an unknown name
+/// and the annotation was dropped -- a parameter so annotated read back as
+/// `void` at every use, and a declared `-> Alias!` lost its `!`, so the caller's
+/// error propagation had no `Result` to unwrap.
 fn resolve_signature_annotations(
     signature: &mut CallableSignature,
     nominal: &impl Fn(&str) -> Option<NominalInfo>,
+    alias: &impl Fn(&str) -> Option<Type>,
     next_unknown: &mut u32,
     assign_param_unknowns: bool,
     assign_ret_unknown: bool,
 ) {
     for param in &mut signature.params {
         param.resolved_ty = match &param.ty {
-            Some(ty) => resolve(ty, nominal)
+            Some(ty) => crate::types::resolve_with_aliases(ty, nominal, alias)
                 .ok()
                 .map(|t| crate::freshen_infer(t, &mut || fresh_unknown(next_unknown))),
             None if assign_param_unknowns && param.name != "self" => {
@@ -736,7 +757,7 @@ fn resolve_signature_annotations(
         };
     }
     signature.ret_ty = match &signature.ret {
-        Some(ty) => resolve(ty, nominal)
+        Some(ty) => crate::types::resolve_with_aliases(ty, nominal, alias)
             .ok()
             .map(|t| crate::freshen_infer(t, &mut || fresh_unknown(next_unknown))),
         None if assign_ret_unknown => Some(fresh_unknown(next_unknown)),

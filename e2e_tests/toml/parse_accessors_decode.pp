@@ -1,4 +1,4 @@
-import data.toml.{ TomlValue, parse, stringify, as_array }
+import data.toml.{ TomlValue }
 
 type Server = { host: string, port: int64 }
 type Config = { title: string, retries: int64, server: Server }
@@ -7,7 +7,7 @@ fun main() {
     // Scalars: strings, integers (dec/hex), floats, booleans, and a date-time
     // kept verbatim.
     const doc = "title = \"demo\"\nretries = 3\nmask = 0xff\nratio = 1.5\nok = true\nwhen = 1979-05-27T07:32:00Z\nnums = [10, 20, 30]\n\n[server]\nhost = \"localhost\"\nport = 5432\n\n[[items]]\nid = 1\n\n[[items]]\nid = 2\n"
-    const t = parse(doc)!
+    const t = TomlValue.parse(doc)!
     println(t.get("mask")!.as_integer()!)
     println(t.get("ratio")!.as_float()!)
     println(t.get("ok")!.as_bool()!)
@@ -16,15 +16,15 @@ fun main() {
 
     // Nested table and array of tables.
     println(t.get("server")!.get("port")!.as_integer()!)
-    const items = as_array(t.get("items")!)!
+    const items = t.get("items")!.as_array()!
     println(items[1].get("id")!.as_integer()!)
 
     // Reflective decode into a typed struct (a nested record included).
-    const cfg: Config = parse(doc)!.into()!
+    const cfg: Config = TomlValue.parse(doc)!.into()!
     println("{cfg.title} {cfg.retries} {cfg.server.host} {cfg.server.port}")
 
     // Round-trip a single value through the serializer.
-    const rt = parse(stringify(t.get("server")!))!
+    const rt = TomlValue.parse(t.get("server")!.stringify())!
     println(rt.get("host")!.as_string()!)
 
     // A missing key is an error.

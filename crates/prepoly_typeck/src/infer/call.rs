@@ -138,6 +138,7 @@ impl<'a> Checker<'a> {
                     declared_ret,
                     fallback_ret,
                     &arg_types,
+                    span,
                 );
                 // A body re-elaboration failure caused by an ANONYMOUS argument
                 // is reported at the value, not inside the callee: the body
@@ -487,6 +488,7 @@ impl<'a> Checker<'a> {
             func.declared_ret.clone(),
             fallback_ret,
             &arg_types,
+            span,
         )
     }
 
@@ -635,6 +637,7 @@ impl<'a> Checker<'a> {
                 fallback_ret,
                 arg_types: &arg_types,
                 scheme_params: &scheme_params,
+                span,
             }));
         }
         if self.errors.len() > before {
@@ -931,6 +934,7 @@ impl<'a> Checker<'a> {
                 arg_types: &arg_types,
                 // A static call has no receiver instance to pin parameters.
                 scheme_params: &[],
+                span,
             });
         }
         args.iter().for_each(|a| {

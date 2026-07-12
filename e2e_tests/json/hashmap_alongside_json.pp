@@ -1,16 +1,16 @@
 import std.collections.{ HashMap }
-import data.json.{ parse }
+import data.json.{ JsonValue }
 
 // A user HashMap next to the json library, whose parser instantiates its own
 // string -> JsonValue map. The two instances must not share per-type glue:
 // with a substitution-blind destructor key, the user map's int32 values were
 // released as JsonValue pointers -- a SEGV at main's exit, after all output.
-// `parse("1")` never builds an Object at run time; compiling the parser is
+// `JsonValue.parse("1")` never builds an Object at run time; compiling the parser is
 // enough to emit the other instance's glue.
 fun main() {
     let m = HashMap.new()
     m.set("k", 7)
-    let j = parse("1")!
+    let j = JsonValue.parse("1")!
     println(j.is_null())
     println(m.get_or("k", 0))
 }

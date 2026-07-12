@@ -1,7 +1,13 @@
 // The standard-library HashMap declares `key`/`value` type slots, so a
 // refinement alias names a concrete instantiation. A witness-free map built with
-// `HashMap.new()` and populated with `string` keys and `int64` values unifies
-// with the refined `StringInts` type and is accepted where it is annotated.
+// `HashMap.new()` and annotated `StringInts` is pinned to `string` keys and
+// `int64` values -- the bare literals below store as `int64` -- and is accepted
+// where the refined type is required.
+//
+// The binding's annotation is what pins the width. Without it the first `set`
+// would fix the value type to the literal's default `int32`, and passing that map
+// to `total` would be a genuine mismatch: an `int32`-valued map has a different
+// slot layout than an `int64`-valued one, so it is rejected rather than adapted.
 
 import std.collections.{ HashMap }
 
@@ -19,7 +25,7 @@ fun total(m: StringInts) -> int64 {
 }
 
 fun main() {
-    let m = HashMap.new()
+    let m: StringInts = HashMap.new()
     m.set("a", 10)
     m.set("b", 32)
     println(total(m))

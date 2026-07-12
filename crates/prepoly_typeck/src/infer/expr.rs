@@ -752,13 +752,43 @@ impl<'a> Checker<'a> {
         prepoly_hir::primitive_kind_conflict(&ty, &target)
     }
 
+    /// The type of a block in expression position: its trailing expression's, or
+    /// `void` when it ends in a statement.
+    ///
+    /// A block that LEAVES -- through `return`, `break`, or `continue`, or through
+    /// a trailing expression that itself diverges -- produces no value at all, so
+    /// its type is `Never` rather than `void`. `Never` is absorbed by a branch join
+    /// (see `common_type_or_error`), which is what lets one arm bail out without
+    /// constraining the others:
+    ///
+    /// ```text
+    /// let v = match r {
+    ///     Ok { value } => value,          // int32
+    ///     Err { error } => { return -1 }  // Never, not void
+    /// }
+    /// ```
+    ///
+    /// Typing that arm `void` made the join report `int32` and `void` as
+    /// incompatible. Divergence anywhere in the block counts, not just in its last
+    /// statement: whatever follows a `return` is unreachable, so the block still
+    /// yields nothing. (The HM checker's `infer_block_value` has always done this
+    /// for a trailing `return`; the two now agree.)
     fn check_block_expr(&mut self, b: &Block, scopes: &mut ScopeStack) -> Type {
         scopes.push(HashMap::new());
         self.const_scopes.push(HashSet::new());
         let mut last = Type::Void;
+        let mut diverges = false;
         for s in &b.stmts {
             match s {
-                Stmt::Expr(e) => last = self.check_expr(e, scopes),
+                Stmt::Expr(e) => {
+                    last = self.check_expr(e, scopes);
+                    diverges |= matches!(self.resolve(&last), Type::Never);
+                }
+                Stmt::Return(..) | Stmt::Break(_) | Stmt::Continue(_) => {
+                    self.check_stmt(s, scopes);
+                    last = Type::Void;
+                    diverges = true;
+                }
                 _ => {
                     self.check_stmt(s, scopes);
                     last = Type::Void;
@@ -767,7 +797,7 @@ impl<'a> Checker<'a> {
         }
         self.const_scopes.pop();
         scopes.pop();
-        last
+        if diverges { Type::Never } else { last }
     }
 
     pub(super) fn check_place(&mut self, e: &Expr, scopes: &mut ScopeStack) -> Type {
