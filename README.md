@@ -1,6 +1,9 @@
 <div align="center">
   <h1>
-    prepoly
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="book/public/logo/dark.svg">
+      <img alt="prepoly" src="book/public/logo/light.svg" width="400">
+    </picture>
   </h1>
   <p>
     A statically and flexibly type-inferred scripting language <br>

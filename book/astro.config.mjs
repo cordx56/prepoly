@@ -16,6 +16,7 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "prepoly book",
+      favicon: "/icon.svg",
       head: [
         {
           tag: "meta",
