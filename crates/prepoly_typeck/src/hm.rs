@@ -86,7 +86,13 @@ impl<'p> Hm<'p> {
     fn new(program: &'p Program) -> Self {
         Self {
             program,
-            solver: Solver::new(),
+            solver: {
+                // Seed past the HIR-embedded ids (see `Program::next_infer_var`);
+                // a colliding local variable aliases an unrelated signature type.
+                let mut s = Solver::new();
+                s.seed_var_counter(program.next_infer_var);
+                s
+            },
             globals: HashMap::new(),
             scopes: Vec::new(),
             module: Vec::new(),

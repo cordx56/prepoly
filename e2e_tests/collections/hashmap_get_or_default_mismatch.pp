@@ -1,0 +1,14 @@
+import std.collections.{ HashMap }
+
+// `get_or`'s default is returned where the stored value is, so it must BE the
+// map's value type. The co-check commits the unification of the method's two
+// returns (`e.value` and `dflt`), making `dflt` the scheme's value parameter;
+// a wrong-typed default is then an arg-type error at the call. Before that
+// commit, `dflt` stayed an independent variable: this program type-checked,
+// and the back end reinterpreted a string pointer as an int32 (or folded the
+// hit path away entirely, silently answering the default for present keys).
+fun main() {
+    let m = HashMap.new()
+    m.set("k", 7)
+    println(m.get_or("k", "DEFAULT"))
+}

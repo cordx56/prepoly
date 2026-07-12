@@ -1,18 +1,17 @@
 // `record_mutator` takes a mutable reference (`ref(mut(Point))`) and writes
-// through it; `forward` only passes its parameter on to `record_mutator`. That
-// write-through position is interprocedural, so `forward`'s parameter also
-// requires a mutable argument, and passing a `const` value through it must be
-// rejected -- the const would otherwise be mutated at runtime through the
-// forwarded reference. (An unannotated mutated parameter is a private deep copy,
-// which a const argument may safely feed; only `ref(mut(..))` write-through is
-// rejected.)
+// through it; `forward` passes its own `ref(mut(Point))` parameter on, so the
+// caller's value is mutated through two reference hops. Passing a `const`
+// into that chain must be rejected. An UNANNOTATED `forward(p)` would instead
+// deep-copy `p` at entry (forwarding into a mutating position counts as
+// mutation), making a const argument safe -- so only the explicit reference
+// chain can reject here.
 type Point = { x: int32 }
 
 fun record_mutator(p: ref(mut(Point))) {
     p.x = 99
 }
 
-fun forward(p) {
+fun forward(p: ref(mut(Point))) {
     record_mutator(p)
 }
 

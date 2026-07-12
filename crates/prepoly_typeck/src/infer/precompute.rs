@@ -206,15 +206,39 @@ impl<'a> Checker<'a> {
             params.extend(self.solver.free_vars(&ty));
             field_types.push((field.name.clone(), ty));
         }
+        // The variables the fields are expressed over: the canonical side when a
+        // return link aliases a method's own variable to a field's.
+        let field_vars: HashSet<u32> = field_types
+            .iter()
+            .flat_map(|(_, t)| self.solver.free_vars(t))
+            .collect();
         let self_ty = info.type_ref();
         let mut scheme_methods = std::collections::BTreeMap::new();
         for (name, method) in methods {
+            // Return-path links the co-check recorded for this method: each
+            // ties two inference variables that are one type (a parameter
+            // returned on one path, a stored field's value on another).
+            // Rewrite the aliased variable to its canonical partner --
+            // preferring a field variable, so the tie is visible to the
+            // instance pinning that resolves scheme parameters from the
+            // receiver's fields (`get_or`'s `dflt` becomes the value slot).
+            let aliases = self.return_link_aliases(&info.name, name.as_str(), &field_vars);
+            let canon = |this: &Self, t: Type| {
+                if aliases.is_empty() {
+                    t
+                } else {
+                    prepoly_hir::substitute_vars(&this.resolve(&t), &aliases)
+                }
+            };
             let mut ps = Vec::with_capacity(method.signature.params.len());
             for p in &method.signature.params {
                 let ty = if p.name == "self" {
                     self_ty.clone()
                 } else {
-                    resolved(self, p.resolved_ty.as_ref()).unwrap_or(Type::Void)
+                    canon(
+                        self,
+                        resolved(self, p.resolved_ty.as_ref()).unwrap_or(Type::Void),
+                    )
                 };
                 params.extend(self.solver.free_vars(&ty));
                 ps.push((p.name.clone(), ty));
@@ -232,6 +256,7 @@ impl<'a> Checker<'a> {
                 .map(|t| self.resolve(t))
                 .or_else(|| resolved(self, method.signature.ret_ty.as_ref()))
                 .unwrap_or(Type::Void);
+            let ret = canon(self, ret);
             params.extend(self.solver.free_vars(&ret));
             scheme_methods.insert(name.clone(), SchemeMethod { params: ps, ret });
         }
@@ -242,6 +267,53 @@ impl<'a> Checker<'a> {
             fields: field_types,
             methods: scheme_methods,
         }
+    }
+
+    /// The variable-alias map a method's recorded return links induce (see
+    /// `co_return_links`): for each pair whose two sides resolve to distinct
+    /// bare inference variables, the non-canonical one maps to the canonical
+    /// -- a variable the type's fields use when either side is one (so the
+    /// receiver's field substitution pins it), otherwise the smaller id.
+    /// Chained links (`a ~ b`, `b ~ c`) are followed through the map.
+    fn return_link_aliases(
+        &self,
+        type_name: &str,
+        method: &str,
+        field_vars: &HashSet<u32>,
+    ) -> std::collections::BTreeMap<u32, Type> {
+        let mut map: std::collections::BTreeMap<u32, Type> = std::collections::BTreeMap::new();
+        let Some(links) = self
+            .co_return_links
+            .get(&(type_name.to_string(), method.to_string()))
+        else {
+            return map;
+        };
+        // Follow earlier aliases so chains canonicalize to one variable.
+        let chase = |map: &std::collections::BTreeMap<u32, Type>, mut v: u32| loop {
+            match map.get(&v) {
+                Some(Type::Unknown(next)) => v = *next,
+                _ => return v,
+            }
+        };
+        for (a, b) in links {
+            let (Type::Unknown(x), Type::Unknown(y)) = (self.resolve(a), self.resolve(b)) else {
+                continue;
+            };
+            let (x, y) = (chase(&map, x), chase(&map, y));
+            if x == y {
+                continue;
+            }
+            let canon = if field_vars.contains(&x) {
+                x
+            } else if field_vars.contains(&y) {
+                y
+            } else {
+                x.min(y)
+            };
+            let other = if canon == x { y } else { x };
+            map.insert(other, Type::Unknown(canon));
+        }
+        map
     }
 
     fn infer_function_return(&mut self, params: &[ParamInfo], body: &Block) -> Type {
@@ -309,6 +381,30 @@ impl<'a> Checker<'a> {
         normal: &[(Type, Span)],
         report: bool,
     ) -> Option<Type> {
+        self.reconcile_return_types_with(normal, report, false)
+    }
+
+    /// [`Self::reconcile_return_types`] with `link`: the co-check passes true
+    /// so that two unifiable return paths are RECORDED as one type for scheme
+    /// generalization (see [`Self::co_return_links`]) -- a variable-typed
+    /// return (an open parameter, a stored field's value) is tied to its
+    /// sibling instead of surviving as an independent scheme parameter.
+    /// `HashMap.get_or` returns `e.value` on one path and `dflt` on the
+    /// other; without the link `dflt` stayed its own scheme parameter, a call
+    /// could pass a string default into an int32-valued map, and the back end
+    /// reinterpreted the bits.
+    ///
+    /// The tie is a side record applied at scheme build, NOT a solver
+    /// binding: a commit into the shared persistent solver binds variables
+    /// other bodies' cached signature types still reference (the `_Entry`
+    /// field variable is program-global), and leaked bindings surfaced as
+    /// order-dependent phantom type errors in unrelated functions.
+    pub(super) fn reconcile_return_types_with(
+        &mut self,
+        normal: &[(Type, Span)],
+        report: bool,
+        link: bool,
+    ) -> Option<Type> {
         let (first, rest) = normal.split_first()?;
         let mut common = first.0.clone();
         for (ty, span) in rest {
@@ -316,21 +412,28 @@ impl<'a> Checker<'a> {
                 common = nullable;
                 continue;
             }
-            if !self.can_unify(&common, ty) {
-                if report {
-                    self.errors.push(TypeError {
-                        message: format!(
-                            "incompatible return types: `{}` and `{}`",
-                            self.resolve(&common).display(),
-                            self.resolve(ty).display()
-                        ),
-                        span: *span,
-                    });
+            if self.can_unify(&common, ty) {
+                if link && let Some(key) = self.current_co_method.clone() {
+                    self.co_return_links
+                        .entry(key)
+                        .or_default()
+                        .push((common.clone(), ty.clone()));
                 }
-                // Keep the first concrete type so callers check against a
-                // definite type rather than cascading a second error.
-                return Some(common);
+                continue;
             }
+            if report {
+                self.errors.push(TypeError {
+                    message: format!(
+                        "incompatible return types: `{}` and `{}`",
+                        self.resolve(&common).display(),
+                        self.resolve(ty).display()
+                    ),
+                    span: *span,
+                });
+            }
+            // Keep the first concrete type so callers check against a
+            // definite type rather than cascading a second error.
+            return Some(common);
         }
         Some(common)
     }

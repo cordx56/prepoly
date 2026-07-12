@@ -1,0 +1,33 @@
+// Calling a self-mutating method on an unannotated parameter counts as
+// mutating the parameter, exactly like a direct field store or a builtin
+// `push`: the callee works on a private deep copy and the caller's value is
+// untouched. Write-through stays opt-in via an explicit `ref(mut(T))`.
+// (Previously a method receiver slipped past the mutation analysis, so the
+// callee mutated the caller's value through the shared reference.)
+type Counter = {
+    value: int64
+}
+
+fun Counter.add(self, n: int64) { self.value = self.value + n }
+
+fun bump_copy(c) {
+    c.add(10)
+    return c.value
+}
+
+fun bump_through(c: ref(mut(Counter))) {
+    c.add(10)
+}
+
+fun main() {
+    let a = Counter { value: 1 }
+    println(bump_copy(a))
+    println(a.value)
+    bump_through(a)
+    println(a.value)
+    // A const may flow into the copying parameter: only its private copy is
+    // mutated, so the const's own value stays untouched.
+    const k = Counter { value: 5 }
+    println(bump_copy(k))
+    println(k.value)
+}

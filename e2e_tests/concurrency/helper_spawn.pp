@@ -8,7 +8,9 @@ type Counter = {
 
 fun Counter.add(self, n: int64) { self.value = self.value + n }
 
-fun start(c) {
+// Explicit ref(mut): the spawned closure mutates the captured parameter, and an
+// unannotated mutated parameter would be a private copy of the caller's counter.
+fun start(c: ref(mut(Counter))) {
     spawn(() -> {
         let i = 0
         while i < 100000 {

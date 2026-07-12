@@ -173,6 +173,10 @@ pub fn infer_body<R: Resolver>(
     resolver: &mut R,
 ) -> Result<Vec<Type>, Vec<MirTypeError>> {
     let mut t = BodyTyper::new();
+    // The input types may embed `Unknown` ids minted by the front end (a
+    // checker-seeded `Known` local, an open scheme variable); seed the local
+    // counter past them so a fresh variable never aliases one.
+    seed_past_inputs(&mut t.solver, body, params, captures, ret);
     // One fresh type variable per local.
     for _ in 0..body.locals.len() {
         let v = t.solver.fresh(InferenceVarKind::Source);
@@ -239,6 +243,7 @@ pub fn infer_body<R: Resolver>(
 /// rejected at the boundary rather than miscompiled.
 pub fn gather_requirements(body: &MirBody, deferred: prepoly_mir::LocalId) -> StructuralReq {
     let mut t = BodyTyper::new();
+    seed_past_inputs(&mut t.solver, body, &[], &[], None);
     for _ in 0..body.locals.len() {
         let v = t.solver.fresh(InferenceVarKind::Source);
         t.locals.push(v);
@@ -276,6 +281,62 @@ struct BodyTyper {
     /// (resolved) id at the point of access.
     requirements: HashMap<u32, StructuralReq>,
     errors: Vec<MirTypeError>,
+}
+
+/// Seed `solver`'s fresh-variable counter one past the highest `Unknown` id
+/// occurring in the body's declared local types and the given input types, so
+/// locally minted variables never collide with front-end-minted ones (a
+/// collision aliases an unrelated type).
+fn seed_past_inputs(
+    solver: &mut Solver,
+    body: &MirBody,
+    params: &[Type],
+    captures: &[(prepoly_mir::LocalId, Type)],
+    ret: Option<&Type>,
+) {
+    let mut max: u32 = 0;
+    {
+        let mut visit = |t: &Type| max_unknown_id(t, &mut max);
+        for t in params {
+            visit(t);
+        }
+        for (_, t) in captures {
+            visit(t);
+        }
+        if let Some(t) = ret {
+            visit(t);
+        }
+        for decl in &body.locals {
+            if let Some(t) = decl.ty.as_known() {
+                visit(t);
+            }
+        }
+    }
+    solver.seed_var_counter(max.saturating_add(1));
+}
+
+/// Record into `max` the highest `Unknown` id occurring anywhere in `t`.
+fn max_unknown_id(t: &Type, max: &mut u32) {
+    match t {
+        Type::Unknown(id) if *id != prepoly_hir::INFER_VAR => *max = (*max).max(*id),
+        Type::Array(inner, _)
+        | Type::Slice(inner)
+        | Type::Nullable(inner)
+        | Type::ConstOf(inner)
+        | Type::Mut(inner)
+        | Type::Ref(inner) => max_unknown_id(inner, max),
+        Type::Tuple(ts) => ts.iter().for_each(|t| max_unknown_id(t, max)),
+        Type::Fun(ps, r) => {
+            ps.iter().for_each(|p| max_unknown_id(p, max));
+            max_unknown_id(r, max);
+        }
+        Type::Record(n) | Type::Sum(n) => {
+            n.substitution
+                .iter()
+                .for_each(|(_, t)| max_unknown_id(t, max));
+        }
+        _ => {}
+    }
 }
 
 impl BodyTyper {

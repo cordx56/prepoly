@@ -66,13 +66,18 @@ pub fn function_markdown(full: &FullAnalysis, f: &FunInfo, call_args: Option<&[T
     };
 
     // The inferred passing mode of each unannotated parameter, shown explicitly:
-    // a parameter the body mutates is a private `mut` copy, otherwise a `ref`
-    // borrow.
+    // a parameter the body mutates -- directly, or by handing it to a mutating
+    // position such as a self-mutating method's receiver -- is a private `mut`
+    // copy, otherwise a `ref` borrow (`prepoly_hir::mutates_value`, the same
+    // predicate the back end's entry copy uses).
+    let mutation = prepoly_hir::MutationInfo::analyze(&full.program);
     let mutated: Vec<bool> = f
         .signature
         .params
         .iter()
-        .map(|p| prepoly_hir::mutates_root(&f.decl.body, &p.name))
+        .map(|p| {
+            prepoly_hir::mutates_value(&full.program, &f.module, &f.decl.body, &p.name, &mutation)
+        })
         .collect();
 
     let mut namer = UnknownNamer::default();

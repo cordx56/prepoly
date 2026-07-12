@@ -113,6 +113,14 @@ pub struct LlvmCodegen<'ctx, 'p> {
     /// Per-type recursive destructors (`__drop_*`), memoized by mangled type name.
     /// Emitting one before its body lets self-referential types recurse; the map is
     /// cleared per module (a destructor can only be called within its own module).
+    ///
+    /// This map and the three below MUST key by `Type::display_full` (the
+    /// `_`-members included), never `display`: the user-facing rendering hides
+    /// `_`-prefixed substitution entries, so two instantiations of a type whose
+    /// open members are all private (a `HashMap<string, int32>` and a
+    /// `HashMap<string, string>`) both print as the bare name -- and a shared key
+    /// hands one instance's glue to the other, releasing a scalar field as a heap
+    /// pointer.
     destructors: std::collections::HashMap<String, FunctionValue<'ctx>>,
     /// Per-type recursive `to_string` renderers (`pp_fn_tostr_*`) for records and
     /// sums, memoized by mangled type name. Emitting one before its body lets a
@@ -300,7 +308,7 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
     /// sum). `None` for a type with no traced children (a leaf -- never registered).
     /// Unlike the destructor it does not touch reference counts; the collector does.
     fn get_or_emit_tracer(&mut self, ty: &Type) -> Option<FunctionValue<'ctx>> {
-        let key = mangle_fn(&format!("trace_{}", ty.display()));
+        let key = mangle_fn(&format!("trace_{}", ty.display_full()));
         if let Some(t) = self.tracers.get(&key) {
             return *t;
         }
@@ -507,7 +515,7 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
     }
 
     fn get_or_emit_destructor(&mut self, ty: &Type) -> FunctionValue<'ctx> {
-        let key = mangle_fn(&format!("drop_{}", ty.display()));
+        let key = mangle_fn(&format!("drop_{}", ty.display_full()));
         if let Some(f) = self.destructors.get(&key) {
             return *f;
         }
@@ -738,7 +746,7 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
             "clodrop_{}",
             capture_types
                 .iter()
-                .map(|t| t.display())
+                .map(|t| t.display_full())
                 .collect::<Vec<_>>()
                 .join(",")
         ));
@@ -1644,7 +1652,7 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
     /// self-referential type terminates); a string/closure is shared with its count
     /// raised. Used to pass a non-reference argument by value.
     fn get_or_emit_deep_copy(&mut self, ty: &Type) -> FunctionValue<'ctx> {
-        let key = mangle_fn(&format!("dcopy_{}", ty.display()));
+        let key = mangle_fn(&format!("dcopy_{}", ty.display_full()));
         if let Some(f) = self.deep_copy_fns.get(&key) {
             return *f;
         }
@@ -1833,7 +1841,7 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
     /// emitted so a self-referential type (e.g. a field of its own type) recurses
     /// through the call rather than re-entering code generation.
     fn get_or_emit_to_string(&mut self, ty: &Type) -> FunctionValue<'ctx> {
-        let key = mangle_fn(&format!("tostr_{}", ty.display()));
+        let key = mangle_fn(&format!("tostr_{}", ty.display_full()));
         if let Some(f) = self.to_string_fns.get(&key) {
             return *f;
         }

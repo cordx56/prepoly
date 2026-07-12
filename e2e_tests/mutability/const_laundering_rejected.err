@@ -1,4 +1,2 @@
 error: cannot pass const value `o` to `f`, which requires a mutable parameter
 error: cannot pass const value `o` to `apply`, which passes it to `mutate` requiring a mutable parameter
-error: cannot pass const value `c` to `poke`, which requires a mutable parameter
-error: cannot pass const value `o` to method `launder`, which requires a mutable parameter

@@ -116,16 +116,12 @@ impl<'p, 'm> Interp<'p, 'm> {
                 Terminator::Return(op) => return self.eval_return(f, frame, op),
                 Terminator::Goto(b) => block = *b,
                 Terminator::CondBranch { cond, then, els } => {
-                    // Mirror the typed back end's fold (including the structural
-                    // graceful degradation: a then-branch that cannot type for this
-                    // value makes the condition statically false), then fall back to
-                    // a runtime truthiness test.
+                    // Mirror the typed back end's fold, then fall back to a
+                    // runtime truthiness test.
                     block = match prepoly_engine::cond_static_truthiness(
                         f.body,
                         &f.local_types,
-                        &f.ret,
                         cond,
-                        *then,
                     ) {
                         Some(true) => *then,
                         Some(false) => *els,

@@ -246,13 +246,17 @@ fn method_hover(doc: &Document, full: &FullAnalysis, local: usize, global: usize
     let call_args = call_span.and_then(|s| nav::call_args_at_span(full, s));
     let specialized = specialize_method_signature(&scheme_sig, call_args.as_deref(), ret.as_ref());
     // Show the inferred `ref`/`mut` passing mode of unannotated parameters
-    // (including `self`): a parameter the method body mutates is a private `mut`
-    // copy (or a `ref(mut(Self))` receiver), otherwise a `ref` borrow.
+    // (including `self`): a parameter the method body mutates -- directly, or by
+    // handing it to a mutating position -- is a private `mut` copy (or a
+    // `ref(mut(Self))` receiver), otherwise a `ref` borrow. Same predicate as
+    // the back end's entry copy.
     let mutated: Option<Vec<bool>> = method_body(full, &recv_ty, &name).map(|body| {
+        let mutation = prepoly_hir::MutationInfo::analyze(&full.program);
+        let module = receiver_module(full, &recv_ty);
         specialized
             .params
             .iter()
-            .map(|p| prepoly_hir::mutates_root(body, &p.name))
+            .map(|p| prepoly_hir::mutates_value(&full.program, module, body, &p.name, &mutation))
             .collect()
     });
     let rendered = render_signature_into(
@@ -267,6 +271,22 @@ fn method_hover(doc: &Document, full: &FullAnalysis, local: usize, global: usize
         method_doc(full, &recv_ty, &name),
         Some(doc.range_of(span)),
     ))
+}
+
+/// The defining module of the receiver's nominal type, for resolving the
+/// names a method body forwards its parameters into; the root module when the
+/// receiver is not a nominal (a primitive-method receiver).
+fn receiver_module<'a>(full: &'a FullAnalysis, recv_ty: &Type) -> &'a [String] {
+    let mut t = recv_ty;
+    while let Type::Ref(i) | Type::Mut(i) | Type::ConstOf(i) | Type::Nullable(i) = t {
+        t = i;
+    }
+    if let Type::Record(n) | Type::Sum(n) = t
+        && let Some(info) = full.program.type_by_id(n.id)
+    {
+        return &info.module;
+    }
+    &[]
 }
 
 /// The doc comment of the method `name` on `recv_ty` -- from the `fun T.m`

@@ -204,9 +204,13 @@ fn write_through_fixpoint(program: &Program) -> MutationInfo {
         let mut changed = false;
         for f in program.functions.values() {
             for (param_idx, p) in f.signature.params.iter().enumerate() {
-                if param_receives_copy(program, &f.module, p, &f.decl.body) {
-                    // A deep-copied parameter's mutation never reaches the caller,
-                    // so forwarding it does not make this position mutable.
+                if !param_is_reference(p) {
+                    // Only a `ref(..)` parameter can carry a mutation back to
+                    // the caller. Everything else receives a copy at entry --
+                    // including an unannotated parameter that forwards into a
+                    // mutating position (that forwarding is exactly what makes
+                    // it a private copy, see `mutates_value`) -- so forwarding
+                    // it never creates a write-through position.
                     continue;
                 }
                 if info
@@ -238,7 +242,7 @@ fn write_through_fixpoint(program: &Program) -> MutationInfo {
                 .skip(usize::from(has_self))
                 .enumerate()
             {
-                if param_receives_copy(program, &tinfo.module, p, body) {
+                if !param_is_reference(p) {
                     continue;
                 }
                 if info
@@ -487,19 +491,51 @@ pub fn annotated_type_passes_by_copy(program: &Program, module: &[String], t: &T
 /// Whether a non-`self` parameter receives a private deep copy at callee
 /// entry: an annotated parameter follows its annotation (see
 /// [`annotated_type_passes_by_copy`]); an unannotated one copies exactly when
-/// the body mutates it (the inferred `mut` mode). A copied parameter's
-/// mutations are confined to the callee, so a `const` argument to it is fine
-/// and forwarding it never creates a write-through position.
+/// the body mutates the value it names (see [`mutates_value`]). A copied
+/// parameter's mutations are confined to the callee, so a `const` argument to
+/// it is fine and forwarding it never creates a write-through position.
 pub fn param_receives_copy(
     program: &Program,
     module: &[String],
     p: &ParamInfo,
     body: &Block,
+    info: &MutationInfo,
 ) -> bool {
     match &p.ty {
         Some(t) => annotated_type_passes_by_copy(program, module, t),
-        None => mutates_root(body, &p.name),
+        None => mutates_value(program, module, body, &p.name, info),
     }
+}
+
+/// Whether a parameter is annotated as a reference of either mutability
+/// (`ref(T)` or `ref(mut(T))`) -- the only annotations that pass the caller's
+/// own value rather than a copy.
+fn param_is_reference(p: &ParamInfo) -> bool {
+    matches!(&p.ty, Some(TypeExpr::Ref(..)))
+}
+
+/// The pass-mode mutation predicate for an unannotated parameter: whether
+/// `body` mutates the value `root` names, either DIRECTLY through the
+/// reference ([`mutates_root`]) or by handing a place rooted at it to a
+/// position that mutates through the reference it receives -- the receiver of
+/// a self-mutating method, an explicit `ref(mut(T))` parameter, or a
+/// reference parameter that forwards onward (per `info`'s fixpoint tables).
+/// Either way the body works on the caller's value, so the parameter must
+/// become a private deep copy; write-through stays opt-in via `ref(mut(T))`.
+///
+/// Method receivers are matched by name across all types (bodies are
+/// unchecked AST, so the receiver's type is unknown here) -- conservative,
+/// like the const checker: a parameter may copy because a same-named method
+/// of an unrelated type mutates. A spurious copy costs a copy; the mutation
+/// still stays local either way.
+pub fn mutates_value(
+    program: &Program,
+    module: &[String],
+    body: &Block,
+    root: &str,
+    info: &MutationInfo,
+) -> bool {
+    mutates_root(body, root) || forwards_to_mutating(program, module, body, root, info)
 }
 
 /// Whether a parameter is an immutable reference (`ref(T)`, not `ref(mut(T))`).

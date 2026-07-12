@@ -177,6 +177,7 @@ pub fn analyze(program: &Program) -> Inference {
     // the schemes available at call sites (a function instantiates a method's
     // scheme to type the call's result) and keeps the generic field variable read
     // here free of any concrete use.
+    checker.co_checking = true;
     for t in program.types.values() {
         checker.current_module = t.module.clone();
         match &t.kind {
@@ -190,8 +191,11 @@ pub fn analyze(program: &Program) -> Inference {
                     if let Some(body) = &m.decl.body {
                         let mut scopes = checker.signature_scopes(&m.signature.params);
                         let ret = m.signature.ret_ty.clone();
+                        checker.current_co_method =
+                            Some((t.name.clone(), m.signature.name.clone()));
                         let full =
                             checker.check_block_with_self(body, &mut scopes, ret.as_ref(), &t.name);
+                        checker.current_co_method = None;
                         // Keep the return the full check reconciled here, in the
                         // shared per-type environment, for scheme generalization
                         // (see `co_method_returns`). A propagating body's shape
@@ -228,6 +232,7 @@ pub fn analyze(program: &Program) -> Inference {
             }
         }
     }
+    checker.co_checking = false;
     checker.schemes = checker.build_schemes();
 
     for (symbol, f) in &program.functions {
@@ -314,6 +319,23 @@ struct Checker<'a> {
     /// method's return to the type's parameters (`get -> V?`). Only recorded
     /// for inferred-return, non-propagating record methods.
     co_method_returns: HashMap<(String, String), Type>,
+    /// Whether the co-check pass (every record type's method bodies, checked in
+    /// one shared environment before scheme generalization) is running. Return
+    /// reconciliation COMMITS unifications only then: the scheme must record two
+    /// unifiable returns as one parameter (`get_or`'s `dflt` IS the map's value
+    /// type), while a free function's returns stay loose -- its signature keeps
+    /// its own variables, bound per call site.
+    co_checking: bool,
+    /// The `(type name, method name)` whose body the co-check pass is
+    /// currently checking, so return reconciliation can attribute the links it
+    /// records (see `co_return_links`).
+    current_co_method: Option<(String, String)>,
+    /// Pairs of return-path types the co-check found unifiable within one
+    /// method body. Scheme generalization ties each pair's inference variables
+    /// together (`get_or`'s `dflt` IS the map's value type) -- as a rewrite
+    /// local to that type's scheme, never a shared-solver binding, which would
+    /// leak into unrelated bodies' cached signature variables.
+    co_return_links: HashMap<(String, String), Vec<(Type, Type)>>,
     instantiating: HashSet<String>,
     /// Deferred structural constraints on inference variables, keyed by the
     /// variable's `Unknown` id. Recorded while checking a body that uses an
@@ -430,9 +452,21 @@ impl<'a> Checker<'a> {
             method_returns: HashMap::new(),
             method_return_props: HashSet::new(),
             co_method_returns: HashMap::new(),
+            co_checking: false,
+            current_co_method: None,
+            co_return_links: HashMap::new(),
             instantiating: HashSet::new(),
             shape_constraints: HashMap::new(),
-            solver: Solver::new(),
+            solver: {
+                // Fresh variables must not collide with the ids lowering
+                // embedded in the program's resolved types (see
+                // `Program::next_infer_var`); a collision aliases an
+                // unrelated type and surfaced as order-dependent phantom
+                // type errors.
+                let mut s = Solver::new();
+                s.seed_var_counter(program.next_infer_var);
+                s
+            },
             current_module: Vec::new(),
             fn_instances: HashMap::new(),
             schemes: HashMap::new(),
@@ -555,7 +589,12 @@ impl<'a> Checker<'a> {
         self.narrowed_bindings = saved_narrowed;
         self.const_scopes = saved;
         if ret.is_none() {
-            let common = self.reconcile_return_types(&collected, false);
+            // The co-check RECORDS the unifiable-return links (see
+            // `reconcile_return_types_with`): this is what ties a method's
+            // open-parameter return to the value it joins with, so the scheme
+            // records them as one parameter (`get_or`'s `dflt` IS the map's
+            // value type).
+            let common = self.reconcile_return_types_with(&collected, false, self.co_checking);
             // The join helper leaves an open variable bare when joined with a
             // literal `return null` (eager wrapping could nest once the
             // variable resolves to a nullable type), which understates a

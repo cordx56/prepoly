@@ -205,6 +205,7 @@ pub fn lower(modules: &[LoadedModule]) -> (Program, Vec<LowerError>) {
         symbol_aliases,
         primitive_methods,
         type_aliases: HashMap::new(),
+        next_infer_var: 0,
     };
     resolve_program_annotations(&mut program, &alias_decls, &mut errors);
 
@@ -690,6 +691,9 @@ fn resolve_program_annotations(
 
     propagate_interface_field_constraints(program);
     propagate_interface_method_constraints(program);
+    // Publish the counter so every downstream solver can seed past the ids
+    // now embedded in the program's types (see `Program::next_infer_var`).
+    program.next_infer_var = next_unknown;
 }
 
 /// Resolve a sum variant field's declared type. The annotation may name a

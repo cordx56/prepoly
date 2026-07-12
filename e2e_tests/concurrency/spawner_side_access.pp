@@ -9,7 +9,8 @@ type Counter = {
 
 fun Counter.add(self, n: int64) { self.value = self.value + n }
 
-fun work(c) {
+// Explicit ref(mut): an unannotated mutated parameter would be a private copy.
+fun work(c: ref(mut(Counter))) {
     let i = 0
     while i < 100000 {
         c.add(1)

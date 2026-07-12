@@ -37,6 +37,12 @@ use crate::program::{MirClosure, MirFunction, MirInit, MirMethod, MirProgram};
 /// register the closures it discovers without a borrow conflict.
 pub(crate) struct ProgramCtx<'p> {
     program: &'p Program,
+    /// The program's mutation facts (self-mutating methods, write-through
+    /// positions), computed once per lowering: the entry-copy decision for an
+    /// unannotated parameter needs them to count handing the parameter to a
+    /// mutating position (a `m.set(..)` receiver) as a mutation, exactly like
+    /// the const checker does.
+    mutation: prepoly_hir::MutationInfo,
     /// Every sum-variant name in the program, used to tell a binding pattern
     /// (`x`) from a unit-variant pattern (`Red`) during match lowering.
     variant_names: std::collections::HashSet<String>,
@@ -125,6 +131,7 @@ impl<'p> ProgramCtx<'p> {
         }
         ProgramCtx {
             program,
+            mutation: prepoly_hir::MutationInfo::analyze(program),
             variant_names,
             expr_types,
             view_args,
@@ -521,7 +528,13 @@ impl<'a, 'p> FnLower<'a, 'p> {
                 }
                 match &p.ty {
                     Some(t) => self.ctx.type_needs_copy(&self.module, t),
-                    None => prepoly_hir::mutates_root(body, &p.name),
+                    None => prepoly_hir::mutates_value(
+                        self.ctx.program,
+                        &self.module,
+                        body,
+                        &p.name,
+                        &self.ctx.mutation,
+                    ),
                 }
             })
             .collect()

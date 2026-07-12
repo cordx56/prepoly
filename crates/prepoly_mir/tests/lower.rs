@@ -25,6 +25,7 @@ fn empty_program() -> Program {
         symbol_aliases: HashMap::new(),
         primitive_methods: HashMap::new(),
         type_aliases: HashMap::new(),
+        next_infer_var: 0,
     }
 }
 

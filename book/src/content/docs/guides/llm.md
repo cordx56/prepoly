@@ -381,69 +381,253 @@ import geometry.vec as g
 
 ## Standard library (implicit prelude, no import needed)
 
-- IO: `print`, `println`, `input() -> string!` (one line, without the trailing
-  newline; unwrap with `!` or `match`) are the import-free prelude. Files are
-  the fs LIBRARY (set up like `process` below): `import fs.{ File, open,
-  read_file, write_file }`; `read_file(path) -> string!`,
-  `write_file(path, content) -> void!`, `open(path, mode) -> File!` then
-  `f.read(n)/f.write(bytes)/f.seek(pos)/f.size()/f.close()` (all fallible;
-  `size` works only for files opened by path), `File.from_fd(fd)`,
-  `File.stdin/stdout/stderr()`.
-- Arrays: `map`, `filter`, `fold`, `each`, `slice(start, end)`, `reverse`,
-  `contains`, `sort`, `len`, `push`, `pop`, `insert`, `remove`.
-- Strings: `split`, `join`, `trim`, `starts_with`, `ends_with`, `find`,
-  `replace`, `chars`, `to_upper`, `to_lower`, `len`.
-- Math: `abs`, `min`, `max`, `sqrt`, `floor`, `ceil`, `pow`.
+Everything in this section is in scope with no import.
+
+- IO: `print(value)` and `println(value)` take exactly ONE argument -- combine
+  several values with interpolation (`println("{a} {b}")`).
+  `input() -> string!` reads one stdin line without its trailing newline.
+- `len(x) -> int64`: the element count of an array, or the BYTE length of a
+  string. Also callable as a method: `arr.len()`, `s.len()`.
+- `assert(cond)` / `assert(cond, msg)` aborts the program when `cond` is false.
 - Numeric limits: `INT32_MAX`, `INT32_MIN`, `INT64_MAX`, `INT64_MIN`.
-  Free-function conversion aliases also exist (`int32_parse`, `int32_from`,
-  `float64_parse`, `float64_from`, `string_from`), equivalent to the method
-  forms above.
-- Collections: `HashMap` (open-addressing hash map) is in a NESTED std module
-  and needs an explicit `import std.collections.{ HashMap }`.
-  `let m = HashMap.new()` takes no arguments; the key/value types are inferred
-  from the first `set` (so `let m = HashMap.new(); m.set("a", 1)` is a
-  `string -> int32` map). Methods: `set(k, v)`, `get(k)` (nullable),
-  `get_or(k, default)`, `contains_key(k)`, `delete(k)`, `size()`,
-  `is_empty()`, `keys()`, `values()`, `pairs()`, `clear()`, and
-  `HashMap.from_pairs([[k, v], ...])`.
-- Networking: a LIBRARY, not `std` (set up like `process` below), so
-  `import net.{ Tcp, TcpListener, Udp, TlsStream }`.
-  `Tcp.connect(host, port) -> Tcp!`; `TcpListener.bind(host, port) ->
-  TcpListener!` (port 0 = ephemeral) then `listener.accept() -> Tcp!`;
-  `conn.read(max) -> uint8[]!`, `conn.write(data) -> int64!`,
-  `conn.local_addr()`/`conn.peer_addr() -> string!`, `conn.set_timeout(ms)`,
-  `conn.close()`. `Udp.bind(host, port) -> Udp!`, `sock.send_to(data, host,
-  port) -> int64!`, `sock.recv_from(max) -> Datagram!`
-  (`{ data: uint8[], addr: string }`). Convert bytes with the PRELUDE
-  helpers `to_bytes(string) -> uint8[]` and `to_text(uint8[]) -> string!`
-  (no import). TCP is a byte stream (one read may return a partial
-  message). For HTTPS-grade encryption: `TlsStream.connect(host, port) ->
-  TlsStream!` verifies the certificate and then mirrors `Tcp`
-  (`read`/`write`/`close`). Everything here runs on either back end.
-- Processes: a LIBRARY, not `std` -- its native half is a plugin. Build it with
-  `libraries/build.sh`, set `PREPOLY_INCLUDE=<repo>/libraries` (unneeded
-  for a distributed toolchain, which finds `libraries/` beside its binary), then
-  `import process.{ Command, Stdio }`. `Command.new(prog)`
-  then chained builder methods `arg(s)`/`args(ss)`/`stdin/stdout/stderr(Stdio)`
-  (`Stdio` is `| Inherit | Pipe | Null`), then `spawn() -> Child!`. On a
-  `Child`: `stdin()/stdout()/stderr() -> File!` (each requires that stream be
-  `Stdio.Pipe`), `wait() -> int32!` (exit code). A piped stream is an fs
-  `File`, so drive it with `read`/`write`/`close` and convert bytes with the
-  prelude `to_bytes`/`to_text`.
-- JSON: a LIBRARY (pure prepoly, same setup as the others) --
-  `import data.json.{ JsonValue, parse, stringify }`.
-  `parse(text) -> JsonValue!`; accessors `get(key)`, `at(index)`, `as_bool()`,
-  `as_number()`, `as_string()` (each fallible), `is_null()`; `stringify(v)` is
-  a FREE function (`stringify(v)`, not `v.stringify()`). `j.into()!` decodes a
-  JSON value into the record type the call site expects
-  (`const u: User = j.into()!`).
-- `assert(cond, msg?)` aborts when `cond` is false (`msg` is optional).
-- Identifiers beginning with `_` (e.g. `_string_bytes`, `_panic`) are runtime
-  internals -- do not call them directly; use the prelude wrappers above.
-- Concurrency (`spawn`/`with`/`sync`) runs on the native runtime only;
-  `prepoly repl` rejects it. File I/O, processes, and networking run on
-  either back end (their libraries' plugins execute natively under the
-  interpreter too).
+- Identifiers beginning with `_` (e.g. `_string_bytes`, `_panic`, `_argv`) are
+  runtime internals -- do not call them directly; use the wrappers below.
+
+### Array methods
+
+Mutating, on dynamic `T[]` arrays only: `arr.push(x)`, `arr.pop() -> T?`,
+`arr.insert(i, x)`, `arr.remove(i) -> T`.
+
+Everything else returns a NEW array -- nothing sorts, maps, or reverses in
+place:
+
+- `arr.map(f)`, `arr.filter(pred)`, `arr.fold(init, f)` (left fold),
+  `arr.each(f)` (side effects only, returns nothing)
+- `arr.slice(start, end)` -- a copy, `end` exclusive; the bounds are `int64`,
+  so `arr.slice(1, arr.len())` works
+- `arr.reverse()`; `arr.sort()` -- ascending by `<`
+- `arr.contains(x) -> bool` -- whole-element `==` (a substring test on a
+  string is `s.find(sub) != null`, not `contains`)
+- `parts.join(sep) -> string` -- on a `string[]`
+
+### String methods (all offsets are UTF-8 BYTE offsets)
+
+- `s.split(sep) -> string[]` -- keeps interior and trailing empty fields
+  (`"a,,b,"` -> `["a", "", "b", ""]`); an empty `sep` yields `[s]` unsplit
+- `s.trim() -> string` -- ASCII whitespace off both ends
+- `s.starts_with(prefix) -> bool`, `s.ends_with(suffix) -> bool`
+- `s.find(sub) -> int64?` -- byte offset of the first occurrence, null if
+  absent
+- `s.replace(old, new) -> string` -- every occurrence; an empty `old` is a
+  no-op
+- `s.chars() -> string[]` -- one string per character, multibyte kept whole
+- `s.to_upper()` / `s.to_lower()` -- ASCII letters only
+- There is no substring slicing and no `s[i]` indexing: work through
+  `chars()`, `split`, `find`, `replace`.
+
+### Math
+
+- `abs(x)`, `min(a, b)`, `max(a, b)` -- polymorphic over any ordered type
+- `sqrt(x)`, `floor(x)`, `ceil(x)`, `pow(base, exp)` -- return `float64`; the
+  arguments are floats (an int argument widens only when value-preserving, so
+  convert an `int64` with `float64.from(n)` first)
+
+### Conversions
+
+- `string.from(x) -> string` -- any value's text, as `print` renders it
+- `float64.from(x) -> float64` -- infallible widening
+- `int32.from(x) -> int32!` etc. -- checked for every numeric type; fails
+  when the value does not fit
+- `int32.parse(s) -> int32!`, `float64.parse(s) -> float64!` etc. -- parse
+  decimal text
+- `to_bytes(s) -> uint8[]` / `to_text(bytes) -> string!` -- string/byte
+  conversions (pair them with fs and net)
+- Free-function aliases: `int32_from`, `int32_parse`, `float64_from`,
+  `float64_parse`, `string_from`.
+
+## HashMap -- `import std.collections.{ HashMap }`
+
+An open-addressing hash map, in a NESTED std module (the explicit import is
+required). Keys may be of any type that renders to a stable string and
+compares with `==` (integers, strings, records); values may be of any type.
+`HashMap.new()` takes NO arguments -- the key/value types are inferred from
+the first `set` (`let m = HashMap.new(); m.set("a", 1)` is a
+`string -> int32` map). To pin them explicitly, use a refinement alias:
+`type Counts = HashMap { key: string, value: int64 }`.
+
+- `HashMap.new()`; `HashMap.from_pairs([[k, v], ...])`
+- `m.set(k, v)` -- insert or overwrite
+- `m.get(k) -> V?` -- null when absent; `m.get_or(k, default) -> V` -- never
+  nullable
+- `m.contains_key(k) -> bool`; `m.delete(k) -> bool` (whether it was present)
+- `m.size() -> int64`; `m.is_empty() -> bool`
+- `m.keys() -> K[]`, `m.values() -> V[]`, `m.pairs() -> [K, V][]` -- all in
+  unspecified (slot) order
+- `m.clear()` -- keeps capacity and key/value types
+
+## Bundled libraries (explicit import; not `std`)
+
+The toolchain ships a `libraries/` directory. A distributed install finds it
+automatically beside its binary; from a repo checkout, build the native
+plugin halves once with `libraries/build.sh` and set
+`PREPOLY_INCLUDE=<repo>/libraries`. Every library below runs on BOTH back
+ends (the JIT and `prepoly repl`) -- only `spawn` concurrency is JIT-only.
+
+### env -- `import env.{ args, var, vars, current_dir }`
+
+- `args() -> string[]` -- the program's argument vector: the program file as
+  written on the command line, then everything after it, verbatim
+  (`prepoly main.pp --verbose x` -> `["main.pp", "--verbose", "x"]`; the
+  driver consumes nothing after the file). Empty in an interactive REPL.
+- `var(name) -> string!` -- the variable's value; UNSET is an error, not `""`
+- `vars()` -- every environment variable, as a `string -> string` HashMap
+- `current_dir() -> Path!` -- the working directory, as a `path` `Path`
+
+### path -- `import path.{ Path }`
+
+A `Path` is a list of components. Everything except the filesystem queries at
+the end is pure -- it never touches the OS and works for paths that do not
+exist. Every module also has a private constant `_PATH: string` holding its
+own absolute source path, so "the file I am in" is `Path.parse(_PATH)`.
+
+- Construct: `Path.parse(s)`; `Path.current_dir() -> Path!`;
+  `Path.home() -> Path!`; `Path.temp_dir() -> Path!`
+- Render: `p.to_string()` (the empty path prints as `.`);
+  `p.components() -> string[]`; `p.depth() -> int64` (component count -- NOT
+  `len`, which paths do not support)
+- Predicates: `p.is_absolute()`, `p.is_root()`, `p.equals(q)`,
+  `p.starts_with(base: Path)` (component-wise prefix)
+- Take apart: `p.parent() -> Path`; `p.basename() -> Path`;
+  `p.extension() -> string?` (text after the LAST dot; `.gitignore` has
+  none); `p.stem() -> string`; `p.with_extension(ext) -> Path` (`ext`
+  without the dot; `""` removes it)
+- Combine: `p.join(x) -> Path` -- `x` may be a string (`"src/main.pp"`), a
+  `string[]`, or another `Path`; an ABSOLUTE `x` replaces `p` entirely
+- Resolve: `p.normalize()` (fold `.`/`..` textually);
+  `p.to_absolute() -> Path!` (against the cwd; no symlink resolution);
+  `p.to_relative(base: Path) -> Path!`; `p.canonicalize() -> Path!`
+  (symlinks resolved; the path must exist)
+- Filesystem queries: `p.exists()`, `p.is_dir()`, `p.is_file()`,
+  `p.is_sym_link() -> bool`; `p.read_link() -> Path!`;
+  `p.entries() -> Path[]!` (directory listing, OS order);
+  `p.file_size() -> int64!`
+
+### fs -- `import fs.{ File, open, read_file, write_file }`
+
+- `read_file(path) -> string!`; `write_file(path, content) -> void!`
+- `open(path, mode) -> File!` -- mode `"r"` read, `"w"` truncate+create,
+  `"a"` append+create
+- `f.read(max) -> uint8[]!` -- up to `max` bytes, fewer on a short read,
+  empty at end-of-file; `f.write(data: uint8[]) -> int64!`;
+  `f.seek(pos) -> void!` (absolute); `f.close() -> void!` (idempotent;
+  standard streams are never closed)
+- `f.size() -> int64!` -- answered by path, so ONLY for files opened by
+  `open`; adopted descriptors and standard streams report an error
+- `File.from_fd(fd)` adopts an open descriptor (a pipe, a socket);
+  `File.stdin()`, `File.stdout()`, `File.stderr()`
+- Text <-> bytes with the prelude `to_bytes` / `to_text`
+
+### process -- `import process.{ Command, Stdio }`
+
+`Stdio = Inherit | Pipe | Null` (default `Inherit`). The builder methods
+mutate the command and return it, so they chain:
+
+```
+const child = Command.new("git").args(["status"]).stdout(Stdio.Pipe).spawn()!
+const out = child.output()!    // { code: int32, stdout: uint8[], stderr: uint8[] }
+println(to_text(out.stdout)!)
+```
+
+- `Command.new(program)` (looked up on `PATH`), then `.arg(v)`, `.args(vs)`,
+  `.stdin(m)`, `.stdout(m)`, `.stderr(m)`, then `.spawn() -> Child!`
+- `child.output() -> Output!` -- drains the piped streams while waiting, then
+  returns `{ code, stdout, stderr }`; cannot deadlock. Prefer this.
+- `child.wait() -> int32!` -- the exit code; DEADLOCKS if a `Pipe` stream
+  fills unread (~64KiB), so drain pipes first or use `output()`
+- `child.stdin()/stdout()/stderr() -> File!` -- the pipe as an fs `File`
+  (requires that stream be `Stdio.Pipe`); write to stdin, read the others
+
+### net -- `import net.{ Tcp, TcpListener, Udp, TlsStream }`
+
+TCP is a BYTE STREAM: one `read` may return part of a message, so loop or
+frame messages. Bytes convert with the prelude `to_bytes` / `to_text`.
+
+- `Tcp.connect(host, port) -> Tcp!` -- `host` is an IP literal or a name
+- `TcpListener.bind(host, port) -> TcpListener!` -- port 0 = OS-chosen (read
+  it back with `local_addr()`); `listener.accept() -> Tcp!`;
+  `listener.local_addr() -> string!`; `listener.close()`
+- On a `Tcp`: `read(max) -> uint8[]!` (empty at end-of-stream),
+  `write(data) -> int64!`, `close()`, `local_addr() -> string!` /
+  `peer_addr() -> string!` (both `"ip:port"`), `set_timeout(ms)` (0 = block
+  forever; an exceeded deadline is an error Result)
+- `Udp.bind(host, port) -> Udp!`; `sock.send_to(data, host, port) -> int64!`;
+  `sock.recv_from(max) -> Datagram!` with `Datagram = { data: uint8[],
+  addr: string }` (a longer datagram truncates); plus `local_addr`,
+  `set_timeout`, `close`
+- `TlsStream.connect(host, port) -> TlsStream!` -- TLS with certificate
+  verification against `host` (bundled Mozilla roots, no configuration
+  knobs); then `read`/`write`/`close` exactly like `Tcp`
+
+### url -- `import url.{ URI }`
+
+An RFC 3986 parser. Components KEEP their percent-encoding (use the decoded
+views below); null means the component was ABSENT, which differs from empty
+(`http://h/p` has a null query, `http://h/p?` an empty one). `scheme` comes
+back lowercased.
+
+- `URI.parse(s) -> URI!` (requires a scheme);
+  `URI.parse_reference(s) -> URI!` (relative references allowed)
+- Fields: `scheme: string?`, `authority: Authority?`, `path: string`,
+  `query: string?`, `fragment: string?`; `Authority` is
+  `{ userinfo: string?, host: string, port: uint16? }`
+- `uri.to_string()` reassembles; `uri.authority_string() -> string?`
+- Decoded views: `uri.path_segments() -> string[]!` and
+  `uri.query_pairs() -> QueryPair[]!` (`QueryPair = { key: string,
+  value: string }`, from `import url.query.{ QueryPair }`)
+- Percent-coding: `import url.percent`, then `percent.decode(s) -> string!`
+  and `percent.encode_component(s) -> string`
+
+### http -- `import http.{ fetch, HttpClient, HttpRequest, HttpResponse, Header }`
+
+HTTP/1.1 over `net`. Response bodies are read by `Content-Length` (or to
+connection close); chunked transfer coding is NOT decoded.
+
+- `fetch(url) -> HttpResponse!` -- GET an `http://` or `https://` URL string
+- `HttpClient.http(host, port)` / `HttpClient.https(host, port)`, then
+  `client.fetch(path)!` or `client.request(req)!`
+- `HttpRequest = { method, path, version, headers: Header[], body: uint8[] }`
+  with `Header = { name: string, value: string }`;
+  `HttpRequest.parse(raw)!`; `req.serialize() -> uint8[]`
+- `HttpResponse = { version, status: int32, reason, headers, body }`;
+  `resp.body_text() -> string!`; `HttpResponse.parse(raw)!`
+- `request(req) -> HttpResponse!` -- plain HTTP; the host comes from the
+  request's `Host` header
+
+### JSON -- `import data.json.{ JsonValue, parse, stringify }`
+
+Pure prepoly (no plugin).
+
+```
+type JsonValue =
+    | Null
+    | Bool { value: bool }
+    | Number { value: float64 }
+    | String { value: string }
+    | Array { value: JsonValue[] }
+    | Object { values }              // a string -> JsonValue HashMap
+```
+
+- `parse(text) -> JsonValue!` -- the whole input must be one JSON value
+- `stringify(v) -> string` -- a FREE function (`stringify(v)`, NOT
+  `v.stringify()`); compact output; object members render in the map's slot
+  order, not the source document's order
+- Accessors on a `JsonValue`: `get(key) -> JsonValue!` (objects),
+  `at(index) -> JsonValue!` (arrays), `as_bool() -> bool!`,
+  `as_number() -> float64!`, `as_string() -> string!`, `is_null() -> bool`
+- `j.into()!` decodes into the type the CALL SITE expects
+  (`const u: User = j.into()!`): scalars, nullables, and records whose
+  field names match the JSON keys, recursively. A JSON ARRAY cannot be
+  decoded with `into` (even as a record field) -- walk arrays with `at`.
 
 ## Concurrency (experimental -- avoid unless asked)
 
@@ -460,6 +644,10 @@ of `main`, so insert `sync()` before a read that may race ahead.
   float -> int) always goes through `T.from(x)!`.
 - `len()` returns `int64`; implicit int widening covers the common cases
   (`[0..len(xs)]` works without an annotation).
+- `print`/`println` take exactly one argument; interpolate instead.
+- `map`/`filter`/`sort`/`reverse`/`slice` return NEW arrays; only
+  `push`/`pop`/`insert`/`remove` mutate.
+- JSON: `stringify(v)` is a free function, not a method.
 - Use `==` for equality, not `=`.
 - A nullable (`T?`) value cannot be used until narrowed by an `if` guard.
 - Match `Result` with the field names `Ok { value }` / `Err { error }`.

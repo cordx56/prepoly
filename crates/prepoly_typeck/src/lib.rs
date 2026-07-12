@@ -1316,12 +1316,12 @@ mod tests {
 
     #[test]
     fn const_through_a_transitive_write_through_function_is_rejected() {
-        // Write-through is interprocedural: `g` takes `ref(mut(P))` and writes
-        // through it, and `f` only forwards its parameter to `g`, so `f`'s
-        // parameter is a write-through position too. Passing a const through the
-        // forwarding `f` must be rejected, and the chain holds at any depth.
+        // Write-through is interprocedural through explicit references: `g`
+        // takes `ref(mut(P))` and writes through it, and `f` passes its own
+        // `ref(mut(P))` parameter on, so a const through the chain must be
+        // rejected, at any depth.
         let two = errs(
-            "type P = { x: int32 }\nfun g(p: ref(mut(P))) { p.x = 5 }\nfun f(p) { g(p) }\nconst c = P { x: 1 }\nfun main() {\n    f(c)\n}\n",
+            "type P = { x: int32 }\nfun g(p: ref(mut(P))) { p.x = 5 }\nfun f(p: ref(mut(P))) { g(p) }\nconst c = P { x: 1 }\nfun main() {\n    f(c)\n}\n",
         );
         assert!(
             two.iter()
@@ -1329,13 +1329,23 @@ mod tests {
             "a const forwarded one level into a write-through parameter should be rejected: {two:?}"
         );
         let three = errs(
-            "type P = { x: int32 }\nfun deep(p: ref(mut(P))) { p.x = 9 }\nfun mid(p) { deep(p) }\nfun top(p) { mid(p) }\nconst c = P { x: 1 }\nfun main() {\n    top(c)\n}\n",
+            "type P = { x: int32 }\nfun deep(p: ref(mut(P))) { p.x = 9 }\nfun mid(p: ref(mut(P))) { deep(p) }\nfun top(p: ref(mut(P))) { mid(p) }\nconst c = P { x: 1 }\nfun main() {\n    top(c)\n}\n",
         );
         assert!(
             three
                 .iter()
                 .any(|m| m.contains("`c`") && m.contains("mutable")),
             "a const forwarded three levels into a write-through parameter should be rejected: {three:?}"
+        );
+        // An UNANNOTATED parameter that forwards into a write-through position
+        // is a private deep copy (forwarding counts as mutation), so a const
+        // argument is accepted -- the mutation hits the forwarder's own copy.
+        let unannotated = errs(
+            "type P = { x: int32 }\nfun g(p: ref(mut(P))) { p.x = 5 }\nfun f(p) { g(p) }\nconst c = P { x: 1 }\nfun main() {\n    f(c)\n}\n",
+        );
+        assert!(
+            unannotated.is_empty(),
+            "a const into an unannotated (copying) forwarder must be allowed: {unannotated:?}"
         );
         // Forwarding a const into a parameter that only *copies* it (an
         // unannotated mutating callee) places no write-through requirement, so the

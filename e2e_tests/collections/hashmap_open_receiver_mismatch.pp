@@ -1,0 +1,16 @@
+import std.collections.{ HashMap }
+
+// The same wrong-typed default reached through an OPEN receiver: `pick`'s
+// parameter is unannotated, so nothing pins the map's value type at the
+// declaration -- the per-call re-elaboration with the concrete receiver must
+// reject the default instead. (Through this hole a string pointer was stored
+// as an int32 value and read back as garbage.)
+fun pick(m) {
+    return m.get_or("k", "DEFAULT")
+}
+
+fun main() {
+    let m = HashMap.new()
+    m.set("k", 7)
+    println(pick(m))
+}

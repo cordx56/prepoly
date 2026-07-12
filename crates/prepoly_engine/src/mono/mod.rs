@@ -25,8 +25,8 @@ use prepoly_hir::{
     int_literal_kind,
 };
 use prepoly_mir::{
-    BlockId, Callee, ClosureId, Literal, LocalId, MirBody, MirClosure, MirFunction, MirMethod,
-    MirProgram, MirStmt, Operand, Projection, Rvalue, Terminator,
+    Callee, ClosureId, Literal, LocalId, MirBody, MirClosure, MirFunction, MirMethod, MirProgram,
+    MirStmt, Operand, Projection, Rvalue, Terminator,
 };
 use prepoly_parser::ast::{BinOp, UnaryOp};
 
@@ -750,7 +750,16 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             .iter()
             .map(|t| t.clone().unwrap_or(Type::Never))
             .collect();
-        let reachable = reachable_blocks(body, &probe, ret.as_ref().unwrap_or(&Type::Void));
+        let reachable = reachable_blocks(body, &probe);
+        if sym.contains("get_or") {
+            tracing::debug!(target: "prepoly_mono", "{sym} ret={:?}", ret.as_ref().map(|t| t.display_full()));
+            for (i, t) in local_types.iter().enumerate() {
+                tracing::debug!(target: "prepoly_mono", "  local _{i}: {:?}", t.as_ref().map(|t| t.display_full()));
+            }
+            for (i, (live, e)) in reachable.iter().zip(&block_errors).enumerate() {
+                tracing::debug!(target: "prepoly_mono", "  bb{i} live={live} err={e:?}");
+            }
+        }
         if let Some(e) = reachable
             .iter()
             .zip(&block_errors)
@@ -796,7 +805,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             && let Some(declared) = &ret
             && !matches!(declared, Type::Nullable(_))
         {
-            let reachable = reachable_blocks(body, &local_types, declared);
+            let reachable = reachable_blocks(body, &local_types);
             for (i, block) in body.blocks.iter().enumerate() {
                 if reachable[i]
                     && let Terminator::Return(op) = &block.term
@@ -833,7 +842,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             body,
             &sym,
             &local_types,
-            &reachable_blocks(body, &local_types, &ret),
+            &reachable_blocks(body, &local_types),
         )?;
 
         // Validate what mutual recursion assumed about this instance while it

@@ -21,8 +21,9 @@ pub use hir::{
 };
 pub use lower::{LowerError, lower};
 pub use mutation::{
-    MutationInfo, annotated_type_passes_by_copy, mutates_root, param_infers_pass_mode,
-    param_is_immutable_ref, param_is_infer, param_is_mut_ref, param_receives_copy, root_ident,
+    MutationInfo, annotated_type_passes_by_copy, mutates_root, mutates_value,
+    param_infers_pass_mode, param_is_immutable_ref, param_is_infer, param_is_mut_ref,
+    param_receives_copy, root_ident,
 };
 pub use plugin::{plugin_builtin_code, plugin_builtin_return, plugin_sig_types, plugin_type_code};
 pub use typed::{Constness, Ownership, RegionId, TypedExpr, TypedExprKind, TypedProgram};

@@ -286,6 +286,13 @@ pub struct ModuleInit {
 /// The collected, id-assigned program.
 pub struct Program {
     pub types: HashMap<String, TypeInfo>,
+    /// One past the highest `Type::Unknown` id lowering minted into the
+    /// resolved signature and field types above. Every solver that types
+    /// against this program MUST seed its fresh-variable counter here
+    /// (`Solver::seed_var_counter`): a solver-local variable that collides
+    /// with an HIR-embedded id aliases an unrelated type, which surfaced as
+    /// order-dependent phantom type errors.
+    pub next_infer_var: u32,
     pub functions: HashMap<String, FunInfo>,
     pub inits: Vec<ModuleInit>,
     /// Paths of the implicit-prelude modules (see [`LoadedModule::is_prelude`]):
