@@ -67,3 +67,85 @@ pub fn init_tracing() {
         .without_time()
         .try_init();
 }
+
+/// Per-item compile-time measurements for one pipeline phase (the `perf` log
+/// type): collect `(label, duration)` pairs while the phase runs, then
+/// [`report`](PerfLog::report) the total and the slowest items.
+///
+/// Emitted under the `prepoly::perf` target -- `PREPOLY_LOG_TYPE=perf` shows
+/// every item (TRACE), `PREPOLY_LOG='prepoly::perf=debug'` only the phase
+/// totals and each phase's slowest items. Collection short-circuits to a no-op
+/// when the target is disabled, so the instrumentation costs nothing in
+/// ordinary runs.
+pub struct PerfLog {
+    phase: &'static str,
+    items: Vec<(String, std::time::Duration)>,
+    started: std::time::Instant,
+}
+
+impl PerfLog {
+    pub fn start(phase: &'static str) -> Self {
+        PerfLog {
+            phase,
+            items: Vec::new(),
+            started: std::time::Instant::now(),
+        }
+    }
+
+    /// Whether the perf target is enabled at all (collection is pointless
+    /// otherwise).
+    pub fn enabled() -> bool {
+        tracing::enabled!(target: "prepoly::perf", tracing::Level::DEBUG)
+    }
+
+    /// Record one item's duration, logging it immediately at TRACE.
+    pub fn item(&mut self, label: impl Into<String>, elapsed: std::time::Duration) {
+        if !Self::enabled() {
+            return;
+        }
+        let label = label.into();
+        tracing::trace!(
+            target: "prepoly::perf",
+            "{}: {} took {:.3}ms",
+            self.phase,
+            label,
+            elapsed.as_secs_f64() * 1000.0
+        );
+        self.items.push((label, elapsed));
+    }
+
+    /// Log the phase total and its slowest items at DEBUG.
+    pub fn report(mut self) {
+        if !Self::enabled() {
+            return;
+        }
+        let total = self.started.elapsed();
+        tracing::debug!(
+            target: "prepoly::perf",
+            "{}: total {:.3}ms ({} items)",
+            self.phase,
+            total.as_secs_f64() * 1000.0,
+            self.items.len()
+        );
+        self.items.sort_by(|a, b| b.1.cmp(&a.1));
+        for (label, d) in self.items.iter().take(15) {
+            tracing::debug!(
+                target: "prepoly::perf",
+                "{}:   {:>10.3}ms  {}",
+                self.phase,
+                d.as_secs_f64() * 1000.0,
+                label
+            );
+        }
+    }
+}
+
+/// Log one already-measured phase duration under the `perf` target.
+pub fn perf_phase(phase: &str, elapsed: std::time::Duration) {
+    tracing::debug!(
+        target: "prepoly::perf",
+        "{}: total {:.3}ms",
+        phase,
+        elapsed.as_secs_f64() * 1000.0
+    );
+}

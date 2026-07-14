@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/prepoly_utils",
+    "crates/prepoly_cache",
     "crates/prepoly_typesys",
     "crates/prepoly_parser",
     "crates/prepoly_hir",
@@ -14,6 +15,7 @@ members = [
     "crates/prepoly_engine",
     "crates/prepoly_repl",
     "crates/prepoly_driver",
+    "crates/prepoly_metadata",
     "bootstrap",
     "crates/prepoly_language_server",
     "crates/prepoly_formatter",
@@ -39,6 +41,7 @@ members = [
 # remains outside the default set because it is only the LLVM-downloader / `./x`
 # runner and is built explicitly with `-p bootstrap`.
 default-members = [
+    "crates/prepoly_cache",
     "crates/prepoly_utils",
     "crates/prepoly_typesys",
     "crates/prepoly_parser",
@@ -52,6 +55,7 @@ default-members = [
     "crates/prepoly_driver",
     "crates/prepoly_plugin",
     "crates/prepoly_plugin_host",
+    "crates/prepoly_metadata",
 ]
 
 [workspace.package]
@@ -61,7 +65,10 @@ license = "MPL-2.0"
 authors = ["Yuki Okamoto <cord@x56.cx>"]
 
 [workspace.dependencies]
+prepoly_metadata = { path = "crates/prepoly_metadata" }
 prepoly_utils = { path = "crates/prepoly_utils" }
+prepoly_cache = { path = "crates/prepoly_cache" }
+serde = { version = "1", features = ["derive"] }
 prepoly_typesys = { path = "crates/prepoly_typesys" }
 prepoly_parser = { path = "crates/prepoly_parser" }
 prepoly_hir = { path = "crates/prepoly_hir" }

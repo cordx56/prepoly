@@ -188,6 +188,19 @@ impl SourceMap {
     }
 
     /// Locate the file containing global byte offset `off`.
+    /// Every on-disk file this map read, in load order. Embedded sources (the
+    /// prelude) carry no path and are skipped. The analysis cache stamps these
+    /// to decide reuse.
+    pub fn file_paths(&self) -> impl Iterator<Item = &std::path::Path> {
+        self.entries.iter().filter_map(|e| e.path.as_deref())
+    }
+
+    /// Every source in load order, as `(base, text)`. The analysis cache hashes
+    /// these to identify a module set by content.
+    pub fn entries(&self) -> impl Iterator<Item = (usize, &str)> {
+        self.entries.iter().map(|e| (e.base, e.src.as_str()))
+    }
+
     pub fn locate(&self, off: usize) -> Option<Located<'_>> {
         self.entries.iter().find_map(|e| {
             (off >= e.base && off <= e.base + e.src.len()).then_some(Located {

@@ -27,6 +27,7 @@ pub fn run(
     typeof_types: &std::collections::HashMap<prepoly_hir::Span, prepoly_hir::Type>,
     null_props: &std::collections::HashSet<prepoly_hir::Span>,
 ) -> Result<(), String> {
+    let t = std::time::Instant::now();
     let mir = prepoly_mir::lower_program_with_types(
         program,
         expr_types,
@@ -36,6 +37,11 @@ pub fn run(
         typeof_types,
         null_props,
     );
+    tracing::debug!(
+        target: "prepoly::perf",
+        "back/lower-mir: total {:.3}ms",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
     // Debugging aid: dump the lowered MIR when requested
     // (PREPOLY_LOG_TYPE=mir) -- the first thing needed when monomorphization
     // rejects a checked program. Guarded so the rendering only runs when the
@@ -43,8 +49,14 @@ pub fn run(
     if tracing::enabled!(target: "prepoly::mir", tracing::Level::TRACE) {
         tracing::trace!(target: "prepoly::mir", "\n{}", prepoly_mir::program_to_string(&mir));
     }
+    let t = std::time::Instant::now();
     let mono = prepoly_engine::monomorphize(&mir, program)
         .map_err(|e| format!("typed lowering failed: {e}"))?;
+    tracing::debug!(
+        target: "prepoly::perf",
+        "back/monomorphize: total {:.3}ms",
+        t.elapsed().as_secs_f64() * 1000.0
+    );
     // No Value fallback: a program outside the typed subset is rejected. The
     // skip reason names the first offending construct -- without it the user
     // sees only the generic sentence for a program the checker accepted.

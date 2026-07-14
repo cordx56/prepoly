@@ -21,6 +21,64 @@ use prepoly_parser::ast::{Module, TopLevel};
 use items::{Diag, Item, ItemCache, ItemKind};
 use world::SourceMap;
 
+/// The shared context seeds, keyed by context content (see
+/// [`prepoly_cache::context_key`]): the inference tables of everything except
+/// the active document, reused so a full check re-infers only the document.
+/// One entry per context this server session has seen; a context is the
+/// prelude plus a project's dependencies, so there are few and they are small.
+static CONTEXT_SEEDS: std::sync::OnceLock<
+    std::sync::Mutex<
+        std::collections::HashMap<[u8; 20], std::sync::Arc<prepoly_typeck::ContextTables>>,
+    >,
+> = std::sync::OnceLock::new();
+
+/// The context seed for `world`: from this process's memory, then the on-disk
+/// store shared with the driver (its own `lsp` flavor -- the driver's rewrite
+/// passes differ), and finally built here from a context-only run. `None` when
+/// the context itself has diagnostics; the unseeded pipeline then reports them
+/// as before.
+fn context_seed_for(world: &world::World) -> Option<std::sync::Arc<prepoly_typeck::ContextTables>> {
+    let key = prepoly_cache::context_key(
+        "lsp",
+        world.context_modules.iter().map(|m| m.path.join(".")),
+        world
+            .sources
+            .entries()
+            .filter(|(base, _)| *base != world.main_base)
+            .map(|(_, src)| prepoly_cache::content_hash(src.as_bytes())),
+    );
+    let seeds = CONTEXT_SEEDS.get_or_init(Default::default);
+    if let Some(seed) = seeds.lock().ok()?.get(&key) {
+        return Some(seed.clone());
+    }
+    let seed = match prepoly_cache::enabled()
+        .then(|| prepoly_cache::load_context(&key))
+        .flatten()
+    {
+        Some(tables) => std::sync::Arc::new(tables),
+        None => {
+            // The qualified-use rewrite is per-module (a module's own imports
+            // and aliases), so applying it to the context alone yields exactly
+            // the ASTs the combined pipeline lowers.
+            let mut ctx = world.context_modules.to_vec();
+            if !prepoly_resolve::resolve_qualified_uses(&mut ctx).is_empty() {
+                return None;
+            }
+            let (ctx_program, errors) = lower(&ctx);
+            if !errors.is_empty() {
+                return None;
+            }
+            let tables = prepoly_typeck::context_seed(&ctx_program)?;
+            if prepoly_cache::enabled() {
+                prepoly_cache::save_context(&key, &tables);
+            }
+            std::sync::Arc::new(tables)
+        }
+    };
+    seeds.lock().ok()?.insert(key, seed.clone());
+    Some(seed)
+}
+
 /// A full analysis of one document version, used by hover and go-to-definition.
 /// Carries the span map so a definition target in another file can be located.
 ///
@@ -91,6 +149,21 @@ impl DocAnalyzer {
     /// Returns `(message, global span)` pairs; map spans through the active
     /// document to publish them.
     pub fn diagnostics(&mut self, text: &str) -> Vec<(String, Span)> {
+        // The driver's on-disk analysis cache (`.ppcache`). It stamps FILES, so
+        // it can only vouch for this buffer when the buffer IS the file -- and
+        // it is written only after an error-free driver analysis, whose checks
+        // are a superset of this pipeline's, so a valid cache means a clean
+        // document with nothing to publish. A dirty buffer, a changed
+        // dependency, or another compiler build all fall through to the full
+        // check. The server never WRITES the cache: its pipeline skips the
+        // driver-only rewrites (spawn auto-acquire, keyed specialization), so
+        // what it checked is not what the driver would run.
+        if prepoly_cache::enabled()
+            && std::fs::read_to_string(&self.path).is_ok_and(|disk| disk == text)
+            && prepoly_cache::load(&self.path, &prepoly_resolve::SearchPaths::from_env()).is_some()
+        {
+            return Vec::new();
+        }
         let world = world::build(&self.path, text);
         if !world.parse_errors.is_empty() {
             // The document has syntax errors: report all of them and nothing
@@ -112,8 +185,11 @@ impl DocAnalyzer {
         } else {
             reduce_main(&world.main_ast, &new_items, &d.reduced)
         };
-        let (_program, _typed, _schemes, _returns, _method_returns, run_diags) =
-            run_pipeline(&world.context_modules, main_for_run);
+        let (_program, _typed, _schemes, _returns, _method_returns, run_diags) = run_pipeline(
+            &world.context_modules,
+            main_for_run,
+            context_seed_for(&world),
+        );
 
         // Attribute this run's diagnostics to the items they fall in; the rest
         // (dependency-module errors) become the refreshed global bucket.
@@ -157,7 +233,7 @@ impl DocAnalyzer {
         let world = world::build(&self.path, text);
         let main = world.main_ast.clone();
         let (program, typed, schemes, function_returns, method_returns, _diags) =
-            run_pipeline(&world.context_modules, main);
+            run_pipeline(&world.context_modules, main, context_seed_for(&world));
         Some(FullAnalysis {
             program,
             typed,
@@ -178,6 +254,7 @@ impl DocAnalyzer {
 fn run_pipeline(
     context: &[LoadedModule],
     main: Module,
+    seed: Option<std::sync::Arc<prepoly_typeck::ContextTables>>,
 ) -> (
     Program,
     TypedProgram,
@@ -209,7 +286,7 @@ fn run_pipeline(
     for e in prepoly_resolve::check_imports(&modules) {
         diags.push((e.message, e.span));
     }
-    let analysis = prepoly_typeck::analyze(&program);
+    let analysis = prepoly_typeck::analyze_with(&program, seed.as_deref());
     for e in &analysis.errors {
         diags.push((e.message.clone(), e.span));
     }

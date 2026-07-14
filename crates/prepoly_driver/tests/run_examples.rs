@@ -49,6 +49,7 @@ fn runnable_examples_run_successfully() {
     for ex in RUNNABLE {
         let path = format!("{root}/{ex}");
         let out = Command::new(bin)
+            .env("PREPOLY_CACHE", "off")
             .arg(&path)
             .env("PREPOLY_INCLUDE", format!("{root}/libraries"))
             .output()
@@ -70,6 +71,7 @@ fn all_examples_typecheck() {
     for ex in all_examples() {
         let path = format!("{root}/{ex}");
         let out = Command::new(bin)
+            .env("PREPOLY_CACHE", "off")
             .arg("check")
             .arg(&path)
             .env("PREPOLY_INCLUDE", format!("{root}/libraries"))

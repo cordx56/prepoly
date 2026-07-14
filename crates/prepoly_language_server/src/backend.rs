@@ -167,7 +167,7 @@ impl LanguageServer for Backend {
             },
             server_info: Some(ServerInfo {
                 name: "ppls".to_string(),
-                version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                version: Some(prepoly_metadata::version_string().to_string()),
             }),
             ..Default::default()
         })

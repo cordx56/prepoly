@@ -10,6 +10,8 @@ name = "ppls"
 path = "src/main.rs"
 
 [dependencies]
+prepoly_cache.workspace = true
+prepoly_metadata.workspace = true
 prepoly_parser.workspace = true
 prepoly_hir.workspace = true
 prepoly_resolve.workspace = true

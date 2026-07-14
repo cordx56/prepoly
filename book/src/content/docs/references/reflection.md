@@ -217,3 +217,12 @@ runtime type dispatch: a `Json.JNum` reaching a `User` target, or a missing
 field, is a normal `Result` error. The target type must be known at the call
 (from an annotation or the enclosing return), not only inside a later `match`
 arm.
+
+## Compile-time cost
+
+Reflective decoding is specialized at compile time: each `(receiver, method,
+target type)` triple becomes a generated concrete method, and injecting those
+changes the program — so the whole front end type-checks a second time. A
+keyed build costs roughly twice a plain one; the caches described in
+[Performance & caching](/references/performance/) absorb that cost -- the
+`.ppcache` makes every unchanged build skip both passes entirely.

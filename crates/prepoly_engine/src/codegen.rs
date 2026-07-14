@@ -498,9 +498,13 @@ pub trait Codegen {
     // ===== default dispatch (provided) =====
 
     fn codegen_program(&mut self, program: &MonoProgram) {
+        let mut perf = prepoly_utils::PerfLog::start("back/codegen-fn");
         for f in &program.functions {
+            let started = std::time::Instant::now();
             self.codegen_function(program, f);
+            perf.item(f.symbol.clone(), started.elapsed());
         }
+        perf.report();
     }
 
     fn codegen_function(&mut self, program: &MonoProgram, f: &MonoFunction) {

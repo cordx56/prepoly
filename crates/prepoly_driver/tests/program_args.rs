@@ -21,6 +21,7 @@ fn libraries_root() -> PathBuf {
 /// path and return its stdout.
 fn run_with_args(mode: Option<&str>, program: &Path, args: &[&str]) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_prepoly"));
+    cmd.env("PREPOLY_CACHE", "off");
     if let Some(mode) = mode {
         cmd.arg(mode);
     }

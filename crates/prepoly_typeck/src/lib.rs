@@ -51,6 +51,9 @@ pub struct Analysis {
     pub function_returns: std::collections::HashMap<String, prepoly_hir::Type>,
     /// The same for methods, keyed by (type name, method name).
     pub method_returns: std::collections::HashMap<(String, String), prepoly_hir::Type>,
+    /// The run's cross-module tables, reusable as a context seed when this was
+    /// a context-only, error-free run (see [`infer::ContextTables`]).
+    pub context_tables: infer::ContextTables,
     /// Spans of anonymous structural arguments that passed the callee's row
     /// check for a view-eligible parameter (`prepoly_typesys::rows`); MIR
     /// lowering converts exactly these arguments into the parameter's view.
@@ -80,8 +83,49 @@ pub fn check(program: &Program) -> Vec<TypeError> {
     analyze(program).errors
 }
 
+pub use infer::ContextTables;
+
+/// Extract the reusable context seed of `program` -- which must be a
+/// CONTEXT-ONLY program (every module except the entry). `None` when the
+/// context has any diagnostic: only a clean context's tables may stand in for
+/// re-checking it.
+pub fn context_seed(program: &Program) -> Option<ContextTables> {
+    let analysis = analyze(program);
+    if !analysis.errors.is_empty() {
+        for e in analysis.errors.iter().take(5) {
+            tracing::debug!(
+                target: "prepoly::perf",
+                "context not seedable: {} @ {:?}",
+                e.message,
+                e.span
+            );
+        }
+        return None;
+    }
+    Some(analysis.context_tables)
+}
+
 /// Run all static checks and collect the typed-expression sidecar.
 pub fn analyze(program: &Program) -> Analysis {
+    analyze_with(program, None)
+}
+
+/// [`analyze`], optionally reusing a context seed so only the entry module is
+/// re-inferred (see [`infer::ContextTables`]). The seed is dropped -- silently,
+/// falling back to the full run -- when the entry declares a top-level name the
+/// context also defines: the collision qualifies the context's storage symbols
+/// in the combined program, detaching every seeded table key.
+pub fn analyze_with(program: &Program, seed: Option<&ContextTables>) -> Analysis {
+    let entry_declares =
+        |name: &str| {
+            program.functions.values().any(|f| {
+                matches!(f.module.as_slice(), [m] if m == "main") && f.signature.name == name
+            }) || program
+                .types
+                .values()
+                .any(|t| matches!(t.module.as_slice(), [m] if m == "main") && t.name == name)
+        };
+    let seed = seed.filter(|s| !s.bare_names.iter().any(|name| entry_declares(name)));
     let mut errors = Vec::new();
     errors.extend(resolve_annotations(program));
     errors.extend(check_constructions(program));
@@ -96,7 +140,7 @@ pub fn analyze(program: &Program) -> Analysis {
     // functional core and rejects unification conflicts the ad-hoc pass may miss.
     errors.extend(hm::check(program));
     tracing::debug!(after_hm = errors.len(), "errors after Hindley-Milner pass");
-    let infer = infer::analyze(program);
+    let infer = infer::analyze_with(program, seed);
     // Exhaustiveness depends on the scrutinee's inferred nominal id. Running it
     // after inference prevents a same-named variant in another sum from being
     // mistaken for the match's owner.
@@ -125,6 +169,7 @@ pub fn analyze(program: &Program) -> Analysis {
         null_props: infer.null_props,
         function_returns: infer.function_returns,
         method_returns: infer.method_returns,
+        context_tables: infer.context_tables,
     }
 }
 

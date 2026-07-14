@@ -8,7 +8,11 @@ use clap::{Parser, Subcommand};
 use manifest::{Dependency, Manifest};
 
 #[derive(Parser)]
-#[command(name = "ppm", about = "Prepoly package manager")]
+#[command(
+    name = "ppm",
+    version = prepoly_metadata::version_string(),
+    about = "Prepoly package manager"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,

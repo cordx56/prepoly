@@ -118,6 +118,10 @@ impl<'a> Checker<'a> {
             let Some(info) = self.program.functions.get(&name) else {
                 continue;
             };
+            // A seeded context function's return is already in the table.
+            if self.seeded_module(&info.module) {
+                continue;
+            }
             // A fully-known annotation is the declaration itself: re-inferring it
             // would be wasted work and a chance to disagree with what the checker
             // enforces.
@@ -267,6 +271,9 @@ impl<'a> Checker<'a> {
     pub(super) fn report_uninferable_error_types(&mut self) {
         let mut open: Vec<Span> = Vec::new();
         for f in self.program.functions.values() {
+            if self.seeded_module(&f.module) {
+                continue;
+            }
             let Some(ret) = self.function_returns.get(&f.symbol) else {
                 continue;
             };
@@ -278,6 +285,9 @@ impl<'a> Checker<'a> {
             }
         }
         for info in self.program.types.values() {
+            if self.seeded_module(&info.module) {
+                continue;
+            }
             let mut method = |qualifier: &str, name: &String, m: &prepoly_hir::MethodInfo| {
                 if prepoly_hir::keyed_return(m.decl.ret.as_ref()) || m.signature.ret_ty.is_none() {
                     return;
@@ -375,6 +385,10 @@ or drop the `!`"
             .collect();
         entries.sort();
         for (qualifier, self_type, method, module) in entries {
+            // A seeded context type's returns are already in the table.
+            if self.seeded_module(&module) {
+                continue;
+            }
             // As in `function_return_entry`: the light pass resolves names against
             // the current module, which here is the TYPE's.
             let saved = std::mem::replace(&mut self.current_module, module);
@@ -468,6 +482,15 @@ or drop the `!`"
         let mut out = HashMap::new();
         for info in self.program.types.values() {
             if let TypeKind::Record { .. } = &info.kind {
+                // A seeded context type keeps the scheme the seed carried: its
+                // co-check did not run here, so generalizing now would produce
+                // an empty shell over nothing.
+                if self.seeded_module(&info.module) {
+                    if let Some(scheme) = self.schemes.get(&info.name) {
+                        out.insert(info.name.clone(), scheme.clone());
+                    }
+                    continue;
+                }
                 out.insert(info.name.clone(), self.build_record_scheme(info));
             }
         }
@@ -792,6 +815,10 @@ or drop the `!`"
         let program = self.program;
         let mut props = LightProps::default();
         for init in &program.inits {
+            // A seeded context module's globals are already in `global_defs`.
+            if self.seeded_module(&init.path) {
+                continue;
+            }
             let mut env = self.globals_visible_from(&init.path);
             let mut own: HashMap<String, Type> = HashMap::new();
             for stmt in &init.stmts {

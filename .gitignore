@@ -10,3 +10,7 @@ llvm/
 libraries/**/*.so
 libraries/**/*.dylib
 libraries/**/*.dll
+
+# On-disk analysis caches written next to entry files.
+*.ppcache
+*.ppcache.tmp

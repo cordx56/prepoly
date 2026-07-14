@@ -22,6 +22,7 @@ fn setup(case: &str, files: &[(&str, &str)]) -> PathBuf {
 /// Run `prepoly check <main>` and return (success, combined output).
 fn check(main: &PathBuf) -> (bool, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_prepoly"))
+        .env("PREPOLY_CACHE", "off")
         .arg("check")
         .arg(main)
         .output()
@@ -243,6 +244,7 @@ fn a_module_can_call_its_own_private_helper() {
 /// Run `prepoly <main>` and return (success, combined output).
 fn run(main: &PathBuf) -> (bool, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_prepoly"))
+        .env("PREPOLY_CACHE", "off")
         .arg(main)
         .output()
         .expect("spawn prepoly");
@@ -304,6 +306,7 @@ fn same_global_name_in_two_modules_gets_its_own_slot() {
     assert!(ok, "expected success, got: {out}");
     assert_eq!(out, expected, "JIT global slots collided");
     let out = Command::new(env!("CARGO_BIN_EXE_prepoly"))
+        .env("PREPOLY_CACHE", "off")
         .arg("repl")
         .arg(&main)
         .output()
@@ -995,6 +998,7 @@ fn setup_tree(case: &str, files: &[(&str, &str)]) -> PathBuf {
 /// return (success, combined output).
 fn with_env(main: &PathBuf, envs: &[(&str, &str)], mode: &str) -> (bool, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_prepoly"));
+    cmd.env("PREPOLY_CACHE", "off");
     if mode == "check" {
         cmd.arg("check");
     }
@@ -1477,4 +1481,281 @@ fn same_global_name_in_two_modules_keeps_its_own_type() {
     let (ok, out) = run(&main);
     assert!(ok, "expected success, got: {out}");
     assert_eq!(out, "7\nseven\n", "{out}");
+}
+
+/// A static call on a type whose NAME another module also declares (here: an
+/// alias of that very type, `serv`'s `type HttpServer = Server` next to
+/// `serve`'s nominal). The duplicate name qualifies both symbols, and every
+/// bare-keyed lookup missed: the light pass typed `T.new(..)!` as unknown, the
+/// caller lost its inferred fallibility, and importing the ALIAS anywhere in the
+/// program broke a module that never referenced it.
+#[test]
+fn static_call_resolves_when_an_alias_shares_the_type_name() {
+    let main = setup(
+        "alias_name_collision",
+        &[
+            (
+                "lib/lib.pp",
+                "import lib.inner.{ T as Inner }\n\ntype T = Inner\n",
+            ),
+            (
+                "lib/lib/inner.pp",
+                concat!(
+                    "type T = {\n    v: int32\n}\n\n",
+                    "fun T.new(v: int32) {\n",
+                    "    if v < 0 {\n        return error(\"negative\")\n    }\n",
+                    "    return T { v: v }\n}\n",
+                ),
+            ),
+            (
+                "lib/lib/use.pp",
+                "import inner.T\n\nfun make(v: int32) {\n    const t = T.new(v)!\n    return t\n}\n",
+            ),
+            (
+                "main.pp",
+                concat!(
+                    "import lib.lib.use.{ make }\n",
+                    "import lib.lib.{ T }\n\n",
+                    "const t = make(1)!\n",
+                    "println(t.v)\n",
+                ),
+            ),
+        ],
+    );
+    let (ok, out) = run(&main);
+    assert!(ok, "expected success, got: {out}");
+    assert_eq!(out, "1\n", "{out}");
+}
+
+/// The `.ppcache` life cycle: a clean run writes it next to the entry file; the
+/// next run reuses it (and still prints the same output); editing a DEPENDENCY
+/// invalidates it, and the changed program's output proves the rebuild really
+/// happened rather than the stale cache answering.
+#[test]
+fn ppcache_reuses_and_invalidates_on_dependency_change() {
+    let main = setup(
+        "ppcache_cycle",
+        &[
+            ("lib/util.pp", "fun answer() -> int32 { return 40 }\n"),
+            (
+                "main.pp",
+                "import lib.util.{ answer }\nfun main() { println(answer()) }\n",
+            ),
+        ],
+    );
+    let cache = main.with_extension("ppcache");
+    let run_cached = |main: &PathBuf| {
+        let out = Command::new(env!("CARGO_BIN_EXE_prepoly"))
+            .arg(main)
+            .output()
+            .expect("spawn prepoly");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+
+    let (ok, out) = run_cached(&main);
+    assert!(ok, "cold run: {out}");
+    assert_eq!(out, "40\n");
+    assert!(cache.is_file(), "a clean run writes the cache");
+
+    let (ok, out) = run_cached(&main);
+    assert!(ok, "warm run: {out}");
+    assert_eq!(out, "40\n", "the cached run answers identically");
+
+    // Edit the dependency. The edit keeps the file's size, so it is the content
+    // hash -- not the length, and no longer the mtime -- that has to catch it.
+    fs::write(
+        main.parent().unwrap().join("lib/util.pp"),
+        "fun answer() -> int32 { return 42 }\n",
+    )
+    .unwrap();
+    let (ok, out) = run_cached(&main);
+    assert!(ok, "run after dependency edit: {out}");
+    assert_eq!(out, "42\n", "the edited dependency must be recompiled");
+}
+
+/// A source file is keyed by its contents, so a rewrite that changes nothing --
+/// which moves the mtime -- keeps the cache. This is what lets a `.ppcache` be
+/// distributed: unpacking a release archive gives every library file a fresh
+/// mtime, and an mtime key would reject the shipped cache on every machine.
+#[test]
+fn ppcache_survives_a_rewrite_with_identical_contents() {
+    let util = "fun answer() -> int32 { return 40 }\n";
+    let main = setup(
+        "ppcache_identical_rewrite",
+        &[
+            ("lib/util.pp", util),
+            (
+                "main.pp",
+                "import lib.util.{ answer }\nfun main() { println(answer()) }\n",
+            ),
+        ],
+    );
+    // The perf log is the only place a hit is visible: a hit and a miss agree on
+    // the program's output, which is the point of the cache.
+    let run_logged = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_prepoly"))
+            .arg(&main)
+            .env("PREPOLY_LOG", "prepoly::perf=debug")
+            .output()
+            .expect("spawn prepoly");
+        assert!(out.status.success());
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    run_logged();
+
+    // Same bytes, new mtime -- the state a freshly unpacked file is in.
+    fs::write(main.parent().unwrap().join("lib/util.pp"), util).unwrap();
+    let (out, log) = run_logged();
+    assert_eq!(out, "40\n");
+    assert!(
+        log.contains("cache-hit"),
+        "an unchanged file must stay cached across a rewrite:\n{log}"
+    );
+}
+
+/// A `.ppcache` survives the project MOVING: stamps name sources relative to
+/// the roots they were resolved under (entry directory, include roots), never
+/// by machine path, so copying the whole tree -- project and include root both
+/// -- to a different location still hits. This is the property that lets a
+/// release ship caches alongside its libraries.
+#[test]
+fn ppcache_survives_relocation() {
+    let main = setup(
+        "ppcache_relocate",
+        &[
+            ("libs/util.pp", "fun answer() -> int32 { return 7 }\n"),
+            (
+                "app/main.pp",
+                "import util.{ answer }\nfun main() { println(answer()) }\n",
+            ),
+        ],
+    );
+    let root = main.parent().unwrap().to_path_buf();
+    let entry = root.join("app/main.pp");
+    let run_at = |root: &PathBuf| {
+        let out = Command::new(env!("CARGO_BIN_EXE_prepoly"))
+            .arg(root.join("app/main.pp"))
+            .env("PREPOLY_INCLUDE", root.join("libs"))
+            .env("PREPOLY_LOG", "prepoly::perf=debug")
+            .output()
+            .expect("spawn prepoly");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let (ok, out, err) = run_at(&root);
+    assert!(ok, "cold run: {out} {err}");
+    assert_eq!(out, "7\n");
+    assert!(entry.with_extension("ppcache").is_file());
+
+    // Copy everything somewhere else; nothing at the old location is touched.
+    let moved = root.with_file_name("ppcache_relocate_moved");
+    let _ = fs::remove_dir_all(&moved);
+    copy_tree(&root, &moved);
+    let (ok, out, err) = run_at(&moved);
+    assert!(ok, "relocated run: {err}");
+    assert_eq!(out, "7\n");
+    assert!(
+        err.contains("front/cache-hit"),
+        "the moved project must reuse its cache: {err}"
+    );
+
+    // An edit at the NEW location misses -- content, not location, is the key.
+    fs::write(
+        moved.join("libs/util.pp"),
+        "fun answer() -> int32 { return 8 }\n",
+    )
+    .unwrap();
+    let (ok, out, err) = run_at(&moved);
+    assert!(ok, "edited relocated run: {err}");
+    assert_eq!(out, "8\n", "the edit must be recompiled");
+}
+
+/// Recursive copy for the relocation test (no external crates).
+fn copy_tree(from: &PathBuf, to: &PathBuf) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            copy_tree(&src, &dst);
+        } else {
+            fs::copy(&src, &dst).unwrap();
+        }
+    }
+}
+
+/// The context seed: after a cold run stores the context's inference tables
+/// (everything except the entry), an ENTRY edit re-infers only the entry --
+/// and must still see the edit, not the cached program. The seed store is
+/// isolated via XDG_CACHE_HOME so the test cannot touch the user's.
+#[test]
+fn context_seed_survives_entry_edits() {
+    let main = setup(
+        "ctx_seed_entry_edit",
+        &[
+            (
+                "lib/util.pp",
+                "fun double(v: int32) -> int32 { return v * 2 }\n",
+            ),
+            (
+                "main.pp",
+                "import lib.util.{ double }\nfun main() { println(double(3)) }\n",
+            ),
+        ],
+    );
+    let cache_home = main.parent().unwrap().join("xdg-cache");
+    let run = |main: &PathBuf| {
+        let out = Command::new(env!("CARGO_BIN_EXE_prepoly"))
+            .arg(main)
+            .env("XDG_CACHE_HOME", &cache_home)
+            .output()
+            .expect("spawn prepoly");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let (ok, out, err) = run(&main);
+    assert!(ok, "cold: {err}");
+    assert_eq!(out, "6\n");
+    let seeds = cache_home.join("prepoly");
+    assert!(
+        seeds.is_dir() && fs::read_dir(&seeds).unwrap().next().is_some(),
+        "the cold run stores a context seed"
+    );
+
+    // Edit the ENTRY: the context seed still applies, and the result reflects
+    // the edit (the entry really was re-checked, only the context was not).
+    fs::write(
+        &main,
+        "import lib.util.{ double }\nfun main() { println(double(5)) }\n",
+    )
+    .unwrap();
+    let (ok, out, err) = run(&main);
+    assert!(ok, "entry edit: {err}");
+    assert_eq!(out, "10\n");
+
+    // Edit the CONTEXT: the seed is stale by key, so the change is honored too.
+    fs::write(
+        main.parent().unwrap().join("lib/util.pp"),
+        "fun double(v: int32) -> int32 { return v * 3 }\n",
+    )
+    .unwrap();
+    let (ok, out, err) = run(&main);
+    assert!(ok, "context edit: {err}");
+    assert_eq!(out, "15\n");
 }

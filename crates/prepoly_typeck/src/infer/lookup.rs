@@ -71,8 +71,13 @@ impl<'a> Checker<'a> {
         {
             let info = self.program.types.get(&symbol)?;
             if let Some(v_method) = info.variant(variant).and_then(|v| v.methods.get(method)) {
+                // The qualifier is the type's NAME: it keys the method-return
+                // tables, which `precompute_method_returns` fills by name. The
+                // symbol only equals it while the name is unique program-wide --
+                // another module declaring the same name (an alias of this very
+                // type, even) qualifies the symbol and every keyed lookup missed.
                 return Some(ResolvedMethod {
-                    qualifier: format!("{symbol}.{variant}"),
+                    qualifier: format!("{}.{variant}", info.name),
                     self_type: symbol.clone(),
                     signature: v_method.signature.clone(),
                     method: v_method.decl.as_ref().clone(),
@@ -81,11 +86,13 @@ impl<'a> Checker<'a> {
         }
         let type_name = self.resolve_self_name(qualifier);
         let symbol = self.resolve_type_symbol(&type_name)?;
-        match &self.program.types.get(&symbol)?.kind {
+        let info = self.program.types.get(&symbol)?;
+        match &info.kind {
             TypeKind::Record { methods, .. } => {
                 let method = methods.get(method)?;
                 Some(ResolvedMethod {
-                    qualifier: symbol.clone(),
+                    // The NAME, for the same reason as the variant branch above.
+                    qualifier: info.name.clone(),
                     self_type: symbol,
                     signature: method.signature.clone(),
                     method: method.decl.as_ref().clone(),
@@ -105,7 +112,7 @@ impl<'a> Checker<'a> {
                 let variant = variants.iter().find(|v| v.methods.contains_key(method))?;
                 let m = variant.methods.get(method)?;
                 Some(ResolvedMethod {
-                    qualifier: format!("{symbol}.{}", variant.name),
+                    qualifier: format!("{}.{}", info.name, variant.name),
                     self_type: symbol,
                     signature: m.signature.clone(),
                     method: m.decl.as_ref().clone(),

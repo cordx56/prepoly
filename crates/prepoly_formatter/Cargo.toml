@@ -11,3 +11,4 @@ path = "src/main.rs"
 
 [dependencies]
 prepoly_parser.workspace = true
+prepoly_metadata.workspace = true

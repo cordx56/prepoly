@@ -7,7 +7,7 @@
 
 /// A byte-offset source span. `lo`/`hi` are byte indices into the source,
 /// usable for slicing and for computing line/column on demand.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     pub lo: usize,
     pub hi: usize,

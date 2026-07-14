@@ -32,7 +32,11 @@ use prepoly_parser::{Span, line_col};
 /// a `run` subcommand. A leading `check`/`repl` parses as the subcommand; any
 /// other first argument is taken as the file.
 #[derive(Parser)]
-#[command(name = "prepoly", version, about = "The Prepoly compiler and REPL")]
+#[command(
+    name = "prepoly",
+    version = prepoly_metadata::version_string(),
+    about = "The Prepoly compiler and REPL"
+)]
 struct Cli {
     /// A program file to type-check and run with the default runtime (the LLVM JIT
     /// when it is available -- the `jit` feature on a non-wasm target -- otherwise
@@ -786,11 +790,44 @@ fn drive(mode: Mode, file: &str) -> Result<(), u8> {
 /// Returns the checked program or the rendered diagnostics. Shared by file
 /// execution and the interactive REPL, so both report identical errors.
 fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec<String>> {
+    let phase = |name: &'static str, at: std::time::Instant| {
+        prepoly_utils::perf_phase(name, at.elapsed());
+    };
+    // The analysis cache: on a valid `.ppcache` (same compiler, same resolution
+    // environment, every recorded source unchanged) the final module ASTs are
+    // re-lowered -- deterministic and cheap -- and the cached checker channels
+    // are used as-is, skipping type checking entirely. Only an error-free
+    // analysis is ever cached, so a hit implies a clean program; a re-lowering
+    // that nonetheless reports an error treats the cache as stale.
+    let entry_path = PathBuf::from(main_label);
     let search = prepoly_resolve::SearchPaths::from_env();
+    if prepoly_cache::enabled()
+        && let Some(payload) = prepoly_cache::load(&entry_path, &search)
+    {
+        let t = std::time::Instant::now();
+        let (program, lower_errors) = lower(&payload.modules);
+        if lower_errors.is_empty() {
+            let c = payload.channels;
+            phase("front/cache-hit", t);
+            return Ok(Checked {
+                program,
+                expr_types: c.expr_types.into_iter().collect(),
+                view_args: c.view_args.into_iter().collect(),
+                fields_loops: c.fields_loops.into_iter().collect(),
+                type_names: c.type_names.into_iter().collect(),
+                typeof_types: c.typeof_types.into_iter().collect(),
+                null_props: c.null_props.into_iter().collect(),
+            });
+        }
+        tracing::debug!(target: "prepoly::perf", "cache: re-lowering failed, falling back");
+    }
     let mut sources = prepoly_resolve::SourceMap::default();
+    let t = std::time::Instant::now();
     #[allow(unused_mut)]
     let mut modules: Vec<LoadedModule> =
         prepoly_resolve::parse_stdlib(&mut sources).map_err(|m| vec![m])?;
+    phase("front/parse-stdlib", t);
+    let t = std::time::Instant::now();
 
     let base = sources.add(
         Some(PathBuf::from(main_label)),
@@ -854,6 +891,35 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
     // the implicit prelude; load only the ones actually imported, transitively.
     let nested = prepoly_resolve::load_std_nested(&modules, &[], &mut sources);
     modules.extend(nested);
+    // The entry goes LAST: everything before it is the CONTEXT, and keeping the
+    // context a prefix gives it the same lowering ids in a context-only run as
+    // in the full one -- which is what lets a context seed's tables apply to
+    // the full program. It also runs the entry's top-level statements after
+    // every dependency's, which is the initialization order they already have
+    // with respect to each other.
+    if let Some(pos) = modules
+        .iter()
+        .position(|m| matches!(m.path.as_slice(), [p] if p == "main"))
+    {
+        let main_module = modules.remove(pos);
+        modules.push(main_module);
+    }
+    phase("front/load-modules", t);
+
+    // The context key: module names plus the hash of every source that is not
+    // the entry's. Contents, not ASTs, because the entry's length shifts every
+    // later module's spans -- an AST key would treat each entry edit as a new
+    // context. The rewrites applied below are deterministic functions of these
+    // sources, so pre-rewrite content identifies the post-rewrite context.
+    let ctx_end = modules.len() - 1;
+    let ctx_key = Some(prepoly_cache::context_key(
+        "jit",
+        modules[..ctx_end].iter().map(|m| m.path.join(".")),
+        sources
+            .entries()
+            .filter(|(b, _)| *b != base)
+            .map(|(_, src)| prepoly_cache::content_hash(src.as_bytes())),
+    ));
 
     // Resolve qualified uses of module imports (`import a.b` + `b.name`),
     // promoting the used names onto the imports so everything downstream sees
@@ -872,8 +938,42 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
     #[cfg(not(jit_backend))]
     let spawn_errors: Vec<(String, Span)> = Vec::new();
 
+    // The context seed: the analysis tables of every module EXCEPT the entry,
+    // reused so the full check below re-infers only the entry. Looked up in the
+    // shared on-disk store when caching is enabled; rebuilt (and stored) from a
+    // context-only run otherwise. A context with diagnostics yields no seed and
+    // the full run reports everything as before.
+    let ctx_seed = {
+        let cached = match &ctx_key {
+            Some(key) if prepoly_cache::enabled() => prepoly_cache::load_context(key),
+            _ => None,
+        };
+        match cached {
+            Some(seed) => {
+                tracing::debug!(target: "prepoly::perf", "context seed loaded from disk");
+                Some(seed)
+            }
+            None => {
+                let t = std::time::Instant::now();
+                let (ctx_program, ctx_errors) = lower(&modules[..ctx_end]);
+                let seed = if ctx_errors.is_empty() {
+                    prepoly_typeck::context_seed(&ctx_program)
+                } else {
+                    None
+                };
+                phase("front/context-check", t);
+                if let (Some(key), Some(seed), true) = (&ctx_key, &seed, prepoly_cache::enabled()) {
+                    prepoly_cache::save_context(key, seed);
+                }
+                seed
+            }
+        }
+    };
+
     tracing::debug!(modules = modules.len(), "lowering module graph to HIR");
+    let t = std::time::Instant::now();
     let (program, lower_errors) = lower(&modules);
+    phase("front/lower-hir", t);
     let mut errors: Vec<(String, Span)> = spawn_errors;
     for e in qualified_errors {
         errors.push((e.message, e.span));
@@ -889,7 +989,9 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         types = program.types.len(),
         "running type analysis"
     );
-    let mut analysis = prepoly_typeck::analyze(&program);
+    let t = std::time::Instant::now();
+    let mut analysis = prepoly_typeck::analyze_with(&program, ctx_seed.as_ref());
+    phase("front/typecheck", t);
     // Reflective decoders: a `-> infer!` method call is keyed by the caller's
     // expectation. Generate a concrete method per requested key, inject them,
     // rewrite the calls to their specializations, and re-run the pipeline over
@@ -898,14 +1000,63 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
     // undeclared method); a genuine error re-surfaces in the second pass.
     let mut program = program;
     if !analysis.keyed_calls.is_empty() {
+        // The re-pass context is the pre-pass context PLUS the injected
+        // specializations -- a deterministic function of the context sources
+        // and the requested (receiver, method, key) set. Extending the context
+        // key with that set lets the re-pass reuse a seed exactly when the
+        // same decoders are requested again, which is every entry edit that
+        // does not change what gets decoded.
+        let mut spec_symbols: Vec<String> = analysis
+            .keyed_calls
+            .values()
+            .map(|(recv, method, key)| format!("{recv}.{method}:{}", prepoly_hir::type_key(key)))
+            .collect();
+        spec_symbols.sort();
+        spec_symbols.dedup();
+        let repass_key = ctx_key.map(|key| {
+            let mut keyed = key.to_vec();
+            for sym in &spec_symbols {
+                keyed.push(0);
+                keyed.extend_from_slice(sym.as_bytes());
+            }
+            prepoly_cache::content_hash(&keyed)
+        });
         match specialize_keyed(&mut modules, &program, &analysis) {
             Ok(()) => {
+                let repass_seed = {
+                    let cached = match &repass_key {
+                        Some(key) if prepoly_cache::enabled() => prepoly_cache::load_context(key),
+                        _ => None,
+                    };
+                    match cached {
+                        Some(seed) => Some(seed),
+                        None => {
+                            let t = std::time::Instant::now();
+                            let ctx_end = modules.len() - 1;
+                            let (ctx_program, ctx_errors) = lower(&modules[..ctx_end]);
+                            let seed = if ctx_errors.is_empty() {
+                                prepoly_typeck::context_seed(&ctx_program)
+                            } else {
+                                None
+                            };
+                            phase("front/keyed-context-check", t);
+                            if let (Some(key), Some(seed), true) =
+                                (&repass_key, &seed, prepoly_cache::enabled())
+                            {
+                                prepoly_cache::save_context(key, seed);
+                            }
+                            seed
+                        }
+                    }
+                };
+                let t = std::time::Instant::now();
                 let (program2, lower_errors2) = lower(&modules);
                 for e in lower_errors2 {
                     errors.push((e.message, e.span));
                 }
                 program = program2;
-                analysis = prepoly_typeck::analyze(&program);
+                analysis = prepoly_typeck::analyze_with(&program, repass_seed.as_ref());
+                phase("front/keyed-repass", t);
             }
             Err(e) => errors.push(e),
         }
@@ -920,6 +1071,52 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
     }
 
     let expr_types = aggregate_result_types(&analysis.typed, &program);
+    // Persist the clean analysis for the next run. Every stat'able source in
+    // the map is stamped (the embedded stdlib has no path and is covered by
+    // the compiler tag in the header); a file that cannot be stamped anymore
+    // makes the build uncacheable rather than wrongly cacheable.
+    if prepoly_cache::enabled() {
+        let t = std::time::Instant::now();
+        let roots = prepoly_cache::StampRoots::new(&entry_path, &search);
+        let mut deps = Vec::new();
+        let mut stampable = true;
+        for path in sources.file_paths() {
+            match prepoly_cache::FileStamp::of(path, &roots) {
+                Some(stamp) => deps.push(stamp),
+                None => stampable = false,
+            }
+        }
+        if stampable {
+            prepoly_cache::save(
+                &entry_path,
+                &prepoly_cache::Payload {
+                    deps,
+                    modules,
+                    channels: prepoly_cache::Channels {
+                        expr_types: expr_types.iter().map(|(s, t)| (*s, t.clone())).collect(),
+                        view_args: analysis.view_args.iter().copied().collect(),
+                        fields_loops: analysis
+                            .fields_loops
+                            .iter()
+                            .map(|(s, f)| (*s, f.clone()))
+                            .collect(),
+                        type_names: analysis
+                            .type_names
+                            .iter()
+                            .map(|(s, n)| (*s, n.clone()))
+                            .collect(),
+                        typeof_types: analysis
+                            .typeof_types
+                            .iter()
+                            .map(|(s, t)| (*s, t.clone()))
+                            .collect(),
+                        null_props: analysis.null_props.iter().copied().collect(),
+                    },
+                },
+            );
+            phase("front/cache-save", t);
+        }
+    }
     Ok(Checked {
         program,
         expr_types,
@@ -1120,14 +1317,22 @@ fn rewrite_calls_expr(
 /// locating the span's file by its globally-unique offset (or a bare `error:`
 /// line when no source contains it).
 fn render_errors(errors: &[(String, Span)], sources: &prepoly_resolve::SourceMap) -> Vec<String> {
-    let mut out = Vec::with_capacity(errors.len());
-    for (msg, span) in errors {
+    render_diagnostics(errors, sources, "error")
+}
+
+fn render_diagnostics(
+    items: &[(String, Span)],
+    sources: &prepoly_resolve::SourceMap,
+    level: &str,
+) -> Vec<String> {
+    let mut out = Vec::with_capacity(items.len());
+    for (msg, span) in items {
         match sources.locate(span.lo) {
             Some(loc) => {
                 let (line, col) = line_col(loc.src, loc.local);
-                out.push(format!("{}:{line}:{col}: error: {msg}", loc.label));
+                out.push(format!("{}:{line}:{col}: {level}: {msg}", loc.label));
             }
-            None => out.push(format!("error: {msg}")),
+            None => out.push(format!("{level}: {msg}")),
         }
     }
     out

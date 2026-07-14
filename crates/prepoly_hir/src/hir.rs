@@ -94,7 +94,7 @@ pub fn resolve_qualified<'a, T>(
 }
 
 /// A parsed source file tagged with its module path.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct LoadedModule {
     pub path: Vec<String>,
     pub ast: Module,
@@ -140,7 +140,7 @@ impl From<&Param> for ParamInfo {
 /// `methods` carry types expressed over those ids. A binding or call instantiates
 /// the scheme by renaming `params` to fresh variables. A monomorphic record (no
 /// inferred field, e.g. a fully-annotated `Point`) has an empty `params`.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TypeScheme {
     pub params: Vec<u32>,
     pub fields: Vec<(String, Type)>,
@@ -149,7 +149,7 @@ pub struct TypeScheme {
 
 /// A method's signature within a [`TypeScheme`]: parameter types (including the
 /// leading `self`) and the return type, all expressed over the scheme's `params`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SchemeMethod {
     pub params: Vec<(String, Type)>,
     pub ret: Type,

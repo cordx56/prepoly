@@ -350,7 +350,12 @@ impl<'a> Checker<'a> {
                 // called on it is unknown too (`http`'s `fetch` came out as
                 // `Result<unknown, string>`), and a caller of `File.open(..)!` could
                 // not see the Err type it propagates.
-                if self.program.types.contains_key(tname)
+                // Resolved MODULE-AWARE, not by bare key: a type whose name is also
+                // declared elsewhere (serv's `type HttpServer = Server` alias next
+                // to serve's nominal) has only module-qualified symbols, and the
+                // bare lookup missing made `HttpServer.new(..)!` type as unknown --
+                // the caller then lost its whole inferred fallibility.
+                if self.resolve_type_symbol(tname).is_some()
                     && let Some(resolved) = self.method_for_qualifier(tname, method)
                 {
                     let declared = resolved.signature.ret_ty.clone();

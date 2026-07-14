@@ -17,6 +17,8 @@ prepoly_repl.workspace = true
 
 clap = { version = "4", features = ["derive"] }
 prepoly_utils.workspace = true
+prepoly_cache.workspace = true
+prepoly_metadata.workspace = true
 tracing.workspace = true
 
 # The LLVM JIT back end is native-only -- LLVM cannot link for wasm -- so its

@@ -1,10 +1,8 @@
 [package]
-name = "prepoly_parser"
+name = "prepoly_metadata"
 version.workspace = true
 edition.workspace = true
-
-[lib]
-path = "src/lib.rs"
+license.workspace = true
+authors.workspace = true
 
 [dependencies]
-serde.workspace = true

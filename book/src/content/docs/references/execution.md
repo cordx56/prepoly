@@ -85,3 +85,7 @@ ppls                       # LSP server (hover, diagnostics, completion,
 The LSP server builds without LLVM, checks incrementally, and also targets
 WebAssembly (it powers the browser playground). An editor setup for Neovim
 ships in `editors/nvim/`.
+
+Start-up time is dominated by type checking; see
+[Performance & caching](/references/performance/) for the timing logs and the
+`.ppcache` analysis cache that eliminates it on unchanged programs.

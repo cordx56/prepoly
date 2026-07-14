@@ -94,6 +94,7 @@ fn install_library_plugins() {
 /// are unaffected.
 fn run_case(bin: &str, pp: &Path) -> std::process::Output {
     Command::new(bin)
+        .env("PREPOLY_CACHE", "off")
         .arg(pp)
         .env("PREPOLY_INCLUDE", libraries_root())
         .output()
@@ -187,6 +188,7 @@ fn repl_deep_recursion_hits_the_depth_guard() {
     )
     .expect("write recursion case");
     let out = Command::new(bin)
+        .env("PREPOLY_CACHE", "off")
         .arg("repl")
         .arg(&pp)
         .output()

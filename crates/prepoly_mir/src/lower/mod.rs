@@ -265,15 +265,12 @@ impl<'p> ProgramCtx<'p> {
     /// appear in no table under `name` and resolve through the module-aware
     /// lookup instead.
     fn is_type_word_in(&self, module: &[String], name: &str) -> bool {
-        let renamed = |n: &str| {
-            self.program
-                .import_renames
-                .get(module)
-                .is_some_and(|m| m.contains_key(n))
-        };
+        // Module-aware for every form of the name: bare (which alone misses a
+        // type whose symbol went module-qualified because another module declares
+        // the same name -- e.g. an alias of it), dotted markers, and renames.
+        // Locals shadowing a type name are already excluded by the caller.
         self.program.types.contains_key(name)
-            || ((name.contains('.') || renamed(name))
-                && self.program.resolve_type(module, name).is_some())
+            || self.program.resolve_type(module, name).is_some()
             || name == "Self"
             || prepoly_hir::IntKind::from_name(name).is_some()
             || matches!(name, "float32" | "float64" | "string" | "bool")

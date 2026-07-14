@@ -7,12 +7,16 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--version" || a == "-V") {
+        println!("ppfmt {}", prepoly_metadata::version_string());
+        return ExitCode::SUCCESS;
+    }
     let write = args.first().is_some_and(|a| a == "--write" || a == "-w");
     if write {
         args.remove(0);
     }
     if args.is_empty() || (!write && args.len() != 1) {
-        eprintln!("usage: ppfmt FILE | ppfmt --write|-w FILE...");
+        eprintln!("usage: ppfmt FILE | ppfmt --write|-w FILE... | ppfmt --version");
         return ExitCode::FAILURE;
     }
     let mut failed = false;

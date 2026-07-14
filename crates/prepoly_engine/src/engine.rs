@@ -19,8 +19,12 @@ impl Engine {
     /// `main`. Stops and returns the error if finalization or execution fails.
     pub fn run<B: Codegen>(backend: &mut B, program: &MonoProgram) -> Result<(), String> {
         backend.begin_program(program);
+        let t = std::time::Instant::now();
         backend.codegen_program(program);
+        prepoly_utils::perf_phase("back/codegen", t.elapsed());
+        let t = std::time::Instant::now();
         backend.finalize()?;
+        prepoly_utils::perf_phase("back/finalize", t.elapsed());
         backend.execute()
     }
 

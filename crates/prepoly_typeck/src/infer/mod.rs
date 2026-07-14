@@ -128,6 +128,122 @@ pub fn check(program: &Program) -> Vec<TypeError> {
     analyze(program).errors
 }
 
+/// The cross-module tables a CONTEXT-ONLY analysis (every module except the
+/// entry) leaves behind, fully resolved against its own solver. Applied to a
+/// later run as a seed, they let that run check ONLY the entry module: the
+/// context's schemes, inferred returns, and globals are read from here instead
+/// of being re-derived, which is where a library-heavy program spends almost
+/// all of its inference time.
+///
+/// The tables are span-free by construction (keyed by symbol, type name, or
+/// module path), so they survive the entry file changing size. Inference
+/// VARIABLE ids are not portable -- a consuming run mints its own -- so
+/// [`ContextTables::remapped`] renumbers every open variable into the consumer's
+/// namespace first, one map across all tables so linked entries stay linked.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ContextTables {
+    pub schemes: HashMap<String, TypeScheme>,
+    pub function_returns: HashMap<String, Type>,
+    pub method_returns: HashMap<(String, String), Type>,
+    pub method_return_props: HashSet<(String, String)>,
+    pub co_method_returns: HashMap<(String, String), Type>,
+    pub global_defs: HashMap<Vec<String>, HashMap<String, Type>>,
+    /// One past the highest variable id the tables mention.
+    pub next_var: u32,
+    /// Every bare top-level name the context defines. An entry defining one of
+    /// these would QUALIFY the context's symbols in the combined program,
+    /// detaching every table key -- the consumer must bail to an unseeded run.
+    pub bare_names: HashSet<String>,
+}
+
+impl ContextTables {
+    /// The tables with every inference variable renumbered densely from `base`,
+    /// and the first id past them. One mapping is applied across all tables, so
+    /// a variable shared between entries (a scheme parameter appearing in a
+    /// method return) stays shared.
+    pub fn remapped(&self, base: u32) -> (ContextTables, u32) {
+        use std::collections::BTreeMap;
+        let mut vars: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        for scheme in self.schemes.values() {
+            vars.extend(scheme.params.iter().copied());
+            for (_, t) in &scheme.fields {
+                vars.extend(prepoly_hir::type_vars(t));
+            }
+            for m in scheme.methods.values() {
+                for (_, t) in &m.params {
+                    vars.extend(prepoly_hir::type_vars(t));
+                }
+                vars.extend(prepoly_hir::type_vars(&m.ret));
+            }
+        }
+        for t in self
+            .function_returns
+            .values()
+            .chain(self.method_returns.values())
+            .chain(self.co_method_returns.values())
+            .chain(self.global_defs.values().flat_map(|defs| defs.values()))
+        {
+            vars.extend(prepoly_hir::type_vars(t));
+        }
+        let map_id: HashMap<u32, u32> = vars
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (*v, base + i as u32))
+            .collect();
+        let subst: BTreeMap<u32, Type> = map_id
+            .iter()
+            .map(|(old, new)| (*old, Type::Unknown(*new)))
+            .collect();
+        let re = |t: &Type| prepoly_hir::substitute_vars(t, &subst);
+        let out = ContextTables {
+            schemes: self
+                .schemes
+                .iter()
+                .map(|(name, scheme)| {
+                    let mut s = scheme.clone();
+                    s.params = s.params.iter().map(|v| map_id[v]).collect();
+                    s.fields = s.fields.iter().map(|(n, t)| (n.clone(), re(t))).collect();
+                    for m in s.methods.values_mut() {
+                        m.params = m.params.iter().map(|(n, t)| (n.clone(), re(t))).collect();
+                        m.ret = re(&m.ret);
+                    }
+                    (name.clone(), s)
+                })
+                .collect(),
+            function_returns: self
+                .function_returns
+                .iter()
+                .map(|(k, t)| (k.clone(), re(t)))
+                .collect(),
+            method_returns: self
+                .method_returns
+                .iter()
+                .map(|(k, t)| (k.clone(), re(t)))
+                .collect(),
+            method_return_props: self.method_return_props.clone(),
+            co_method_returns: self
+                .co_method_returns
+                .iter()
+                .map(|(k, t)| (k.clone(), re(t)))
+                .collect(),
+            global_defs: self
+                .global_defs
+                .iter()
+                .map(|(m, defs)| {
+                    (
+                        m.clone(),
+                        defs.iter().map(|(n, t)| (n.clone(), re(t))).collect(),
+                    )
+                })
+                .collect(),
+            next_var: base + map_id.len() as u32,
+            bare_names: self.bare_names.clone(),
+        };
+        let next = out.next_var;
+        (out, next)
+    }
+}
+
 pub struct Inference {
     pub errors: Vec<TypeError>,
     pub typed: TypedProgram,
@@ -169,6 +285,10 @@ pub struct Inference {
     /// The same for methods, keyed by (type name, method name). Covers both an
     /// unannotated return and the open Err payload of a `T!` one.
     pub method_returns: HashMap<(String, String), Type>,
+    /// This run's cross-module tables, extracted for reuse as a context seed
+    /// (see [`ContextTables`]); meaningful to reapply only when this was a
+    /// context-only, error-free run.
+    pub context_tables: ContextTables,
 }
 
 /// Check every type's method bodies in the shared per-type environment. Binding
@@ -176,9 +296,37 @@ pub struct Inference {
 /// the bodies' stores and reads link each field's element to the methods'
 /// parameter and return variables -- the linkage [`Checker::build_schemes`] then
 /// generalizes.
+impl Checker<'_> {
+    /// Load remapped context tables into this checker and confine the per-item
+    /// passes to the entry module. The caller has already renumbered the
+    /// tables' variables past this checker's counter.
+    fn apply_seed(&mut self, seed: ContextTables, next_var: u32) {
+        self.schemes = seed.schemes;
+        self.function_returns = seed.function_returns;
+        self.method_returns = seed.method_returns;
+        self.method_return_props = seed.method_return_props;
+        self.co_method_returns = seed.co_method_returns;
+        self.global_defs = seed.global_defs;
+        self.next_unknown = self.next_unknown.max(next_var);
+        self.entry_only = true;
+    }
+
+    /// Whether `module` was covered by the applied seed (anything but the
+    /// entry, whose module path is always `main`).
+    fn seeded_module(&self, module: &[String]) -> bool {
+        self.entry_only && !matches!(module, [m] if m == "main")
+    }
+}
+
 fn check_method_bodies(checker: &mut Checker, program: &Program) {
+    let mut perf = prepoly_utils::PerfLog::start("typeck/method-body");
     checker.co_checking = true;
     for t in program.types.values() {
+        // A seeded run reads the context's schemes and co-checked returns from
+        // the seed; only the entry's own types are co-checked here.
+        if checker.seeded_module(&t.module) {
+            continue;
+        }
         checker.current_module = t.module.clone();
         match &t.kind {
             TypeKind::Record { methods, .. } => {
@@ -189,6 +337,7 @@ fn check_method_bodies(checker: &mut Checker, program: &Program) {
                         continue;
                     }
                     if let Some(body) = &m.decl.body {
+                        let m_started = std::time::Instant::now();
                         let mut scopes = checker.signature_scopes(&m.signature.params);
                         let ret = m.signature.ret_ty.clone();
                         checker.current_co_method =
@@ -196,6 +345,10 @@ fn check_method_bodies(checker: &mut Checker, program: &Program) {
                         let full =
                             checker.check_block_with_self(body, &mut scopes, ret.as_ref(), &t.name);
                         checker.current_co_method = None;
+                        perf.item(
+                            format!("{}.{}", t.name, m.signature.name),
+                            m_started.elapsed(),
+                        );
                         // Keep the return the full check reconciled here, in the
                         // shared per-type environment, for scheme generalization
                         // (see `co_method_returns`). A propagating body's shape
@@ -233,6 +386,7 @@ fn check_method_bodies(checker: &mut Checker, program: &Program) {
         }
     }
     checker.co_checking = false;
+    perf.report();
 }
 
 /// Generalize every record into a [`TypeScheme`] on a throwaway checker, so the
@@ -254,8 +408,14 @@ fn check_method_bodies(checker: &mut Checker, program: &Program) {
 /// pure diagnostics, and the second `precompute_method_returns` exists to converge
 /// cross-type *return* chains, which generalization does not read -- both are the
 /// real pass's job.
-fn seed_schemes(program: &Program) -> HashMap<String, TypeScheme> {
+fn seed_schemes(
+    program: &Program,
+    seed: Option<&(ContextTables, u32)>,
+) -> HashMap<String, TypeScheme> {
     let mut pre = Checker::new(program);
+    if let Some((tables, next)) = seed {
+        pre.apply_seed(tables.clone(), *next);
+    }
     pre.precompute_global_bindings();
     pre.precompute_function_returns();
     pre.precompute_method_returns();
@@ -264,9 +424,29 @@ fn seed_schemes(program: &Program) -> HashMap<String, TypeScheme> {
 }
 
 pub fn analyze(program: &Program) -> Inference {
-    let seeded = seed_schemes(program);
+    analyze_with(program, None)
+}
+
+/// [`analyze`], optionally seeded with the tables of a prior CONTEXT-ONLY run
+/// (see [`ContextTables`]): the seeded modules' per-item passes are skipped and
+/// their schemes, inferred returns, and globals are read from the seed, so the
+/// run costs roughly what checking the entry module alone costs.
+pub fn analyze_with(program: &Program, seed: Option<&ContextTables>) -> Inference {
+    let phase = |name: &'static str, at: std::time::Instant| {
+        prepoly_utils::perf_phase(name, at.elapsed());
+    };
+    // One remapping serves both checkers below, so the preliminary scheme pass
+    // and the real pass agree on every seeded variable id.
+    let remapped = seed.map(|s| s.remapped(next_unknown_after_program(program)));
+    let t = std::time::Instant::now();
+    let seeded = seed_schemes(program, remapped.as_ref());
+    phase("typeck/seed-schemes", t);
     let mut checker = Checker::new(program);
+    if let Some((tables, next)) = &remapped {
+        checker.apply_seed(tables.clone(), *next);
+    }
     checker.schemes = seeded;
+    let t = std::time::Instant::now();
     checker.validate_param_declarations();
     checker.precompute_global_bindings();
     checker.precompute_function_returns();
@@ -285,17 +465,28 @@ pub fn analyze(program: &Program) -> Inference {
     checker.refresh_function_returns();
     checker.precompute_method_returns();
     checker.precompute_method_returns();
+    phase("typeck/precompute", t);
     // Check each type's method bodies, then generalize each record type into a
     // scheme. Generalizing before the function bodies are checked makes the
     // schemes available at call sites (a function instantiates a method's scheme
     // to type the call's result) and keeps the generic field variable read here
     // free of any concrete use. The bodies below are checked against the seeded
     // schemes; this rebuild replaces them with the ones this pass linked.
+    let t = std::time::Instant::now();
     check_method_bodies(&mut checker, program);
     checker.schemes = checker.build_schemes();
+    phase("typeck/method-bodies", t);
 
+    let mut perf = prepoly_utils::PerfLog::start("typeck/fn-bodies");
     for (symbol, f) in &program.functions {
+        // Context bodies were checked by the run that produced the seed; their
+        // call-site behavior is still exact, because a call from the entry
+        // re-elaborates the callee body at the call's own types.
+        if checker.seeded_module(&f.module) {
+            continue;
+        }
         tracing::debug!(function = %f.signature.name, "inferring function body");
+        let fn_started = std::time::Instant::now();
         // The module comes first: the body's bottom scope is the globals visible
         // from IT, so building the scope before setting it would hand the function
         // some other module's globals.
@@ -307,9 +498,12 @@ pub fn analyze(program: &Program) -> Inference {
         // requirement for its own body.
         checker.in_entry_main = symbol == "main";
         checker.check_block_root(&f.decl.body, &mut scopes, ret.as_ref());
+        perf.item(symbol.clone(), fn_started.elapsed());
     }
+    perf.report();
     checker.in_entry_main = false;
 
+    let t = std::time::Instant::now();
     checker.const_scopes = vec![HashSet::new()];
     for init in &program.inits {
         checker.current_module = init.path.clone();
@@ -337,6 +531,8 @@ pub fn analyze(program: &Program) -> Inference {
         }
     }
     checker.const_scopes.clear();
+    phase("typeck/inits", t);
+    let t = std::time::Instant::now();
     // Each expression's type was resolved against the substitution as it was
     // recorded, but a variable can be pinned *after* an expression that mentions
     // it was checked (e.g. an array element fixed by a later `push`). Re-resolve
@@ -345,6 +541,7 @@ pub fn analyze(program: &Program) -> Inference {
     // read directly.
     checker.report_uninferable_error_types();
     checker.finalize_typed();
+    phase("typeck/finalize", t);
     let function_returns: HashMap<String, Type> = checker
         .function_returns
         .clone()
@@ -363,6 +560,59 @@ pub fn analyze(program: &Program) -> Inference {
             (key, ty)
         })
         .collect();
+    // The cross-module tables, deep-resolved so a consumer without this run's
+    // solver sees exactly what this run's `resolve` would have shown; whatever
+    // stays open is genuinely generic.
+    let context_tables = ContextTables {
+        schemes: checker
+            .schemes
+            .iter()
+            .map(|(name, scheme)| {
+                let mut s = scheme.clone();
+                s.fields = s
+                    .fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), checker.resolve(t)))
+                    .collect();
+                for m in s.methods.values_mut() {
+                    m.params = m
+                        .params
+                        .iter()
+                        .map(|(n, t)| (n.clone(), checker.resolve(t)))
+                        .collect();
+                    m.ret = checker.resolve(&m.ret);
+                }
+                (name.clone(), s)
+            })
+            .collect(),
+        function_returns: function_returns.clone(),
+        method_returns: method_returns.clone(),
+        method_return_props: checker.method_return_props.clone(),
+        co_method_returns: checker
+            .co_method_returns
+            .iter()
+            .map(|(k, t)| (k.clone(), checker.resolve(t)))
+            .collect(),
+        global_defs: checker
+            .global_defs
+            .iter()
+            .map(|(m, defs)| {
+                (
+                    m.clone(),
+                    defs.iter()
+                        .map(|(n, t)| (n.clone(), checker.resolve(t)))
+                        .collect(),
+                )
+            })
+            .collect(),
+        next_var: checker.next_unknown,
+        bare_names: program
+            .functions
+            .values()
+            .map(|f| f.signature.name.clone())
+            .chain(program.types.values().map(|t| t.name.clone()))
+            .collect(),
+    };
     Inference {
         errors: checker.errors,
         typed: checker.typed,
@@ -376,6 +626,7 @@ pub fn analyze(program: &Program) -> Inference {
         null_props: checker.null_props,
         function_returns,
         method_returns,
+        context_tables,
     }
 }
 
@@ -451,6 +702,10 @@ struct Checker<'a> {
     /// factorially in the variant count and a wide sum's self-recursive method
     /// effectively hung the compiler.
     instantiating: HashSet<String>,
+    /// Set when a context seed was applied: every module except the entry
+    /// (`main`) was checked by the run that produced the seed, so the per-item
+    /// passes skip it and read the seeded tables instead.
+    entry_only: bool,
     /// Symbols whose RECURSIVE call fell back to the precomputed return during an
     /// elaboration in progress. Only those need their shared table entry tied back
     /// to what the body really returns (see `link_inferred_return`); doing it for
@@ -595,6 +850,7 @@ impl<'a> Checker<'a> {
             current_co_method: None,
             co_return_links: HashMap::new(),
             instantiating: HashSet::new(),
+            entry_only: false,
             recursed: HashSet::new(),
             error_sites: HashSet::new(),
             elaborations: 0,

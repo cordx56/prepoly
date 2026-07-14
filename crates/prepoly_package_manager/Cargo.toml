@@ -10,6 +10,8 @@ name = "ppm"
 path = "src/main.rs"
 
 [dependencies]
+prepoly_metadata.workspace = true
+
 clap = { version = "4", features = ["derive"] }
 toml = "1"
 serde = { version = "1", features = ["derive"] }

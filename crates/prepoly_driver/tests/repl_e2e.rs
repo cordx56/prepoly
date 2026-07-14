@@ -24,6 +24,7 @@ fn repo_root() -> String {
 /// any other mode (e.g. `"repl"`) is passed as the subcommand.
 fn run_mode(mode: &str, path: &str) -> (bool, String, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_prepoly"));
+    cmd.env("PREPOLY_CACHE", "off");
     if mode != "run" {
         cmd.arg(mode);
     }
@@ -141,6 +142,7 @@ fn interactive_repl_executes_statements_and_echoes_expressions() {
     // by the REPL wrapping it in `println`. Prompts go to stderr, so stdout is
     // exactly the three printed results.
     let mut child = Command::new(env!("CARGO_BIN_EXE_prepoly"))
+        .env("PREPOLY_CACHE", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
