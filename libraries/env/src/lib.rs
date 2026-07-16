@@ -1,13 +1,13 @@
-//! Process-environment queries, as a native prepoly plugin.
+//! Process-environment queries, as a native Brass plugin.
 //!
-//! `libraries/env.pp` owns the user-facing API (`args`, `var`, `vars`,
+//! `libraries/env.cz` owns the user-facing API (`args`, `var`, `vars`,
 //! `current_dir`) and calls in here for what needs the operating system --
 //! except `args`, which is the `_argv` runtime builtin (the argument vector
 //! lives in the driver process, not the environment). The plugin ABI carries
 //! strings and arrays but not maps, so `env_vars` answers with a flat
 //! name/value sequence the wrapper folds into a `HashMap`.
 
-use prepoly_plugin::{PrepolyLib, Registry, decl, export, prepoly_lib};
+use brass_plugin::{BrassLib, Registry, brass_lib, decl, export};
 
 export! {
     /// The value of environment variable `name`. Unset (or a value that is not
@@ -19,7 +19,7 @@ export! {
 
     /// Every environment variable, as a flat `[name, value, name, value, ..]`
     /// sequence. Variables whose name or value is not valid UTF-8 are skipped:
-    /// prepoly strings are UTF-8, and a bulk listing should not fail over one
+    /// Brass strings are UTF-8, and a bulk listing should not fail over one
     /// foreign entry (ask for it by name with `env_var` to see the error).
     fn env_vars() -> Vec<String> {
         let mut flat = Vec::new();
@@ -35,11 +35,11 @@ export! {
 
 struct EnvLib;
 
-impl PrepolyLib for EnvLib {
+impl BrassLib for EnvLib {
     fn entry(reg: &mut Registry) {
         reg.export(decl!(env_var));
         reg.export(decl!(env_vars));
     }
 }
 
-prepoly_lib!(EnvLib);
+brass_lib!(EnvLib);

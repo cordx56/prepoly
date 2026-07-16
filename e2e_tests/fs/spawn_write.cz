@@ -1,0 +1,19 @@
+// A spawned thread writes through the fs plugin while main waits; plugin
+// calls under spawn stay safe, and main reads the result back after sync.
+import fs.{ read_file, write_file }
+
+fun worker(path: string) {
+    match write_file(path, "written by worker") {
+        Ok { value } => { let done = value }
+        Err { error } => println("worker write failed: {error}")
+    }
+}
+
+fun main() {
+    const path = "/tmp/brass_e2e_spawn_write.txt"
+    spawn(() -> {
+        worker(path)
+    })
+    sync()
+    println(read_file(path)!)
+}

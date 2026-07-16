@@ -5,7 +5,7 @@ Result.Err {
     error: Error {
         value: "null",
         location: Location {
-            file: "e2e_tests/control_flow/null_condition_dead_arm.pp",
+            file: "e2e_tests/control_flow/null_condition_dead_arm.cz",
             line: 10,
             col: 16,
         },

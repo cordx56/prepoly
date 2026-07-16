@@ -3,7 +3,7 @@ title: "Compile-time reflection"
 description: "fields(x), typeof(x), definite assignment, and reflective decoders."
 ---
 
-Prepoly exposes a value's type and a record's structure to code through
+Brass exposes a value's type and a record's structure to code through
 compile-time constructs (`fields`, `typeof`). They are resolved entirely during
 type checking -- there is no runtime type information and no dynamic field
 access -- so their behavior is predictable by mentally expanding them.
@@ -18,7 +18,7 @@ Inside the loop the loop variable stands for the current field. It decays to
 the field's **name** as a string everywhere except the indexing form `x[field]`,
 which projects the **field itself**:
 
-```prepoly
+```brass
 type Point = { x: int64, y: int64 }
 
 fun dump(p: Point) {
@@ -49,7 +49,7 @@ primitives and structural forms (`int32[]`, `T?`, ...) report their written
 form. The name is resolved per monomorphic instance, so a generic function
 reports each caller's own argument type:
 
-```prepoly
+```brass
 type Shape = | Circle { r: float64 } | Square
 println(typeof(Shape.Circle { r: 1.0 }))      // Shape
 
@@ -71,7 +71,7 @@ let w: typeof(v) = ...          // w has v's type
 **As a static receiver.** `typeof(v)` is the type of v, so a static method or
 associated function of that type is reachable through a value:
 
-```prepoly norun
+```brass norun
 const o = typeof(v).origin()    // calls the static `origin` of v's type
 const n = typeof(x).from(3.9)!  // the `from` of x's numeric type
 ```
@@ -101,7 +101,7 @@ an `if` over a member access is decided while checking. The arm that cannot run
 is neither type-checked nor emitted, so a single generic body may hold arms that
 only type for *some* of its instantiations:
 
-```prepoly
+```brass
 type Segments = { parts: string[] }
 
 const SEP = "/"
@@ -137,7 +137,7 @@ primitive type implements only its own `is_<type>` method (`is_string`,
 `v.is_string` is present -- truthy -- exactly when `v` is a `string`, and
 reads as `null` on every other type:
 
-```prepoly
+```brass
 fun describe(v) -> string {
     if v.is_string {
         return "string"
@@ -163,7 +163,7 @@ definitely assigned before it is read -- either all at once, or, for a record,
 one field at a time. A `fields` loop that stores into every field of such a
 binding initializes it completely:
 
-```prepoly
+```brass
 type Point = { x: int64, y: int64 }
 
 fun doubled(p: Point) -> Point {
@@ -186,7 +186,7 @@ Together these make deserialization -- filling a struct from a name-keyed source
 target's own field names drive the lookup, and a missing key is a decode error
 naming the field:
 
-```prepoly
+```brass
 import std.collections.{ HashMap }
 
 type Config = { width: int64, height: int64, depth: int64 }
@@ -222,7 +222,7 @@ runtime decode error otherwise.
 This turns a whole recursive JSON-to-struct decoder into one method — this is
 exactly how the `data.json` library implements `JsonValue.into` (abridged):
 
-```prepoly norun
+```brass norun
 fun JsonValue.into(self) -> infer! {
     match self {
         JsonValue.Number { value } => { return infer.from(value) }
@@ -255,4 +255,4 @@ target type)` triple becomes a generated concrete method, and injecting those
 changes the program — so the whole front end type-checks a second time. A
 keyed build costs roughly twice a plain one; the caches described in
 [Performance & caching](/references/performance/) absorb that cost -- the
-`.ppcache` makes every unchanged build skip both passes entirely.
+`.czcache` makes every unchanged build skip both passes entirely.

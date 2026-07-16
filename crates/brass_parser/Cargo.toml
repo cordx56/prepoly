@@ -1,0 +1,10 @@
+[package]
+name = "brass_parser"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true

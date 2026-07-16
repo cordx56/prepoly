@@ -3,7 +3,7 @@ gadget 2
 err: Error {
     value: "negative count",
     location: Location {
-        file: "e2e_tests/reflection/sum_static_feeds_keyed_into.pp",
+        file: "e2e_tests/reflection/sum_static_feeds_keyed_into.cz",
         line: 15,
         col: 16,
     },

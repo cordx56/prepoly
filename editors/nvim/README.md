@@ -1,36 +1,36 @@
-# Prepoly language server in Neovim
+# Brass language server in Neovim
 
 Diagnostics, hover types, go-to-definition, and semantic-token highlighting for
-`.pp` files, backed by `ppls` (the `prepoly_language_server` crate).
+`.cz` files, backed by `czls` (the `brass_language_server` crate).
 
 Uses the native Neovim 0.11+ LSP workflow: a server definition in `lsp/`, the
-filetype mapping in `ftdetect/`, and `vim.lsp.enable("prepoly")` to start it.
+filetype mapping in `ftdetect/`, and `vim.lsp.enable("brass")` to start it.
 
 ## 1. Build the server
 
 ```sh
 # Install onto PATH (recommended):
-cargo install --path crates/prepoly_language_server   # -> ~/.cargo/bin/ppls
+cargo install --path crates/brass_language_server   # -> ~/.cargo/bin/czls
 
 # ...or just build it and override `cmd` to point at the binary (see below):
-cargo build -p prepoly_language_server                # -> target/debug/ppls
+cargo build -p brass_language_server                # -> target/debug/czls
 ```
 
-`ppls` has no LLVM dependency, so it builds without the JIT toolchain.
+`czls` has no LLVM dependency, so it builds without the JIT toolchain.
 
 ## 2. Put this directory on the runtimepath and enable the server
 
-This folder is a minimal plugin: `lsp/prepoly.lua` (server config) and
-`ftdetect/prepoly.lua` (the `.pp` -> `prepoly` filetype mapping).
+This folder is a minimal plugin: `lsp/brass.lua` (server config) and
+`ftdetect/brass.lua` (the `.cz` -> `brass` filetype mapping).
 
 ### lazy.nvim
 
 ```lua
 {
-  dir = "/path/to/prepoly/editors/nvim",
-  ft = "prepoly", -- lazy.nvim sources ftdetect/ at startup, so this triggers correctly
+  dir = "/path/to/brass/editors/nvim",
+  ft = "brass", -- lazy.nvim sources ftdetect/ at startup, so this triggers correctly
   config = function()
-    vim.lsp.enable("prepoly")
+    vim.lsp.enable("brass")
   end,
 }
 ```
@@ -38,19 +38,19 @@ This folder is a minimal plugin: `lsp/prepoly.lua` (server config) and
 ### Manual (any setup with this directory on the runtimepath)
 
 ```lua
-vim.opt.runtimepath:append("/path/to/prepoly/editors/nvim")
-vim.lsp.enable("prepoly")
+vim.opt.runtimepath:append("/path/to/brass/editors/nvim")
+vim.lsp.enable("brass")
 ```
 
 ### Using a locally built binary instead of one on PATH
 
-Override `cmd` before enabling; the override merges over `lsp/prepoly.lua`:
+Override `cmd` before enabling; the override merges over `lsp/brass.lua`:
 
 ```lua
-vim.lsp.config("prepoly", {
-  cmd = { vim.fn.getcwd() .. "/target/debug/ppls" },
+vim.lsp.config("brass", {
+  cmd = { vim.fn.getcwd() .. "/target/debug/czls" },
 })
-vim.lsp.enable("prepoly")
+vim.lsp.enable("brass")
 ```
 
 Requires Neovim 0.11+. (`lsp/` + `vim.lsp.enable` is the native API; older
@@ -107,9 +107,9 @@ vim.api.nvim_create_autocmd("LspAttach", {
 
 ## Notes
 
-- `.pp` is also Puppet's extension; `ftdetect/prepoly.lua` overrides that.
+- `ftdetect/brass.lua` maps the `.cz` extension to the `brass` filetype.
 - Imports are resolved from each file's directory on disk, so unsaved edits in
   *other* open files are not yet reflected across files; the active file is
   always analyzed from its live buffer contents.
-- Set `PREPOLY_LOG=debug` in the environment for server-side trace logs on
+- Set `BRASS_LOG=debug` in the environment for server-side trace logs on
   stderr (visible via `:LspLog`).

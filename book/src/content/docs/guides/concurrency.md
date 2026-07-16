@@ -7,7 +7,7 @@ description: "Experimental concurrency with spawn, sync, and with."
 Concurrency is **experimental** and runs on the native (JIT) runtime only.
 :::
 
-prepoly's concurrency surface is three functions — there is no `async`, no
+Brass's concurrency surface is three functions — there is no `async`, no
 locks, and no ownership annotations to write:
 
 - `spawn(f)` runs a zero-argument closure on another thread.
@@ -18,7 +18,7 @@ The compiler infers ownership of captured values automatically: values shared
 between tasks are promoted to guarded objects behind the scenes, and access to
 them is serialized.
 
-```prepoly norun
+```brass norun
 type Counter = {
     count: int32
     total: int32

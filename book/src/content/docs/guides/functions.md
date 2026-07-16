@@ -8,7 +8,7 @@ description: "Type-inferred functions, closures, higher-order functions, and par
 Functions are declared with `fun`. Parameter and return annotations are
 optional — when omitted, they are inferred:
 
-```prepoly
+```brass
 fun add(a, b) {
     return a + b
 }
@@ -31,7 +31,7 @@ compile error.
 A closure is written `(params) -> body`. The body is a single expression, or a
 block that returns with `return`:
 
-```prepoly
+```brass
 let inc = (n: int32) -> n + 1
 let shout = (s: string) -> {
     return s.to_upper() + "!"
@@ -44,7 +44,7 @@ println(shout("hey"))   // HEY!
 Closures capture their environment **by reference**, so captured variables stay
 shared and mutable across calls:
 
-```prepoly
+```brass
 fun make_accumulator(initial) {
     let total = initial
     return (amount: int32) -> {
@@ -62,7 +62,7 @@ println(acc(20))   // 130
 
 Functions and closures are values, so they can be passed around:
 
-```prepoly
+```brass
 fun apply_twice(f, x) {
     return f(f(x))
 }
@@ -74,7 +74,7 @@ println(apply_twice(inc, 10))   // 12
 The array helpers of the standard library are the everyday use of this — a
 chain may be broken across lines when the next line starts with `.`:
 
-```prepoly
+```brass
 let result = [3, 1, 4, 1, 5, 9]
     .filter((x) -> x > 2)
     .map((x) -> x * 10)
@@ -84,12 +84,12 @@ println("chain result = {result}")   // 210
 
 ## Parameters and mutation
 
-When a parameter has no annotation, prepoly infers not just its type but also
+When a parameter has no annotation, Brass infers not just its type but also
 how it is passed. A parameter the body only _reads_ is a cheap shared
 reference. A parameter the body _mutates_ becomes a private deep copy, so the
 mutation stays inside the function:
 
-```prepoly
+```brass
 fun double(a) {
     for e in a {
         e *= 2
@@ -104,7 +104,7 @@ println(arr)   // [1, 2, 3] — double worked on its own copy
 To mutate the caller's value through a function, annotate the parameter
 `ref(mut(T))` — a mutable reference writes through:
 
-```prepoly
+```brass
 fun double_through(a: ref(mut(int32[]))) {
     for e in a {
         e *= 2

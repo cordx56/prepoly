@@ -1,13 +1,13 @@
 ---
-title: "Installing prepoly"
-description: "Build and install the prepoly command-line driver."
+title: "Installing Brass"
+description: "Build and install the Brass command-line driver."
 ---
 
-Here we describe how to build and install the prepoly command-line driver.
+Here we describe how to build and install the Brass command-line driver.
 
 ## Clone the repository
 
-First, clone the prepoly source code:
+First, clone the Brass source code:
 
 ```bash
 git clone https://github.com/cordx56/prepoly.git
@@ -15,12 +15,12 @@ git clone https://github.com/cordx56/prepoly.git
 
 ## Install the Rust compiler
 
-prepoly is written in the Rust language.
+Brass is written in the Rust language.
 So first you have to install the Rust compiler.
 
 You can learn how to install Rust here: [https://rust-lang.org/tools/install/](https://rust-lang.org/tools/install/)
 
-## Build prepoly with the native runtime
+## Build Brass with the native runtime
 
 After installing Rust, you can build the default native driver:
 
@@ -29,33 +29,33 @@ After installing Rust, you can build the default native driver:
 ```
 
 The script `x` builds the `bootstrap` crate and executes commands via the `bootstrap` binary.
-The `bootstrap` binary downloads LLVM, which is required to use JIT compilation, and sets its path for the prepoly build.
+The `bootstrap` binary downloads LLVM, which is required to use JIT compilation, and sets its path for the Brass build.
 
-The resulting binary `prepoly` is made under the `target/release` directory.
+The resulting binary `brass` is made under the `target/release` directory.
 
 If you want the interpreter-only driver without LLVM, disable default features:
 
 ```bash
-cargo build -p prepoly_driver --no-default-features
+cargo build -p brass_driver --no-default-features
 ```
 
-## Install prepoly
+## Install Brass
 
 Run the following command to install the default native driver:
 
 ```bash
-./x cargo install --path crates/prepoly_driver
+./x cargo install --path crates/brass_driver
 ```
 
-Note that you have to add the path where the `prepoly` binary is placed to `$PATH`.
+Note that you have to add the path where the `brass` binary is placed to `$PATH`.
 
 ## Usage
 
 ```bash
-prepoly program.pp     # type-check and run a program
-prepoly check program.pp   # type-check only; silent on success
-prepoly repl program.pp    # run a program with the interpreter (no JIT)
-prepoly                # start an interactive REPL
+brass program.cz     # type-check and run a program
+brass check program.cz   # type-check only; silent on success
+brass repl program.cz    # run a program with the interpreter (no JIT)
+brass                # start an interactive REPL
 ```
 
 Any diagnostic (parse error, type error) is printed to stderr and the process

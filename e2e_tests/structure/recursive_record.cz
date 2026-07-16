@@ -1,0 +1,40 @@
+// Pins that a self-referential record type (`next: Node?`) compiles and runs:
+// completing such a type's field substitution used to recurse without bound and
+// crash the compiler (even `brass check`). Exercises construction, link
+// assignment, traversal (null-terminated loop), field access through a
+// narrowing, and rendering of a node.
+type Node = {
+    value: int64,
+    next: Node?,
+}
+
+fun push_front(head: Node?, value: int64) -> Node {
+    let n = Node { value: value, next: null }
+    n.next = head
+    return n
+}
+
+fun sum(head: Node?) -> int64 {
+    let total: int64 = 0
+    let cur = head
+    while cur != null {
+        if let n = cur {
+            total += n.value
+            cur = n.next
+        }
+    }
+    return total
+}
+
+fun main() {
+    let head = push_front(null, 3)
+    head = push_front(head, 2)
+    head = push_front(head, 1)
+    println(sum(head))
+    println(head.value)
+    if let second = head.next {
+        println(second.value)
+    }
+    let tail = Node { value: 9, next: null }
+    println(tail)
+}

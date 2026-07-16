@@ -8,7 +8,7 @@ description: "match expressions, exhaustiveness, patterns, and if let."
 `match` is an expression that takes a value apart. Over a sum type it is
 checked for **exhaustiveness** — forgetting a variant is a compile error:
 
-```prepoly
+```brass
 type Shape =
     | Circle { radius: float64 }
     | Rectangle { width: float64, height: float64 }
@@ -34,7 +34,7 @@ for s in [
 A variant pattern binds the variant's fields by name. Bind only some of them
 and omit the rest with `..`:
 
-```prepoly
+```brass
 type Holder =
     | Full { data: int32, tag: int32 }
     | Empty
@@ -55,7 +55,7 @@ The variant name may be written bare (`Full { .. }`) or qualified
 Patterns also include literals (integers, floats, strings, `true`/`false`,
 `null`) and the wildcard `_`, which matches anything:
 
-```prepoly
+```brass
 fun classify(n) {
     return match n {
         0 => "zero",
@@ -77,7 +77,7 @@ Matching on strings works the same way — see the expression-tree example in
 When you only care about a single variant, `if let` matches it and binds its
 fields, without requiring the other arms:
 
-```prepoly
+```brass
 type Shape =
     | Circle { radius: float64 }
     | Rectangle { width: float64, height: float64 }
@@ -95,7 +95,7 @@ fun radius_of(s) {
 `s.find(sub)` or `T.from(v)` (structural conversion) — the bound name is the
 non-null value:
 
-```prepoly
+```brass
 if let idx = "hello".find("ll") {
     println("found at {idx}")   // found at 2
 }

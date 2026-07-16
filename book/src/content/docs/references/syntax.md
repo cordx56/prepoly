@@ -4,13 +4,13 @@ description: "The complete surface syntax: lexical rules, operators, statements,
 ---
 
 This chapter describes the surface syntax exhaustively. Source files use the
-`.pp` extension; one file is one module (see [Modules](/references/modules/)).
+`.cz` extension; one file is one module (see [Modules](/references/modules/)).
 
 ## Lexical structure
 
 ### Comments
 
-```prepoly
+```brass
 // a line comment, to the end of the line
 #  a line comment as well
 /* a block comment
@@ -24,8 +24,8 @@ line comment does. `//` and `#` are interchangeable; because `#` starts a
 line comment, a file may begin with a shebang line
 (see [Hello, world!](/guides/hello/#running-as-a-script)):
 
-```prepoly norun
-#!/usr/bin/env prepoly
+```brass norun
+#!/usr/bin/env brass
 ```
 
 ### Doc comments
@@ -35,7 +35,7 @@ directly above a `fun` or `type` declaration, it attaches to that declaration
 and is shown by editor tooling — the [language server](/installation/lsp/)
 renders it on hover and in completion, below the signature:
 
-```prepoly
+```brass
 /** The area of a circle with radius `r`. */
 fun area(r: float64) -> float64 {
     return 3.14159 * r * r
@@ -92,7 +92,7 @@ are functions (the builtin ones cannot be redefined); and there is no `loop`,
 
 Decimal by default, with radix prefixes and `_` separators:
 
-```prepoly
+```brass
 let a = 1_000_000
 let b = 0xFF        // hex (0x / 0X)
 let c = 0b1010      // binary (0b / 0B)
@@ -125,7 +125,7 @@ the expression is evaluated and its text inserted. Literal braces are written
 nested braces and skips nested string literals, so an interpolated expression
 may itself contain strings and braces:
 
-```prepoly
+```brass
 let items = ["a", "b"]
 println("first = {items[0]}, count = {items.len()}")
 ```
@@ -144,7 +144,7 @@ line _continues_ onto the next in these cases:
 - inside parentheses `()`, brackets `[]`, and the braces of record literals,
   `match` bodies, and type bodies, newlines are insignificant.
 
-```prepoly
+```brass
 let total = 100 *
     2 +
     50
@@ -239,7 +239,7 @@ The complete statement list: `let`/`const`, assignment, expression statement,
 
 ### `let` and `const`
 
-```prepoly norun
+```brass norun
 const pi = 3.14159        // immutable binding
 let count = 0             // mutable binding
 let x: int64 = 10         // with a type annotation
@@ -305,7 +305,7 @@ array types (user code cannot).
 
 ### Types
 
-```prepoly norun
+```brass norun
 type Name = { members }                  // record
 type Name = | V1 { members } | V2       // sum type
 type Name: IfaceA, IfaceB = { members } // with interface constraints
@@ -330,7 +330,7 @@ and is not a new nominal.
 
 ### Imports
 
-```prepoly norun
+```brass norun
 import geometry.vec.{ Vec2, dot }           // named imports
 import geometry.vec.{ dot as vdot }        // rename a name
 import geometry.vec.Vec2                    // one name, same as .{ Vec2 }

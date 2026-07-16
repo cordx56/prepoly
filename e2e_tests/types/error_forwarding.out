@@ -5,7 +5,7 @@ Result.Err {
     error: Error {
         value: "boom",
         location: Location {
-            file: "e2e_tests/types/error_forwarding.pp",
+            file: "e2e_tests/types/error_forwarding.cz",
             line: 5,
             col: 12,
         },
@@ -19,7 +19,7 @@ Result.Err {
     error: Error {
         value: "bad",
         location: Location {
-            file: "e2e_tests/types/error_forwarding.pp",
+            file: "e2e_tests/types/error_forwarding.cz",
             line: 9,
             col: 12,
         },

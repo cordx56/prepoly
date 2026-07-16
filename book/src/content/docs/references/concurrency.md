@@ -68,7 +68,7 @@ These are compile errors today:
 
 ## Example
 
-```prepoly norun
+```brass norun
 type Counter = {
     count: int32
 }

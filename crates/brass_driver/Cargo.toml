@@ -1,0 +1,40 @@
+[package]
+name = "brass_driver"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "brass"
+path = "src/main.rs"
+
+[dependencies]
+brass_parser.workspace = true
+brass_hir.workspace = true
+brass_resolve.workspace = true
+brass_typeck.workspace = true
+brass_typesys.workspace = true
+brass_repl.workspace = true
+
+clap = { version = "4", features = ["derive"] }
+brass_utils.workspace = true
+brass_cache.workspace = true
+brass_metadata.workspace = true
+tracing.workspace = true
+
+# The LLVM JIT back end is native-only -- LLVM cannot link for wasm -- so its
+# optional dependencies are declared only for non-wasm targets. The default `jit`
+# feature activates them there; on a wasm target the deps are absent, so `jit` is
+# automatically inert and the driver falls back to the REPL interpreter
+# (`brass_repl`, no LLVM). `build.rs` mirrors this as the `jit_backend` cfg the
+# code selects on. Without the feature, the JIT is also skipped on native.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+brass_jit_llvm = { workspace = true, optional = true }
+inkwell = { workspace = true, optional = true }
+
+[features]
+default = ["jit"]
+jit = ["dep:brass_jit_llvm", "dep:inkwell"]
+
+# The plugin e2e test builds and loads the in-repo fixture plugin.
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+brass_plugin_host = { workspace = true, features = ["fixture"] }

@@ -1,0 +1,175 @@
+//! Symbol mangling and the compiled-function cache.
+//!
+//! Each callable is compiled once against the uniform tagged-value ABI
+//! (`layout::Abi::fn_type`), so a single body serves every concrete type and this
+//! "monomorphization cache" is a name -> LLVM-function map; the deferred path is
+//! realized by runtime tag dispatch rather than per-type recompilation. Typed
+//! monomorphization is the target backend; the uniform ABI is a compatibility
+//! layer to be retired or restricted to dynamic/builtin boundaries. The mangling
+//! is shared with the driver so it can resolve each symbol's JIT address for the
+//! runtime dispatch tables.
+
+use std::collections::HashMap;
+
+use brass_hir::{FloatKind, IntKind, Type};
+use inkwell::values::FunctionValue;
+
+/// Injective LLVM-name encoding of an engine symbol: ASCII alphanumerics pass
+/// through; every other character (including `_` itself) becomes `_{hex}_`, its
+/// code point framed by underscores. Every `_` in the output therefore belongs
+/// to an escape, so decoding is unambiguous and two distinct engine symbols
+/// (e.g. `probe__int32?[]` vs `probe__int32[]?` under the old fold-to-`_`
+/// scheme) can never map to the same LLVM function name.
+fn sanitize(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else {
+            out.push('_');
+            out.push_str(&format!("{:x}", c as u32));
+            out.push('_');
+        }
+    }
+    out
+}
+
+pub fn mangle_fn(name: &str) -> String {
+    // Compiler-synthesized instances (module inits, methods, statics, closures)
+    // are tagged by `brass_engine` with a reserved sigil that no source
+    // identifier can contain. Route them to a prefix disjoint from `pp_fn_` so a
+    // user `fun init0` and the first module init never produce the same LLVM
+    // symbol. `sanitize` would otherwise fold the sigil to `_`, re-colliding them.
+    if let Some(rest) = name.strip_prefix(brass_engine::SYNTH_SIGIL) {
+        return format!("pp_synth_{}", sanitize(rest));
+    }
+    format!("pp_fn_{}", sanitize(name))
+}
+
+/// `qualifier` is a type name (record/static) or `Type.Variant` (sum method).
+pub fn mangle_method(qualifier: &str, method: &str) -> String {
+    format!("pp_m_{}_{}", sanitize(qualifier), sanitize(method))
+}
+
+pub fn mangle_init(idx: usize) -> String {
+    format!("pp_init_{idx}")
+}
+
+/// A short, collision-resistant mangling of a type, for naming a monomorphized
+/// instance. Distinct concrete types yield distinct
+/// strings, so a function specialized for `int32` and for `string` gets two
+/// symbols. Heap/nominal types include their nominal id to stay unique across
+/// modules that share a display name (R2).
+pub fn type_mangle(ty: &Type) -> String {
+    match ty {
+        Type::Bool => "b".into(),
+        Type::Int(k) => int_code(*k).into(),
+        Type::Float(FloatKind::F32) => "f32".into(),
+        Type::Float(FloatKind::F64) => "f64".into(),
+        Type::Str => "str".into(),
+        Type::Void => "void".into(),
+        Type::Never => "never".into(),
+        Type::Record(n) => format!("r{}", n.id),
+        Type::Sum(n) => format!("s{}", n.id),
+        Type::Array(inner, len) => format!("a{len}_{}", type_mangle(inner)),
+        Type::Slice(inner) => format!("sl_{}", type_mangle(inner)),
+        Type::Tuple(elems) => {
+            let es: Vec<String> = elems.iter().map(type_mangle).collect();
+            format!("tup{}_{}", elems.len(), es.join("_"))
+        }
+        Type::Fun(params, ret) => {
+            let ps: Vec<String> = params.iter().map(type_mangle).collect();
+            format!("fn{}_{}", ps.join("_"), type_mangle(ret))
+        }
+        Type::Nullable(inner) => format!("opt_{}", type_mangle(inner)),
+        Type::ConstOf(inner) | Type::Mut(inner) | Type::Ref(inner) => type_mangle(inner),
+        Type::Unknown(id) => format!("u{id}"),
+        Type::SelfType => "self".into(),
+    }
+}
+
+fn int_code(k: IntKind) -> &'static str {
+    match k {
+        IntKind::I8 => "i8",
+        IntKind::I16 => "i16",
+        IntKind::I32 => "i32",
+        IntKind::I64 => "i64",
+        IntKind::U8 => "u8",
+        IntKind::U16 => "u16",
+        IntKind::U32 => "u32",
+        IntKind::U64 => "u64",
+    }
+}
+
+/// The symbol of one monomorphized function instance: the base function symbol
+/// plus the concrete argument types it is specialized for. With the typed backend
+/// this names a distinct LLVM function per instance;
+/// the uniform ABI compiles a single `mangle_fn` body for all instances.
+pub fn mangle_fn_instance(symbol: &str, arg_types: &[Type]) -> String {
+    if arg_types.is_empty() {
+        return mangle_fn(symbol);
+    }
+    let args: Vec<String> = arg_types.iter().map(type_mangle).collect();
+    format!("{}__{}", mangle_fn(symbol), sanitize(&args.join("_")))
+}
+
+/// As [`mangle_fn_instance`] but for a method instance, keyed by the receiver
+/// type/variant qualifier and the concrete argument types.
+pub fn mangle_method_instance(qualifier: &str, method: &str, arg_types: &[Type]) -> String {
+    if arg_types.is_empty() {
+        return mangle_method(qualifier, method);
+    }
+    let args: Vec<String> = arg_types.iter().map(type_mangle).collect();
+    format!(
+        "{}__{}",
+        mangle_method(qualifier, method),
+        sanitize(&args.join("_"))
+    )
+}
+
+pub fn mangle_closure(idx: usize) -> String {
+    format!("pp_clo_{idx}")
+}
+
+#[derive(Default)]
+pub struct FnCache<'ctx> {
+    pub map: HashMap<String, FunctionValue<'ctx>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use brass_hir::NominalType;
+
+    #[test]
+    fn instances_differ_by_argument_type() {
+        // A function specialized for int32 and for string is two
+        // distinct instances with distinct symbols.
+        let for_int = mangle_fn_instance("id", &[Type::Int(IntKind::I32)]);
+        let for_str = mangle_fn_instance("id", &[Type::Str]);
+        assert_ne!(for_int, for_str);
+        assert!(for_int.starts_with(&mangle_fn("id")));
+        assert!(for_str.starts_with(&mangle_fn("id")));
+    }
+
+    #[test]
+    fn zero_arg_instance_is_the_base_symbol() {
+        assert_eq!(mangle_fn_instance("main", &[]), mangle_fn("main"));
+    }
+
+    #[test]
+    fn same_named_nominal_types_mangle_distinctly_by_id() {
+        // Two `Shape` types in different modules have different ids (R2), so
+        // their instances do not collide.
+        let a = type_mangle(&Type::Record(NominalType::new(5, "Shape")));
+        let b = type_mangle(&Type::Record(NominalType::new(6, "Shape")));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn method_instances_differ_by_argument_type() {
+        let i = mangle_method_instance("Vec2", "scale", &[Type::Float(FloatKind::F64)]);
+        let s = mangle_method_instance("Vec2", "scale", &[Type::Str]);
+        assert_ne!(i, s);
+    }
+}

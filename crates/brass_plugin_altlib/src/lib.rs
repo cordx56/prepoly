@@ -1,0 +1,23 @@
+//! Stands in for a rebuilt `brass_plugin_testlib`: `add` behaves the same,
+//! and `extra` is the function a stale manifest would not know about.
+
+use brass_plugin::{BrassLib, Registry, brass_lib, decl, export};
+
+export! {
+    /// Adds two integers.
+    fn add(a: i64, b: i64) -> i64 { a.wrapping_add(b) }
+
+    /// Only this build exposes it.
+    fn extra() -> i64 { 7 }
+}
+
+struct AltLib;
+
+impl BrassLib for AltLib {
+    fn entry(reg: &mut Registry) {
+        reg.export(decl!(add));
+        reg.export(decl!(extra));
+    }
+}
+
+brass_lib!(AltLib);

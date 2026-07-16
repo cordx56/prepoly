@@ -1,6 +1,6 @@
-//! Filesystem queries behind the `Path` type, as a native prepoly plugin.
+//! Filesystem queries behind the `Path` type, as a native Brass plugin.
 //!
-//! `libraries/path.pp` owns everything that is pure string manipulation --
+//! `libraries/path.cz` owns everything that is pure string manipulation --
 //! splitting, joining, normalizing, relativizing -- and calls in here only for
 //! the questions that need the operating system: what the working directory is,
 //! and what actually exists on disk.
@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::Path;
 
-use prepoly_plugin::{PrepolyLib, Registry, decl, export, prepoly_lib};
+use brass_plugin::{BrassLib, Registry, brass_lib, decl, export};
 
 export! {
     /// The process's current working directory, as an absolute path.
@@ -89,7 +89,7 @@ export! {
     }
 }
 
-/// A path back to prepoly. prepoly strings are UTF-8, so a path that is not
+/// A path back to Brass. Brass strings are UTF-8, so a path that is not
 /// (legal on Unix, where a path is any byte string) is a reportable error rather
 /// than a silent replacement-character mangling.
 fn to_string(path: std::path::PathBuf) -> Result<String, String> {
@@ -100,7 +100,7 @@ fn to_string(path: std::path::PathBuf) -> Result<String, String> {
 
 struct PathLib;
 
-impl PrepolyLib for PathLib {
+impl BrassLib for PathLib {
     fn entry(reg: &mut Registry) {
         reg.export(decl!(path_current_dir));
         reg.export(decl!(path_home_dir));
@@ -116,4 +116,4 @@ impl PrepolyLib for PathLib {
     }
 }
 
-prepoly_lib!(PathLib);
+brass_lib!(PathLib);

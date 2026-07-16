@@ -1,4 +1,4 @@
-/// The prepoly playground: a Monaco editor wired to the wasm interpreter and
+/// The Brass playground: a Monaco editor wired to the wasm interpreter and
 /// the wasm LSP server. `mountPlayground(root)` attaches one playground to a
 /// DOM subtree; the markup provides the mount points via data attributes
 /// (`data-editor`, `data-exec`, `data-stdout`, `data-stderr`). The wasm
@@ -7,7 +7,7 @@
 import * as monaco from "monaco-editor";
 import { runProgram } from "./run";
 import {
-  PrepolyLsp,
+  BrassLsp,
   SEMANTIC_LEGEND,
   type CompletionItem,
   type Diagnostic,
@@ -68,10 +68,10 @@ let lspPromise: Promise<WebAssembly.Module | null> | undefined;
 
 const loadLsp = () =>
   (lspPromise ??= WebAssembly.compileStreaming(
-    fetch("/ppls.wasm"),
+    fetch("/czls.wasm"),
   ).catch((err) => {
     console.warn(
-      "ppls.wasm unavailable; language features disabled",
+      "czls.wasm unavailable; language features disabled",
       err,
     );
     return null;
@@ -90,13 +90,13 @@ export const mountPlayground = async (root: HTMLElement) => {
 
   const lsp = await loadLsp();
 
-  monaco.languages.register({ id: "prepoly" });
+  monaco.languages.register({ id: "brass" });
 
   const url = new URL(location.href);
   const program = url.searchParams.get("code") || SAMPLE_PROGRAM;
 
   const editor = monaco.editor.create(container, {
-    language: "prepoly",
+    language: "brass",
     theme: "vs-dark",
     value: program,
     // Pull semantic tokens from the registered provider below.
@@ -105,7 +105,7 @@ export const mountPlayground = async (root: HTMLElement) => {
   });
 
   if (lsp) {
-    wireLanguageFeatures(editor, new PrepolyLsp(lsp));
+    wireLanguageFeatures(editor, new BrassLsp(lsp));
   }
 
   const execute = async () => {
@@ -135,7 +135,7 @@ const escapeHtml = (text: string) =>
 /// results are converted into Monaco's 1-based coordinate space.
 const wireLanguageFeatures = (
   editor: monaco.editor.IStandaloneCodeEditor,
-  lsp: PrepolyLsp,
+  lsp: BrassLsp,
 ) => {
   const model = editor.getModel()!;
 
@@ -150,12 +150,12 @@ const wireLanguageFeatures = (
     }
 
     const diagnostics = await lsp.diagnostics(program);
-    monaco.editor.setModelMarkers(model, "prepoly", diagnostics.map(toMarker));
+    monaco.editor.setModelMarkers(model, "brass", diagnostics.map(toMarker));
   }, 300);
   model.onDidChangeContent(refreshCode);
   refreshCode();
 
-  monaco.languages.registerHoverProvider("prepoly", {
+  monaco.languages.registerHoverProvider("brass", {
     provideHover: async (model, position) => {
       const hover = await lsp.hover(model.getValue(), toLspPosition(position));
       if (!hover) return null;
@@ -166,7 +166,7 @@ const wireLanguageFeatures = (
     },
   });
 
-  monaco.languages.registerDefinitionProvider("prepoly", {
+  monaco.languages.registerDefinitionProvider("brass", {
     provideDefinition: async (model, position) => {
       const location = await lsp.definition(
         model.getValue(),
@@ -178,7 +178,7 @@ const wireLanguageFeatures = (
     },
   });
 
-  monaco.languages.registerCompletionItemProvider("prepoly", {
+  monaco.languages.registerCompletionItemProvider("brass", {
     // `.` / `{` continue member access and import paths; identifier typing
     // triggers completion on its own. Mirrors the server's trigger characters.
     triggerCharacters: [".", "{"],
@@ -200,7 +200,7 @@ const wireLanguageFeatures = (
     },
   });
 
-  monaco.languages.registerDocumentSemanticTokensProvider("prepoly", {
+  monaco.languages.registerDocumentSemanticTokensProvider("brass", {
     getLegend: () => SEMANTIC_LEGEND,
     provideDocumentSemanticTokens: async (model: monaco.editor.ITextModel) => {
       const data = await lsp.semanticTokens(model.getValue());

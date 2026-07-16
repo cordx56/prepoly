@@ -1,12 +1,12 @@
-//! Spawning and controlling OS processes, as a native Prepoly plugin.
+//! Spawning and controlling OS processes, as a native Brass plugin.
 //!
-//! `libraries/process.pp` builds the `Command`/`Stdio`/`Child` surface on
+//! `libraries/process.cz` builds the `Command`/`Stdio`/`Child` surface on
 //! these primitives. A spawned child sits in a process-wide table keyed by an
 //! `i64` handle; a piped standard stream leaves as a raw descriptor, which the
-//! Prepoly side adopts as a `File` so the ordinary read/write/close methods
+//! Brass side adopts as a `File` so the ordinary read/write/close methods
 //! drive it.
 //!
-//! Stdio modes are the small integers `process.pp` translates its `Stdio`
+//! Stdio modes are the small integers `process.cz` translates its `Stdio`
 //! variants to: 0 = inherit, 1 = pipe, 2 = null. Stream selectors are
 //! 0 = stdin, 1 = stdout, 2 = stderr.
 //!
@@ -19,7 +19,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-use prepoly_plugin::{Bytes, PrepolyLib, Registry, decl, export, prepoly_lib};
+use brass_plugin::{BrassLib, Bytes, Registry, brass_lib, decl, export};
 
 /// One spawned child. `status` caches the exit code once waited for, and
 /// `captured` holds the stdout/stderr buffers `process_wait_captured` drained.
@@ -165,7 +165,7 @@ export! {
     /// The call does not return, so the declared `Void` result is never
     /// produced. Nothing on the way out is cleaned up: no destructor runs, no
     /// spawned child is waited for, and no buffered output is flushed by this
-    /// crate -- see `libraries/process.pp`'s `exit` on what that means for a
+    /// crate -- see `libraries/process.cz`'s `exit` on what that means for a
     /// pending `print`.
     ///
     /// Only the low 8 bits of `code` survive on Unix (the shell sees `code &
@@ -275,7 +275,7 @@ fn join_reader(handle: Reader) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())
 }
 
-/// A piped stream's descriptor, given up by the child. The Prepoly side owns
+/// A piped stream's descriptor, given up by the child. The Brass side owns
 /// it from here (it adopts it as a `File`, whose `close` closes it).
 #[cfg(unix)]
 fn into_fd(stream: impl std::os::fd::IntoRawFd) -> i64 {
@@ -289,7 +289,7 @@ fn into_fd(stream: impl std::os::windows::io::IntoRawHandle) -> i64 {
 
 struct ProcessLib;
 
-impl PrepolyLib for ProcessLib {
+impl BrassLib for ProcessLib {
     fn entry(reg: &mut Registry) {
         reg.export(decl!(process_spawn));
         reg.export(decl!(process_exit));
@@ -300,4 +300,4 @@ impl PrepolyLib for ProcessLib {
     }
 }
 
-prepoly_lib!(ProcessLib);
+brass_lib!(ProcessLib);

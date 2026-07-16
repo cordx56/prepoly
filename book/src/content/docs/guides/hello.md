@@ -1,20 +1,20 @@
 ---
 title: "Hello, world!"
-description: "Your first prepoly program: printing, running, and checking."
+description: "Your first Brass program: printing, running, and checking."
 ---
 
-Let's write your first prepoly program!
+Let's write your first Brass program!
 
-Write the following program into a `hello.pp` file.
+Write the following program into a `hello.cz` file.
 
-```prepoly
+```brass
 println("Hello, world!")
 ```
 
 Then, execute the program:
 
 ```bash
-prepoly hello.pp
+brass hello.cz
 ```
 
 The output is as follows:
@@ -23,11 +23,11 @@ The output is as follows:
 Hello, world!
 ```
 
-A prepoly source file is a script: top-level statements run from top to bottom.
+A Brass source file is a script: top-level statements run from top to bottom.
 You can also define a `main` function, which is called after the top-level
 statements have run:
 
-```prepoly
+```brass
 fun main() {
     println("Hello, world!")
 }
@@ -38,35 +38,35 @@ The execution result is the same as the previous one.
 ## Checking without running
 
 Every function is fully type-checked before it runs. To type-check a program
-without executing it, use `prepoly check`:
+without executing it, use `brass check`:
 
 ```bash
-prepoly check hello.pp
+brass check hello.cz
 ```
 
 It prints nothing when the program is well-typed, and exits 0; otherwise it
 prints the type errors and exits non-zero.
-Running `prepoly` with no arguments starts an interactive REPL.
+Running `brass` with no arguments starts an interactive REPL.
 
 ## Running as a script
 
 `#` starts a line comment, so a source file may begin with a **shebang** line.
-That lets you run a prepoly file directly, like a shell script:
+That lets you run a Brass file directly, like a shell script:
 
-```prepoly
-#!/usr/bin/env prepoly
+```brass
+#!/usr/bin/env brass
 println("Hello from a script!")
 ```
 
 Mark the file executable once, then run it by name:
 
 ```bash
-chmod +x hello.pp
-./hello.pp
+chmod +x hello.cz
+./hello.cz
 ```
 
 The shebang line is ordinary comment syntax, so the same file still works with
-`prepoly hello.pp`, `prepoly check hello.pp`, and on systems that do not use
+`brass hello.cz`, `brass check hello.cz`, and on systems that do not use
 shebangs at all.
 
 ## GCD: Greatest Common Divisor
@@ -76,7 +76,7 @@ Next, let's write a practical example.
 We can write a `gcd` function, which calculates the greatest common divisor,
 as follows:
 
-```prepoly
+```brass
 fun gcd(a, b) {
     if b == 0 {
         return a
@@ -99,7 +99,7 @@ are inferred. The program is still statically typed — passing a string to
 We can use `const` to declare an immutable variable and `let` to declare a
 mutable variable.
 
-```prepoly
+```brass
 const pi = 3.14159   // reassigning is a compile error
 let count = 0
 count += 1
@@ -107,7 +107,7 @@ count += 1
 
 The following program calculates the gcd of all elements in an array:
 
-```prepoly
+```brass
 fun gcd(a, b) {
     if b == 0 {
         return a

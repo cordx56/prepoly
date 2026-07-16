@@ -1,4 +1,4 @@
-//! Browser-side bridge to the Prepoly LSP server (`ppls.wasm`).
+//! Browser-side bridge to the Brass LSP server (`czls.wasm`).
 //!
 //! The server is an ordinary stdio LSP process: it reads `Content-Length`
 //! framed JSON-RPC from stdin and writes framed replies to stdout. A browser
@@ -20,12 +20,12 @@ import {
 
 /// The single in-memory document the playground edits. Feature requests address
 /// it by this URI, and `did_open` registers it under the same key server-side.
-export const DOC_URI = "file:///main.pp";
+export const DOC_URI = "file:///main.cz";
 
 /// Semantic-token legend, mirroring the server's `TOKEN_TYPES`/`TOKEN_MODIFIERS`
 /// order exactly so the delta-encoded `tokenType`/`tokenModifiers` indices the
 /// server emits resolve to the right names in Monaco. Keep in sync with
-/// `crates/prepoly_language_server/src/features/semantic_tokens.rs`.
+/// `crates/brass_language_server/src/features/semantic_tokens.rs`.
 export const SEMANTIC_LEGEND = {
   tokenTypes: [
     "namespace",
@@ -156,10 +156,10 @@ function parseMessages(bytes: Uint8Array): JsonRpcMessage[] {
   return messages;
 }
 
-/// A query against the Prepoly LSP server: one fresh server run, returning the
+/// A query against the Brass LSP server: one fresh server run, returning the
 /// reply to the request with id 1 plus any notifications (e.g. published
 /// diagnostics) the run emitted.
-export class PrepolyLsp {
+export class BrassLsp {
   private readonly module: WebAssembly.Module;
 
   constructor(module: WebAssembly.Module) {
@@ -188,7 +188,7 @@ export class PrepolyLsp {
         params: {
           textDocument: {
             uri: DOC_URI,
-            languageId: "prepoly",
+            languageId: "brass",
             version: 1,
             text,
           },
@@ -206,7 +206,7 @@ export class PrepolyLsp {
       ConsoleStdout.lineBuffered(() => {}), // fd 2: server tracing, discarded
       new PreopenDirectory(".", new Map()), // cwd, for best-effort import paths
     ];
-    const wasi = new WASI(["ppls"], [], fds);
+    const wasi = new WASI(["czls"], [], fds);
     const inst = await WebAssembly.instantiate(this.module, {
       wasi_snapshot_preview1: wasi.wasiImport,
     });
@@ -220,7 +220,7 @@ export class PrepolyLsp {
       );
     } catch (err) {
       if (!(err instanceof WASIProcExit)) {
-        console.error("ppls crashed", err);
+        console.error("czls crashed", err);
       }
     }
     return parseMessages(stdout.data);
@@ -247,7 +247,7 @@ export class PrepolyLsp {
         params: { textDocument: { uri: DOC_URI } },
       },
     ]);
-    const report = PrepolyLsp.reply(messages, 1)?.result as {
+    const report = BrassLsp.reply(messages, 1)?.result as {
       items?: Diagnostic[];
     } | null;
     return report?.items ?? [];
@@ -262,7 +262,7 @@ export class PrepolyLsp {
         params: { textDocument: { uri: DOC_URI }, position },
       },
     ]);
-    return (PrepolyLsp.reply(messages, 1)?.result as Hover | null) ?? null;
+    return (BrassLsp.reply(messages, 1)?.result as Hover | null) ?? null;
   }
 
   async definition(text: string, position: Position): Promise<Location | null> {
@@ -274,7 +274,7 @@ export class PrepolyLsp {
         params: { textDocument: { uri: DOC_URI }, position },
       },
     ]);
-    const result = PrepolyLsp.reply(messages, 1)?.result as
+    const result = BrassLsp.reply(messages, 1)?.result as
       Location | Location[] | null;
     if (!result) return null;
     return Array.isArray(result) ? (result[0] ?? null) : result;
@@ -295,7 +295,7 @@ export class PrepolyLsp {
         params: { textDocument: { uri: DOC_URI }, position },
       },
     ]);
-    const result = PrepolyLsp.reply(messages, 1)?.result as
+    const result = BrassLsp.reply(messages, 1)?.result as
       CompletionItem[] | { items?: CompletionItem[] } | null;
     if (!result) return [];
     return Array.isArray(result) ? result : (result.items ?? []);
@@ -313,7 +313,7 @@ export class PrepolyLsp {
       },
     ]);
     return (
-      (PrepolyLsp.reply(messages, 1)?.result as { data?: number[] } | null)
+      (BrassLsp.reply(messages, 1)?.result as { data?: number[] } | null)
         ?.data ?? []
     );
   }

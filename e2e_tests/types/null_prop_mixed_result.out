@@ -2,7 +2,7 @@ ok 1
 err Error {
     value: "a",
     location: Location {
-        file: "e2e_tests/types/null_prop_mixed_result.pp",
+        file: "e2e_tests/types/null_prop_mixed_result.cz",
         line: 9,
         col: 9,
     },

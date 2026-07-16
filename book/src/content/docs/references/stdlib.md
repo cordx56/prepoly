@@ -12,7 +12,7 @@ The standard library has two layers:
   (`std.collections`): imported explicitly, e.g.
   `import std.collections.{ HashMap }`, and loaded on demand.
 
-Most of the library is written in prepoly itself, on top of a small set of
+Most of the library is written in Brass itself, on top of a small set of
 runtime primitives. Identifiers beginning with `_` (e.g. `_string_bytes`,
 `_panic`) are those internals — do not call them directly.
 
@@ -152,20 +152,20 @@ generic message.
 
 ## `process` (a library, not `std`)
 
-```prepoly norun
+```brass norun
 import process.{ Command, Stdio }
 ```
 
 Spawn and control child processes. Unlike the modules above this is not part
 of `std`: its native half is a Rust plugin (a `cdylib` built against the
-`prepoly_plugin` crate) rather than a runtime builtin, so it ships as a
+`brass_plugin` crate) rather than a runtime builtin, so it ships as a
 library under `libraries/`. A distributed toolchain finds `libraries/`
 beside its binary automatically; when running from a repo checkout, build
-the plugin once with `libraries/build.sh` and point `PREPOLY_INCLUDE` at
+the plugin once with `libraries/build.sh` and point `BRASS_INCLUDE` at
 that directory (one entry serves every library that lives there):
 
 ```
-PREPOLY_INCLUDE=/path/to/prepoly/libraries
+BRASS_INCLUDE=/path/to/brass/libraries
 ```
 
 `Command` is a builder — each method mutates the command and returns it, so
@@ -204,7 +204,7 @@ overrides one entry of it) rather than replacing it; setting the same name
 twice keeps the last value. There is no way to unset an inherited variable or
 to start from an empty environment.
 
-```prepoly norun
+```brass norun
 const child = Command.new("sh")
     .args(["-c", "echo $GREETING"])
     .env("GREETING", "hello")
@@ -217,7 +217,7 @@ than the OS buffers (about 64KiB on Linux) blocks on the full pipe while
 `wait` blocks on the child. Read the piped streams before waiting, or use
 `output`, which reads them while the child runs and cannot deadlock:
 
-```prepoly norun
+```brass norun
 import process.{ Command, Stdio }
 
 let child = Command.new("git")
@@ -241,7 +241,7 @@ and the fs plugin executes natively under the interpreter too.
 
 ## `path` (a library, not `std`)
 
-```prepoly norun
+```brass norun
 import path.{ Path }
 ```
 
@@ -250,7 +250,7 @@ operating system what exists needs native code, so its other half is a plugin
 built by `libraries/build.sh`.
 
 ```
-PREPOLY_INCLUDE=/path/to/prepoly/libraries
+BRASS_INCLUDE=/path/to/brass/libraries
 ```
 
 A `Path` is a sequence of components, absolute exactly when its first component
@@ -292,7 +292,7 @@ private `_PATH` constant holding its absolute source path, so the path of the
 file you are writing is `Path.parse(_PATH)` — and an imported module reads its
 own, not yours.
 
-```prepoly norun
+```brass norun
 import path.{ Path }
 
 const here = Path.parse(_PATH).parent()
@@ -308,13 +308,13 @@ for entry in here.join("assets").entries()! {
 
 ## `fs` (a library, not `std`)
 
-```prepoly norun
+```brass norun
 import fs.{ File, read_file, write_file, create_dir, remove_dir }
 ```
 
 File handles, byte I/O, and directories. Like the other libraries this is a
 plugin under `libraries/`, with the same setup — automatic for a distributed
-toolchain, `libraries/build.sh` + `PREPOLY_INCLUDE` from a repo checkout.
+toolchain, `libraries/build.sh` + `BRASS_INCLUDE` from a repo checkout.
 
 | Function / method           | Signature                   | Behavior                                          |
 | --------------------------- | --------------------------- | -------------------------------------------------- |
@@ -387,14 +387,14 @@ filesystem, so the examples here are not runnable in it.
 
 ## `env` (a library, not `std`)
 
-```prepoly norun
+```brass norun
 import env.{ args, var, vars, current_dir }
 ```
 
 The process environment: command-line arguments, environment variables, and
 the working directory. A plugin under `libraries/`, with the same setup as
 the others — automatic for a distributed toolchain, `libraries/build.sh` +
-`PREPOLY_INCLUDE` from a repo checkout. Not runnable in the playground.
+`BRASS_INCLUDE` from a repo checkout. Not runnable in the playground.
 
 | Function        | Signature          | Behavior                                          |
 | --------------- | ------------------ | ------------------------------------------------- |
@@ -407,30 +407,30 @@ Everything after the program file on the command line belongs to the
 program, verbatim — flags included, no separator needed:
 
 ```sh
-prepoly main.pp --verbose input.txt
+brass main.cz --verbose input.txt
 ```
 
-gives `args() == ["main.pp", "--verbose", "input.txt"]` — the program file
+gives `args() == ["main.cz", "--verbose", "input.txt"]` — the program file
 as written, then the arguments (index `0` is the program, as in C's `argv`).
-The same holds for `prepoly repl main.pp ...`. In an interactive REPL
+The same holds for `brass repl main.cz ...`. In an interactive REPL
 session, or under an embedder that passes no arguments, `args()` is empty.
 
 ## `hash` (a library, not `std`)
 
-```prepoly norun
+```brass norun
 import hash.{ sha256, hmac_sha256, hex, equal, Hasher }
 ```
 
 Message digests (MD5, SHA-1, SHA-2) and HMAC. A plugin under `libraries/`
 wrapping the RustCrypto implementations — these algorithms are built from
-wrapping 32/64-bit arithmetic, which prepoly does not have, so a prepoly
+wrapping 32/64-bit arithmetic, which Brass does not have, so a Brass
 implementation would be a hand-masked emulation whose failure mode is a
 silently wrong digest.
 
 A digest is a `uint8[]`: the algorithm's raw bytes. Hash text by its UTF-8
 bytes with the prelude's `to_bytes`, and render the result with `hex`:
 
-```prepoly norun
+```brass norun
 println(hex(sha256(to_bytes("abc"))))
 // ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
 ```
@@ -451,7 +451,7 @@ stream), `Hasher` is the incremental form. `finalize` **consumes** the hasher
 — a digest cannot be resumed once taken, so a second call is an error rather
 than a meaningless second answer:
 
-```prepoly norun
+```brass norun
 let h = Hasher.sha256()!      // also .md5() .sha1() .sha224() .sha384() .sha512()
 h.update(chunk)!
 h.update(next)!
@@ -471,7 +471,7 @@ offer, so that a fast hash cannot be mistaken for one.
 
 ## `regex` (a library, not `std`)
 
-```prepoly norun
+```brass norun
 import regex.{ Regex, escape }
 ```
 
@@ -487,7 +487,7 @@ alternation, anchors (`^`, `$`, `\b`), groups (`(..)`, `(?:..)`,
 
 ### Writing a pattern
 
-A prepoly string literal is **not raw**: it interprets `\` and it interpolates
+A Brass string literal is **not raw**: it interprets `\` and it interpolates
 `{expr}`. A pattern therefore needs two escapes, and the second one bites
 silently:
 
@@ -501,7 +501,7 @@ silently:
 In a replacement string, prefer `$name` and `$1` over the braced `${name}`
 form for the same reason.
 
-```prepoly norun
+```brass norun
 const date = Regex.new("(?<year>\\d\{4})-(\\d\{2})-(\\d\{2})")!
 if let m = date.find("due 2026-07-13, ok") {
     println(m.text)                                   // 2026-07-13
@@ -541,18 +541,18 @@ more than matching.
 
 ## `semver` (a library, not `std`)
 
-```prepoly norun
+```brass norun
 import semver.{ Version, sort }
 ```
 
 [Semantic Versioning 2.0.0](https://semver.org): parse a version, render it
-back, and order two of them. Pure prepoly on top of `regex` — it has no native
+back, and order two of them. Pure Brass on top of `regex` — it has no native
 half of its own — and it parses with the **official pattern from semver.org
 verbatim**, so what it accepts is exactly what the spec defines: no leading
 zeros, an optional dot-separated pre-release, optional build metadata, and
 nothing else in the string (`v1.0.0` and `1.0` are rejected).
 
-```prepoly norun
+```brass norun
 const v = Version.parse("1.4.2-rc.1+build.5")!
 println("{v.major}.{v.minor}.{v.patch}")        // 1.4.2
 println(v.prerelease)                           // rc.1  (null when absent)
@@ -584,7 +584,7 @@ compare `to_string()` if textual identity is what you want.
 
 ## `net` (a library, not `std`)
 
-```prepoly norun
+```brass norun
 import net.{ Tcp, TcpListener, Udp, TlsStream }
 ```
 
@@ -592,7 +592,7 @@ TCP and UDP sockets plus TLS client connections. Like `process` and `path`
 this is a library: talking to the operating system's sockets needs native
 code, which arrives as a plugin under `libraries/`, and the setup is the
 same — automatic for a distributed toolchain, `libraries/build.sh` +
-`PREPOLY_INCLUDE` from a repo checkout. Networking does not run in the
+`BRASS_INCLUDE` from a repo checkout. Networking does not run in the
 playground.
 
 Under the hood a plain socket is a `File` (an OS file descriptor) held
@@ -634,7 +634,7 @@ cannot `read`.
 its sender's address. The prelude helpers `to_bytes(s) -> uint8[]` and
 `to_text(bytes) -> string!` convert between strings and socket bytes.
 
-```prepoly norun
+```brass norun
 import net.{ Tcp, TcpListener }
 
 let listener = TcpListener.bind("127.0.0.1", 0)!
@@ -665,7 +665,7 @@ CAs, no server side yet). `TlsStream` mirrors `Tcp`, so code written against
 | `conn.write(data)`              | `(uint8[]) -> int64!`            | encrypt and send all of `data`                         |
 | `conn.close()`                  | `() -> void!`                    | sends the TLS close notification                       |
 
-```prepoly norun
+```brass norun
 import net.{ TlsStream }
 
 let conn = TlsStream.connect("example.com", 443)!
@@ -679,7 +679,7 @@ Back ends: everything here runs on either back end — sockets are `fs`
 
 ## `std.collections`
 
-```prepoly
+```brass
 import std.collections.{ HashMap }
 ```
 
@@ -707,17 +707,17 @@ arguments** — the key/value types are inferred from the first `set` or
 
 ## `data.json` (a library, not `std`)
 
-```prepoly norun
+```brass norun
 import data.json.{ JsonValue }
 ```
 
 A JSON value tree, parser, accessors, serializer, and a reflective decoder.
 The whole surface hangs off `JsonValue`, so the type is the only name to import.
-A pure-prepoly library (no plugin) under `libraries/`, with the same setup
-as the others — automatic for a distributed toolchain, `PREPOLY_INCLUDE`
+A pure-brass library (no plugin) under `libraries/`, with the same setup
+as the others — automatic for a distributed toolchain, `BRASS_INCLUDE`
 from a repo checkout.
 
-```prepoly norun
+```brass norun
 type JsonValue =
     | Null
     | Bool { value: bool }
@@ -744,7 +744,7 @@ not the source document's ordering (stable for a given input).
 
 Decoding a whole document into a typed structure combines `parse` and `into`:
 
-```prepoly norun
+```brass norun
 import data.json.{ JsonValue }
 
 type Address = { city: string, zip: int64 }

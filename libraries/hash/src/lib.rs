@@ -1,16 +1,16 @@
-//! Message digests and HMAC, as a native prepoly plugin.
+//! Message digests and HMAC, as a native Brass plugin.
 //!
-//! `libraries/hash.pp` owns the user-facing API (the typed one-shot functions,
+//! `libraries/hash.cz` owns the user-facing API (the typed one-shot functions,
 //! the `Hasher` handle, hex rendering, the constant-time compare) and calls in
 //! here for the digests themselves. They are RustCrypto implementations rather
-//! than prepoly code: every one of these algorithms is built from wrapping
-//! 32/64-bit arithmetic, which prepoly does not have (and which the JIT leaves
-//! undefined on overflow), so a prepoly implementation would be a hand-masked
+//! than Brass code: every one of these algorithms is built from wrapping
+//! 32/64-bit arithmetic, which Brass does not have (and which the JIT leaves
+//! undefined on overflow), so a Brass implementation would be a hand-masked
 //! emulation whose failure mode is a silently wrong digest.
 //!
 //! One function per algorithm, rather than one function taking an algorithm
 //! name: a digest cannot fail, and a name-keyed entry point would have to
-//! report an unknown name -- making every call fallible on the prepoly side for
+//! report an unknown name -- making every call fallible on the Brass side for
 //! an error the typed wrapper can never produce.
 //!
 //! Streaming state (a partially-fed hasher) is not a value the plugin ABI can
@@ -23,9 +23,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use brass_plugin::{BrassLib, Bytes, Registry, brass_lib, decl, export};
 use digest::{Digest, DynDigest};
 use hmac::{Hmac, KeyInit, Mac};
-use prepoly_plugin::{Bytes, PrepolyLib, Registry, decl, export, prepoly_lib};
 
 /// The digest of `data` under `D`.
 fn digest_of<D: Digest>(data: &[u8]) -> Bytes {
@@ -42,7 +42,7 @@ fn digest_of<D: Digest>(data: &[u8]) -> Bytes {
 /// HMAC is defined for a key of ANY length -- it hashes a key longer than the
 /// block size and zero-pads a shorter one -- so `new_from_slice` cannot fail
 /// here (pinned by `hmac_accepts_any_key_length`); the `expect` says so rather
-/// than propagating an error the prepoly side would have to handle. A plugin
+/// than propagating an error the Brass side would have to handle. A plugin
 /// panic is caught at the ABI boundary and surfaces as a call error, so even a
 /// wrong assumption here cannot corrupt the runtime.
 macro_rules! hmac_of {
@@ -154,7 +154,7 @@ export! {
 }
 
 /// Live streaming hashers by handle. Each hasher is owned by exactly one
-/// prepoly `Hasher` value, so the map lock is only ever held for one update --
+/// Brass `Hasher` value, so the map lock is only ever held for one update --
 /// there is no per-hasher lock as the TLS session table needs.
 #[allow(clippy::type_complexity)]
 fn table() -> &'static Mutex<HashMap<i64, Box<dyn DynDigest + Send>>> {
@@ -172,7 +172,7 @@ fn poisoned() -> String {
 
 struct HashLib;
 
-impl PrepolyLib for HashLib {
+impl BrassLib for HashLib {
     fn entry(reg: &mut Registry) {
         reg.export(decl!(hash_md5));
         reg.export(decl!(hash_sha1));
@@ -189,7 +189,7 @@ impl PrepolyLib for HashLib {
     }
 }
 
-prepoly_lib!(HashLib);
+brass_lib!(HashLib);
 
 #[cfg(test)]
 mod tests {

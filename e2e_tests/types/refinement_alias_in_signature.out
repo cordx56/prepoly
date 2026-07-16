@@ -4,7 +4,7 @@
 err: Error {
     value: "duplicate key 'a'",
     location: Location {
-        file: "e2e_tests/types/refinement_alias_in_signature.pp",
+        file: "e2e_tests/types/refinement_alias_in_signature.cz",
         line: 28,
         col: 16,
     },

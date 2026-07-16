@@ -5,10 +5,10 @@ description: "The compilation pipeline, the two back ends, and runtime behavior 
 
 ## The pipeline
 
-`prepoly program.pp` runs one pipeline: parse the entry file, load its imports
+`brass program.cz` runs one pipeline: parse the entry file, load its imports
 transitively (plus the embedded standard library), lower, and **type-check the
 whole program**. Only when no diagnostics remain is anything executed —
-diagnostics go to stderr and the process exits non-zero. `prepoly check`
+diagnostics go to stderr and the process exits non-zero. `brass check`
 stops after this stage; it prints nothing when the program is well-typed.
 
 Execution then instantiates every reachable function at the concrete types it
@@ -29,7 +29,7 @@ per function instance.
 |                        | JIT (default)          | Interpreter                                                     |
 | ---------------------- | ---------------------- | --------------------------------------------------------------- |
 | Engine                 | LLVM-based native code | tree-walking, pure Rust                                         |
-| Used by                | `prepoly file.pp`      | `prepoly repl`, wasm/playground, `--no-default-features` builds |
+| Used by                | `brass file.cz`      | `brass repl`, wasm/playground, `--no-default-features` builds |
 | Library plugins (fs, process, net, path) | yes  | yes (the plugins execute natively either way)                   |
 | Concurrency            | yes                    | refused at runtime                                              |
 | Runtime specialization | yes                    | refused at runtime                                              |
@@ -68,17 +68,17 @@ interpreter.
 
 ## Environment
 
-- `PREPOLY_LOG` — tracing filter for compiler logs (`info`, `debug`, module
+- `BRASS_LOG` — tracing filter for compiler logs (`info`, `debug`, module
   filters).
-- `PREPOLY_LOG_TYPE` — comma-separated named dumps (e.g. `mir`).
+- `BRASS_LOG_TYPE` — comma-separated named dumps (e.g. `mir`).
 
 ## Tooling summary
 
 ```bash
-prepoly program.pp         # check + run (JIT)
-prepoly check program.pp   # check only
-prepoly repl [program.pp]  # interpreter / interactive REPL
-ppls                       # LSP server (hover, diagnostics, completion,
+brass program.cz         # check + run (JIT)
+brass check program.cz   # check only
+brass repl [program.cz]  # interpreter / interactive REPL
+czls                       # LSP server (hover, diagnostics, completion,
                            # go-to-definition, semantic tokens)
 ```
 
@@ -88,4 +88,4 @@ ships in `editors/nvim/`.
 
 Start-up time is dominated by type checking; see
 [Performance & caching](/references/performance/) for the timing logs and the
-`.ppcache` analysis cache that eliminates it on unchanged programs.
+`.czcache` analysis cache that eliminates it on unchanged programs.

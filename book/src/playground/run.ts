@@ -1,6 +1,6 @@
-/// Run a prepoly program through the wasm interpreter. Shared by the
+/// Run a brass program through the wasm interpreter. Shared by the
 /// playground editor and the runnable code blocks in the docs: the program
-/// text becomes `main.pp` in a fresh WASI file system, and stdout/stderr lines
+/// text becomes `main.cz` in a fresh WASI file system, and stdout/stderr lines
 /// stream to the given callbacks.
 
 import {
@@ -17,7 +17,7 @@ import {
 let interpPromise: Promise<WebAssembly.Module> | undefined;
 
 export const loadInterpreter = () =>
-  (interpPromise ??= WebAssembly.compileStreaming(fetch("/prepoly.wasm")));
+  (interpPromise ??= WebAssembly.compileStreaming(fetch("/brass.wasm")));
 
 export const runProgram = async (
   program: string,
@@ -26,14 +26,14 @@ export const runProgram = async (
 ): Promise<void> => {
   const module = await loadInterpreter();
 
-  const args = ["prepoly", "main.pp"];
+  const args = ["brass", "main.cz"];
   const fds = [
     new OpenFile(new File([])),
     ConsoleStdout.lineBuffered(onStdout),
     ConsoleStdout.lineBuffered(onStderr),
     new PreopenDirectory(
       ".",
-      new Map([["main.pp", new File(new TextEncoder().encode(program))]]),
+      new Map([["main.cz", new File(new TextEncoder().encode(program))]]),
     ),
   ];
   const wasi = new WASI(args, [], fds);

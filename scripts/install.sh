@@ -1,10 +1,10 @@
 #!/bin/bash
 
-if [ -z "$PREPOLY_VERSION" ]; then
+if [ -z "$BRASS_VERSION" ]; then
     # release version
-    PREPOLY_VERSION="v0.1.0"
+    BRASS_VERSION="v0.1.0"
 fi
-PREPOLY_REPO_BASE_URL="https://github.com/cordx56/prepoly"
+BRASS_REPO_BASE_URL="https://github.com/cordx56/prepoly"
 
 # print host-tuple
 print_host_tuple() {
@@ -51,14 +51,14 @@ HOST_TUPLE="$(print_host_tuple)"
 #
 # main
 #
-dest="$HOME/.prepoly"
+dest="$HOME/.brass"
 mkdir -p "$dest"
-tar_file="prepoly-$HOST_TUPLE.tar.gz"
-if [ "$PREPOLY_VERSION" = "latest" ]; then
-    url="$PREPOLY_REPO_BASE_URL/releases/latest/download/$tar_file"
+tar_file="brass-$HOST_TUPLE.tar.gz"
+if [ "$BRASS_VERSION" = "latest" ]; then
+    url="$BRASS_REPO_BASE_URL/releases/latest/download/$tar_file"
 else
-    url="$PREPOLY_REPO_BASE_URL/releases/download/$PREPOLY_VERSION/$tar_file"
+    url="$BRASS_REPO_BASE_URL/releases/download/$BRASS_VERSION/$tar_file"
 fi
 curl -L "$url" | tar -xz -C "$dest"
 
-echo 'Add $HOME/.prepoly/bin to your PATH to complete the installation.'
+echo 'Add $HOME/.brass/bin to your PATH to complete the installation.'

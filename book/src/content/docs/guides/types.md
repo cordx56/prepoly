@@ -7,7 +7,7 @@ description: "Records, methods, sum types, interfaces, and structural subtyping 
 
 We can define new types with their fields as follows:
 
-```prepoly
+```brass
 type Account = {
     owner: string
     balance: int32
@@ -20,7 +20,7 @@ instance method (called as `value.method(...)`); one without is a static
 method (called as `Type.method(...)`). `Self` inside a body refers to the
 type.
 
-```prepoly
+```brass
 type Account = {
     owner: string
     balance: int32
@@ -61,7 +61,7 @@ omit its `-> Account` too.
 A field may omit its type annotation. Such a field accepts any value, and its
 type is inferred per construction site:
 
-```prepoly
+```brass
 type Student = {
     name: string
     id
@@ -77,7 +77,7 @@ println("{a.id} / {b.id}")   // 1001 / AL17001
 The same `type` keyword defines "OR" types (tagged unions). Variants are
 written with `|`, and each variant may carry fields — or none:
 
-```prepoly
+```brass
 type Shape =
     | Circle { radius: float64 }
     | Rectangle { width: float64, height: float64 }
@@ -88,7 +88,7 @@ Construct a variant as `Type.Variant { ... }` (a unit variant is just
 `Type.Variant`), and take values apart with `match` — see
 [Pattern matching](/guides/pattern-matching/):
 
-```prepoly
+```brass
 type Shape =
     | Circle { radius: float64 }
     | Rectangle { width: float64, height: float64 }
@@ -108,7 +108,7 @@ println(area(Shape.Circle { radius: 2.0 }))   // 12.56636
 A sum type may be recursive: a variant field can be the type itself. This
 expression tree evaluates `1 + 2 * 3`:
 
-```prepoly
+```brass
 type Expr =
     | Num { value: int32 }
     | BinOp { op: string, left: Expr, right: Expr }
@@ -147,7 +147,7 @@ no body) acts as an interface. Writing `type B: A = ...` requires `B` to
 provide every member of `A`, checked at compile time. No implementation is
 inherited:
 
-```prepoly
+```brass
 type Showable = {
     to_string(self) -> string
 }
@@ -166,7 +166,7 @@ Multiple interfaces are comma-separated: `type User: Showable, Comparable`.
 An interface may also require plain fields, and it works for sum types too —
 every variant must satisfy it:
 
-```prepoly
+```brass
 type Named = {
     name: string
 }
@@ -182,7 +182,7 @@ Separately from interfaces, a plain function with an unannotated parameter
 accepts _any_ value that structurally has the members it uses — no interface
 declaration needed:
 
-```prepoly
+```brass
 type ConsoleLogger = {
     prefix: string
 }
@@ -216,7 +216,7 @@ run_with(TaggedLogger { prefix: "APP", tag: "net" }, "task2")
 in-scope record type declares a method and the anonymous value satisfies that
 type's fields, the method is callable directly:
 
-```prepoly
+```brass
 type Person = {
     name: string
 }
@@ -239,7 +239,7 @@ You can also convert a value to a record type explicitly with `T.from(v)`,
 which yields `T?` — the record when `v` structurally has all of `T`'s fields,
 else `null`:
 
-```prepoly
+```brass
 type Person = {
     name: string
 }

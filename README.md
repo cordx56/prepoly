@@ -2,7 +2,7 @@
   <h1>
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="book/public/logo/dark.svg">
-      <img alt="prepoly" src="book/public/logo/light.svg" width="400">
+      <img alt="Brass" src="book/public/logo/light.svg" width="400">
     </picture>
   </h1>
   <p>
@@ -10,14 +10,15 @@
     with just-in-time compilation
   </p>
   <p>
-    <a href="https://prepoly.56.ax">Documentation &amp; Playground</a> |
+    <a href="https://brass-lang.cz">Documentation &amp; Playground</a> |
     <a href="https://prepoly.zulipchat.com/#narrow/channel/614491-announcement">Zulip community</a>
   </p>
 </div>
 
-prepoly is a statically type-checked, structurally typed scripting language with
-flexible type inference. The name contracts *pre-typed* and *polymorphic*:
-it runs like an interpreter, but every function is fully type-checked just before
+Brass is a statically type-checked, structurally typed scripting language with
+flexible type inference. Its `.cz` source extension is taken from *copper* and
+*zinc* -- the two metals that make up brass; it
+runs like an interpreter, but every function is fully type-checked just before
 it executes, and most types are inferred rather than written. A program is run by
 a **just-in-time compiler** for native speed, or by an **interpreter** for the
 REPL and WebAssembly.
@@ -53,14 +54,14 @@ curl -L https://raw.githubusercontent.com/cordx56/prepoly/refs/heads/main/script
 - **Tuples** `[T, U]`, anonymous structural records, string interpolation, and
   both explicit and automatic numeric conversion.
 - **A file-based module system** where each file is a module and a leading `_`
-  marks a private name, plus a small standard library written in prepoly itself.
+  marks a private name, plus a small standard library written in Brass itself.
 - **Experimental concurrency.** `spawn(f)`, `with(cown, f)`, and `sync()` are the
   primitives; the compiler infers ownership, never the programmer.
-- **Tooling:** an interactive REPL and an LSP server (`ppls`).
+- **Tooling:** an interactive REPL and an LSP server (`czls`).
 
 ## Learning the language
 
-Read the **[documentation](https://prepoly.56.ax)**: a step-by-step tutorial,
+Read the **[documentation](https://brass-lang.cz)**: a step-by-step tutorial,
 per-feature guides, language references, and a browser playground, built from
 [`book/`](book/). Every language feature also has a runnable example in
 [`examples/`](examples/), each checked by `cargo test`.
@@ -72,7 +73,7 @@ system LLVM, the `./x` wrapper downloads a prebuilt LLVM into `./llvm/` on first
 use and runs cargo with it on the path. Use `./x` in place of `cargo`:
 
 ```sh
-./x cargo build --release        # downloads LLVM on first run -> ./target/release/prepoly
+./x cargo build --release        # downloads LLVM on first run -> ./target/release/brass
 ./x cargo test --workspace
 ./x cargo clippy --workspace --all-targets
 ```
@@ -81,19 +82,19 @@ LLVM is needed only by the JIT. An interpreter-only build needs no LLVM and uses
 plain `cargo`:
 
 ```sh
-cargo build -p prepoly_driver --no-default-features # interpreter only, no LLVM
+cargo build -p brass_driver --no-default-features # interpreter only, no LLVM
 ```
 
-prepoly also builds for `wasm32-wasip1`, where it runs through the interpreter.
+Brass also builds for `wasm32-wasip1`, where it runs through the interpreter.
 
 ## Running programs
 
 ```sh
-prepoly       path/to/file.pp     # type-check and run (the LLVM JIT when available)
-prepoly check path/to/file.pp     # type-check only
-prepoly repl  path/to/file.pp     # run a file through the interpreter
-prepoly repl                      # interactive interpreter session
-prepoly                           # no arguments: same interactive session
+brass       path/to/file.cz     # type-check and run (the LLVM JIT when available)
+brass check path/to/file.cz     # type-check only
+brass repl  path/to/file.cz     # run a file through the interpreter
+brass repl                      # interactive interpreter session
+brass                           # no arguments: same interactive session
 ```
 
 A bare file argument is type-checked and then run on the JIT when it is built in,
@@ -111,7 +112,7 @@ knowing:
 - **The JIT and interpreter agree across the language's tested surface,** but a
   few features are native-only: concurrency (`spawn`/`sync`/`with`) and runtime
   type specialization are refused by the interpreter, so they need the JIT.
-  File I/O and the other native libraries run on both back ends (`prepoly repl`
+  File I/O and the other native libraries run on both back ends (`brass repl`
   included); only the browser playground, which cannot load plugins, lacks them.
 
 ## License

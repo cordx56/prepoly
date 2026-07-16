@@ -5,17 +5,17 @@ import starlight from "@astrojs/starlight";
 
 import tailwindcss from "@tailwindcss/vite";
 
-// Shiki has no built-in prepoly support; register the local TextMate grammar
-// so ```prepoly fences highlight.
-const prepolyGrammar = JSON.parse(
-  fs.readFileSync(new URL("./src/grammars/prepoly.tmLanguage.json", import.meta.url), "utf8"),
+// Shiki has no built-in Brass support; register the local TextMate grammar
+// so ```brass fences highlight.
+const brassGrammar = JSON.parse(
+  fs.readFileSync(new URL("./src/grammars/brass.tmLanguage.json", import.meta.url), "utf8"),
 );
 
 // https://astro.build/config
 export default defineConfig({
   integrations: [
     starlight({
-      title: "prepoly book",
+      title: "Brass book",
       favicon: "/icon.svg",
       head: [
         {
@@ -32,16 +32,16 @@ export default defineConfig({
       ],
       customCss: ["./src/styles/global.css"],
       components: {
-        // Adds the Run button to prepoly code blocks on every docs page.
+        // Adds the Run button to Brass code blocks on every docs page.
         Footer: "./src/components/Footer.astro",
       },
       expressiveCode: {
         shiki: {
-          langs: [prepolyGrammar],
+          langs: [brassGrammar],
         },
         plugins: [
           {
-            // ```prepoly norun — a valid-prepoly block that must not get a Run
+            // ```brass norun — a valid-brass block that must not get a Run
             // button (multi-file, native-only, or intentionally incomplete).
             // The flag is exposed to the client as a data attribute.
             name: "norun",

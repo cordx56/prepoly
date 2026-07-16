@@ -1,9 +1,9 @@
-# The regex library's native half: a prepoly plugin (cdylib) loaded by
-# `libraries/regex.pp`. Build and install it with `libraries/build.sh`, which
+# The regex library's native half: a brass plugin (cdylib) loaded by
+# `libraries/regex.cz`. Build and install it with `libraries/build.sh`, which
 # places the cdylib next to the wrapper as `libregex.<dll suffix>`.
 [package]
-name = "prepoly_lib_regex"
-description = "prepoly plugin: regular expression matching behind the Regex type"
+name = "brass_lib_regex"
+description = "brass plugin: regular expression matching behind the Regex type"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,7 +18,7 @@ path = "src/lib.rs"
 
 # Rust's `regex`: linear-time matching (no catastrophic backtracking, whatever
 # the pattern), so a regex over untrusted input cannot hang the program. The
-# price is no backreferences and no lookaround; see `libraries/regex.pp`.
+# price is no backreferences and no lookaround; see `libraries/regex.cz`.
 [dependencies]
-prepoly_plugin = { workspace = true }
+brass_plugin = { workspace = true }
 regex = "1"

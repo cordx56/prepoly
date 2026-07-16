@@ -1,5 +1,5 @@
-/// Make the docs' prepoly code blocks executable: every rendered
-/// ```prepoly fence gets a Run button that feeds the block's source to the
+/// Make the docs' Brass code blocks executable: every rendered
+/// ```brass fence gets a Run button that feeds the block's source to the
 /// wasm interpreter and prints stdout/stderr beneath the block. The code text
 /// comes from Expressive Code's copy button (`data-code`, newlines encoded as
 /// U+007F), falling back to the block's text content.
@@ -20,20 +20,20 @@ const attachRunButton = (block: HTMLElement) => {
   if (!figure) return;
 
   const controls = document.createElement("div");
-  controls.className = "pp-run";
+  controls.className = "brass-run";
 
   const button = document.createElement("button");
   button.type = "button";
-  button.className = "pp-run-button";
+  button.className = "brass-run-button";
   button.textContent = "▶ Run";
 
   const output = document.createElement("div");
-  output.className = "pp-run-output";
+  output.className = "brass-run-output";
   output.hidden = true;
   const stdout = document.createElement("pre");
-  stdout.className = "pp-run-stdout";
+  stdout.className = "brass-run-stdout";
   const stderr = document.createElement("pre");
-  stderr.className = "pp-run-stderr";
+  stderr.className = "brass-run-stderr";
   output.append(stdout, stderr);
 
   button.addEventListener("click", async () => {
@@ -75,7 +75,7 @@ export const attachRunButtons = () => {
     "div.expressive-code",
   )) {
     if (
-      block.querySelector('pre[data-language="prepoly"]') &&
+      block.querySelector('pre[data-language="brass"]') &&
       !block.querySelector("[data-norun]")
     ) {
       attachRunButton(block);

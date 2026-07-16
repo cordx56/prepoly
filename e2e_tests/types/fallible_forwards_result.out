@@ -2,7 +2,7 @@
 err: Error {
     value: "nope",
     location: Location {
-        file: "e2e_tests/types/fallible_forwards_result.pp",
+        file: "e2e_tests/types/fallible_forwards_result.cz",
         line: 14,
         col: 15,
     },

@@ -1,10 +1,10 @@
-//! File descriptors and byte I/O, as a native prepoly plugin.
+//! File descriptors and byte I/O, as a native Brass plugin.
 //!
-//! `libraries/fs.pp` builds the `File` surface on these primitives. A file
+//! `libraries/fs.cz` builds the `File` surface on these primitives. A file
 //! crosses the boundary as its raw descriptor (an `i64`); everything that is
 //! policy rather than I/O -- which descriptor a `File` holds, the double-close
 //! guard, size lookups (delegated to the path library, which stats by name) --
-//! lives on the prepoly side. The descriptor is borrowed without ownership for
+//! lives on the Brass side. The descriptor is borrowed without ownership for
 //! reads/writes/seeks (so an operation does not close it); `fd_close` takes
 //! ownership and closes it.
 //!
@@ -16,7 +16,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::mem::ManuallyDrop;
 use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 
-use prepoly_plugin::{Bytes, PrepolyLib, Registry, decl, export, prepoly_lib};
+use brass_plugin::{BrassLib, Bytes, Registry, brass_lib, decl, export};
 
 /// Reject a negative descriptor (a closed `File` stores -1) before it can
 /// hit `from_raw_fd`'s assertion; the caller sees an ordinary error Result.
@@ -60,7 +60,7 @@ fn copy_tree(source: &std::path::Path, target: &std::path::Path) -> std::io::Res
 
 /// Check the invariants both directory operations share, and answer the pair of
 /// paths to work with: `source` must be a directory, `target` must not exist at
-/// all (see `libraries/fs.pp` on why an existing target is refused rather than
+/// all (see `libraries/fs.cz` on why an existing target is refused rather than
 /// replaced), and `target` must not lie INSIDE `source` -- copying a tree into
 /// itself would never terminate.
 fn checked_dirs(source: &str, target: &str) -> Result<(), String> {
@@ -88,7 +88,7 @@ fn checked_dirs(source: &str, target: &str) -> Result<(), String> {
 
 export! {
     /// Open the file at `path` and give up its descriptor. Modes: `r` read,
-    /// `w` truncate+create write, `a` append+create. The prepoly side owns
+    /// `w` truncate+create write, `a` append+create. The Brass side owns
     /// the descriptor from here.
     fn fd_open(path: String, mode: String) -> Result<i64, String> {
         let mut opts = OpenOptions::new();
@@ -244,7 +244,7 @@ export! {
 
 struct FsLib;
 
-impl PrepolyLib for FsLib {
+impl BrassLib for FsLib {
     fn entry(reg: &mut Registry) {
         reg.export(decl!(fd_open));
         reg.export(decl!(fd_read));
@@ -261,4 +261,4 @@ impl PrepolyLib for FsLib {
     }
 }
 
-prepoly_lib!(FsLib);
+brass_lib!(FsLib);

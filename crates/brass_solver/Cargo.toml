@@ -1,0 +1,10 @@
+[package]
+name = "brass_solver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+brass_hir.workspace = true
+tracing.workspace = true

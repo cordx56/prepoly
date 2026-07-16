@@ -1,18 +1,18 @@
 ---
-title: "Installing the prepoly LSP server"
-description: "Build and install the prepoly LSP server."
+title: "Installing the Brass LSP server"
+description: "Build and install the Brass LSP server."
 ---
 
-prepoly provides an LSP server implementation.
+Brass provides an LSP server implementation.
 
-Run the following command to install `ppls`:
+Run the following command to install `czls`:
 
 ```bash
-./x cargo install --path crates/prepoly_language_server
+./x cargo install --path crates/brass_language_server
 ```
 
-For projects managed with [ppm](/guides/packages/), configure your editor to
-launch `ppm lsp` rather than `ppls` directly: it resolves the
+For projects managed with [czm](/guides/packages/), configure your editor to
+launch `czm lsp` rather than `czls` directly: it resolves the
 dependencies declared in `package.toml` before starting the server, and in a
 directory without a `package.toml` it starts the plain server, so the same
 configuration works everywhere.

@@ -1,6 +1,6 @@
-//! Regular expression matching, as a native prepoly plugin.
+//! Regular expression matching, as a native Brass plugin.
 //!
-//! `libraries/regex.pp` owns the user-facing API (the `Regex` type, `Match`,
+//! `libraries/regex.cz` owns the user-facing API (the `Regex` type, `Match`,
 //! `Group`) and calls in here for compilation and matching. The engine is
 //! Rust's `regex`: a finite-automaton matcher with a linear-time guarantee, so
 //! a pattern applied to untrusted input cannot blow up (the price is no
@@ -15,7 +15,7 @@
 //! grows; compile once, outside the loop, as with any regex engine.
 //!
 //! Matches cross the boundary as BYTE OFFSETS into the subject string, never as
-//! substrings: prepoly string offsets are UTF-8 byte offsets throughout, so the
+//! substrings: Brass string offsets are UTF-8 byte offsets throughout, so the
 //! wrapper slices the text itself and the offsets stay meaningful to a caller
 //! that wants them (`Match.start`/`end`). Offsets from this engine always fall
 //! on character boundaries.
@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use prepoly_plugin::{PrepolyLib, Registry, decl, export, prepoly_lib};
+use brass_plugin::{BrassLib, Registry, brass_lib, decl, export};
 use regex::Regex;
 
 /// The compiled regexes, by handle. Cloned out (an `Arc`) before matching, so
@@ -38,10 +38,10 @@ fn table() -> &'static Mutex<HashMap<i64, Arc<Regex>>> {
 /// The regex behind `handle`.
 ///
 /// A handle is only ever minted by `regex_compile` and never released, and the
-/// prepoly `Regex` type keeps its handle private -- so an unknown handle means
+/// Brass `Regex` type keeps its handle private -- so an unknown handle means
 /// the wrapper is broken, not that the user did anything. Panicking says that
 /// (the ABI catches it and reports the call as failed) instead of making every
-/// match fallible on the prepoly side for an error it cannot produce.
+/// match fallible on the Brass side for an error it cannot produce.
 fn regex(handle: i64) -> Arc<Regex> {
     table()
         .lock()
@@ -168,7 +168,7 @@ export! {
 
 struct RegexLib;
 
-impl PrepolyLib for RegexLib {
+impl BrassLib for RegexLib {
     fn entry(reg: &mut Registry) {
         reg.export(decl!(regex_compile));
         reg.export(decl!(regex_group_names));
@@ -181,7 +181,7 @@ impl PrepolyLib for RegexLib {
     }
 }
 
-prepoly_lib!(RegexLib);
+brass_lib!(RegexLib);
 
 #[cfg(test)]
 mod tests {

@@ -1,11 +1,11 @@
 ---
 title: "Performance: timing logs and the analysis cache"
-description: "Measuring where compile time goes, and how the .ppcache analysis cache works."
+description: "Measuring where compile time goes, and how the .czcache analysis cache works."
 ---
 
 ## Where start-up time goes
 
-Every prepoly run type-checks the whole program before executing anything (see
+Every Brass run type-checks the whole program before executing anything (see
 [Execution model](/references/execution/)). On a library-heavy program that
 check dominates start-up: parsing and HIR lowering are single-digit
 milliseconds, MIR lowering and monomorphization a few more, while type
@@ -18,8 +18,8 @@ exist to see that cost and to stop paying it repeatedly.
 The `perf` log type prints per-phase and per-item compile timings to stderr:
 
 ```bash
-PREPOLY_LOG='prepoly::perf=debug' prepoly check app.pp   # phase totals + slowest items
-PREPOLY_LOG_TYPE=perf prepoly check app.pp               # every item (TRACE)
+BRASS_LOG='brass::perf=debug' brass check app.cz   # phase totals + slowest items
+BRASS_LOG_TYPE=perf brass check app.cz               # every item (TRACE)
 ```
 
 At `debug`, each phase logs its total and its fifteen slowest items:
@@ -56,9 +56,9 @@ Per-function items (`typeck/fn-bodies`, `typeck/method-body`,
 slowest bodies are identifiable directly. Collection is skipped entirely when
 the target is disabled, so the instrumentation costs nothing in ordinary runs.
 
-## The context seed (`.ppctx`)
+## The context seed (`.czctx`)
 
-The `.ppcache` above only helps while NOTHING changed. The context seed
+The `.czcache` above only helps while NOTHING changed. The context seed
 handles the other case — the entry file changed, its dependencies did not —
 which is every ordinary edit-run cycle and every save in the editor.
 
@@ -71,13 +71,13 @@ its type schemes, inferred function and method returns, and globals. With the
 tables in hand, the entry-stage run skips every context body and costs roughly
 what checking the entry alone costs.
 
-- `prepoly` stores the tables as `ctx-<hash>.ppctx` under the user cache
-  directory (`$XDG_CACHE_HOME/prepoly` or `~/.cache/prepoly`) — per user, not
+- `brass` stores the tables as `ctx-<hash>.czctx` under the user cache
+  directory (`$XDG_CACHE_HOME/brass` or `~/.cache/brass`) — per user, not
   per project, because one context (say, the standard library plus `http`) is
   shared by every program that imports it.
-- `ppls` keeps them in memory for the session *and* shares the same on-disk
+- `czls` keeps them in memory for the session *and* shares the same on-disk
   store, so a save re-checks only the document: the mechanism is one crate
-  (`prepoly_cache` + the seed support in `prepoly_typeck`), used by both.
+  (`brass_cache` + the seed support in `brass_typeck`), used by both.
 - The key is the compiler tag plus the module names and content hashes of
   every context source — the entry's bytes are deliberately not part of it.
   A reflective (`-> infer!`) program's second pass gets its own entry, keyed
@@ -89,19 +89,19 @@ what checking the entry alone costs.
   storage symbols), falling back to the full pipeline.
 
 Measured on the `serv` HTTP-server project: an entry edit re-checks in ~20ms
-(was ~300ms), an editor save publishes in ~10ms (was ~530ms). On `ppm` (a
+(was ~300ms), an editor save publishes in ~10ms (was ~530ms). On `czm` (a
 reflective program): an entry edit re-checks in ~0.3s (was ~2.2s).
 
-## The analysis cache (`.ppcache`)
+## The analysis cache (`.czcache`)
 
 A clean run writes the front end's results next to the entry file —
-`app.pp` produces `app.ppcache` (an extension-less script such as `ppm`
-produces `ppm.ppcache`). The next run of the same entry reuses it and skips
+`app.cz` produces `app.czcache` (an extension-less script such as `czm`
+produces `czm.czcache`). The next run of the same entry reuses it and skips
 type checking entirely, going straight from a cheap re-lowering to MIR:
 
 ```text
-prepoly check app.pp     # cold: full pipeline, writes app.ppcache
-prepoly check app.pp     # warm: milliseconds
+brass check app.cz     # cold: full pipeline, writes app.czcache
+brass check app.cz     # warm: milliseconds
 ```
 
 ### What is cached
@@ -120,18 +120,18 @@ The cache stores what the checker computed, not what the cheap phases produce:
 
 ### When the cache is reused
 
-A `.ppcache` records every on-disk source file the build read — the entry
+A `.czcache` records every on-disk source file the build read — the entry
 file and each dependency, transitively. Each is identified by **contents**
 (length and SHA-1) and by an **origin-relative reference**, never by machine
 path or modification time:
 
 - a project file is recorded relative to the entry file's directory;
 - a library file relative to *some* include root (validation walks the current
-  roots — `PREPOLY_INCLUDE`, then the distribution's implicit
+  roots — `BRASS_INCLUDE`, then the distribution's implicit
   `<bin>/../libraries` — in resolution order, and judges the first candidate
   that exists, so a file that would shadow the recorded one is the one
   checked);
-- a package file relative to the named `PREPOLY_PACKAGES` root.
+- a package file relative to the named `BRASS_PACKAGES` root.
 
 On load, the cache is used only when the compiler tag matches (version, cache
 format, release channel and commit; a working-tree build additionally pins its
@@ -151,13 +151,13 @@ Only an analysis with **no diagnostics** is ever written, so a valid cache
 also implies the program is clean. Writes are best-effort (a read-only
 directory is ignored) and atomic (temporary file + rename).
 
-`PREPOLY_CACHE=off` disables both reading and writing.
+`BRASS_CACHE=off` disables both reading and writing.
 
 ### Distributed caches
 
 Because stamps are origin-relative and content-addressed, a cache written when
-a release is packed validates wherever the archive is unpacked: `ppm` ships
-with its `bin/ppm.ppcache`, whose stamps resolve through the installed
+a release is packed validates wherever the archive is unpacked: `czm` ships
+with its `bin/czm.czcache`, whose stamps resolve through the installed
 `libraries/` next to it, so the package manager starts warm from its first
 run. A released compiler is identified by channel and commit, so every install
 of the same release reproduces the packing machine's tag.
@@ -165,7 +165,7 @@ of the same release reproduces the packing machine's tag.
 ### Why the cache unit is the whole program
 
 Per-module caches were considered and measured, and the unit deliberately
-stays the entry program. Type inference in prepoly is whole-program: spans are
+stays the entry program. Type inference in Brass is whole-program: spans are
 offsets into one concatenated source map whose layout depends on the entry's
 import order, inference variables come from one shared counter, and a type's
 scheme links variables across every module that touches it — a module's
@@ -178,8 +178,8 @@ exactly as a per-module chain would.
 
 ### Shared with the language server
 
-`ppls` consults the same file: when a document's buffer matches the file on
-disk and a valid `.ppcache` exists, the full diagnostic pass is skipped — the
+`czls` consults the same file: when a document's buffer matches the file on
+disk and a valid `.czcache` exists, the full diagnostic pass is skipped — the
 cache is only written after an error-free check, so the document is known
 clean. The server never *writes* the cache, because its pipeline skips the
 driver-only rewrites (spawn auto-acquire, keyed specialization); what it
@@ -200,7 +200,7 @@ payload                          postcard-encoded body
 The payload is a [postcard](https://docs.rs/postcard/)-serialized structure
 (varint-packed serde, no field names, no schema): the resolution environment,
 the dependency stamps, the module ASTs, and the checker channels — see
-`crates/prepoly_cache` for the authoritative definition. Because postcard
+`crates/brass_cache` for the authoritative definition. Because postcard
 carries no schema, the header is the only compatibility gate: a tag mismatch
 discards the file, and `FORMAT_VERSION` is bumped whenever the payload layout
 changes. No cross-version compatibility is attempted; a stale cache is simply

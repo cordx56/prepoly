@@ -1,0 +1,11 @@
+[package]
+name = "brass_hir"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+brass_parser.workspace = true

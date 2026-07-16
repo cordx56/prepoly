@@ -1,8 +1,8 @@
-//! TCP/UDP sockets and TLS client connections, as a native Prepoly plugin.
+//! TCP/UDP sockets and TLS client connections, as a native Brass plugin.
 //!
-//! `libraries/net.pp` builds the `Tcp`/`TcpListener`/`Udp`/`TlsStream`
+//! `libraries/net.cz` builds the `Tcp`/`TcpListener`/`Udp`/`TlsStream`
 //! surface on these primitives. A plain socket crosses the boundary as its
-//! raw descriptor (an `i64`), which the Prepoly side adopts as a `File` --
+//! raw descriptor (an `i64`), which the Brass side adopts as a `File` --
 //! so connected sockets are read and written with the ordinary file methods,
 //! and only what byte I/O cannot express lives here: establishing sockets
 //! (connect/bind/listen/accept), datagram addressing, socket addresses, and
@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use prepoly_plugin::{Bytes, PrepolyLib, Registry, decl, export, prepoly_lib};
+use brass_plugin::{BrassLib, Bytes, Registry, brass_lib, decl, export};
 
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
@@ -57,7 +57,7 @@ fn borrow_socket<S: FromRawFd, R>(fd: i64, op: impl FnOnce(&S) -> R) -> R {
 export! {
     /// Open a TCP connection to `host`:`port` and give up its descriptor.
     /// `host` is an IP literal or a name (resolved through the system
-    /// resolver). The Prepoly side owns the descriptor from here.
+    /// resolver). The Brass side owns the descriptor from here.
     fn tcp_connect(host: String, port: i64) -> Result<i64, String> {
         let port = valid_port(port)?;
         match TcpStream::connect((host.as_str(), port)) {
@@ -111,7 +111,7 @@ export! {
     /// Receive one datagram of up to `max` bytes on UDP descriptor `fd`. The
     /// returned bytes are `[addr_len: u8][addr utf8][payload]` -- a
     /// length-prefixed sender address followed by the payload -- because one
-    /// call returns one value; `net.pp` splits it into a `Datagram` record.
+    /// call returns one value; `net.cz` splits it into a `Datagram` record.
     /// An "ip:port" rendering is always shorter than 256 bytes, so one
     /// length byte suffices.
     fn udp_recv_from(fd: i64, max: i64) -> Result<Bytes, String> {
@@ -263,7 +263,7 @@ fn client_config() -> &'static Arc<ClientConfig> {
 
 struct NetLib;
 
-impl PrepolyLib for NetLib {
+impl BrassLib for NetLib {
     fn entry(reg: &mut Registry) {
         reg.export(decl!(tcp_connect));
         reg.export(decl!(tcp_listen));
@@ -280,4 +280,4 @@ impl PrepolyLib for NetLib {
     }
 }
 
-prepoly_lib!(NetLib);
+brass_lib!(NetLib);

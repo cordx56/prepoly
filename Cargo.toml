@@ -1,30 +1,30 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/prepoly_utils",
-    "crates/prepoly_cache",
-    "crates/prepoly_typesys",
-    "crates/prepoly_parser",
-    "crates/prepoly_hir",
-    "crates/prepoly_mir",
-    "crates/prepoly_solver",
-    "crates/prepoly_resolve",
-    "crates/prepoly_typeck",
-    "crates/prepoly_runtime",
-    "crates/prepoly_jit_llvm",
-    "crates/prepoly_engine",
-    "crates/prepoly_repl",
-    "crates/prepoly_driver",
-    "crates/prepoly_metadata",
+    "crates/brass_utils",
+    "crates/brass_cache",
+    "crates/brass_typesys",
+    "crates/brass_parser",
+    "crates/brass_hir",
+    "crates/brass_mir",
+    "crates/brass_solver",
+    "crates/brass_resolve",
+    "crates/brass_typeck",
+    "crates/brass_runtime",
+    "crates/brass_jit_llvm",
+    "crates/brass_engine",
+    "crates/brass_repl",
+    "crates/brass_driver",
+    "crates/brass_metadata",
     "bootstrap",
-    "crates/prepoly_language_server",
-    "crates/prepoly_formatter",
-    "crates/prepoly_package_manager",
-    "crates/prepoly_plugin",
-    "crates/prepoly_plugin_host",
-    "crates/prepoly_plugin_testlib",
-    "crates/prepoly_plugin_faultylib",
-    "crates/prepoly_plugin_altlib",
+    "crates/brass_language_server",
+    "crates/brass_formatter",
+    "crates/brass_package_manager",
+    "crates/brass_plugin",
+    "crates/brass_plugin_host",
+    "crates/brass_plugin_testlib",
+    "crates/brass_plugin_faultylib",
+    "crates/brass_plugin_altlib",
     "libraries/process",
     "libraries/path",
     "libraries/net",
@@ -35,27 +35,27 @@ members = [
 ]
 # The default set includes the command-line driver. On native targets the driver
 # enables its `jit` feature by default, so a plain `cargo build` may need LLVM;
-# use `./x cargo ...` for that path, or build `prepoly_driver` with
+# use `./x cargo ...` for that path, or build `brass_driver` with
 # `--no-default-features` for the interpreter-only driver. Wasm builds do not pull
 # LLVM because the driver disables the JIT backend for wasm targets. `bootstrap`
 # remains outside the default set because it is only the LLVM-downloader / `./x`
 # runner and is built explicitly with `-p bootstrap`.
 default-members = [
-    "crates/prepoly_cache",
-    "crates/prepoly_utils",
-    "crates/prepoly_typesys",
-    "crates/prepoly_parser",
-    "crates/prepoly_hir",
-    "crates/prepoly_mir",
-    "crates/prepoly_solver",
-    "crates/prepoly_resolve",
-    "crates/prepoly_typeck",
-    "crates/prepoly_engine",
-    "crates/prepoly_repl",
-    "crates/prepoly_driver",
-    "crates/prepoly_plugin",
-    "crates/prepoly_plugin_host",
-    "crates/prepoly_metadata",
+    "crates/brass_cache",
+    "crates/brass_utils",
+    "crates/brass_typesys",
+    "crates/brass_parser",
+    "crates/brass_hir",
+    "crates/brass_mir",
+    "crates/brass_solver",
+    "crates/brass_resolve",
+    "crates/brass_typeck",
+    "crates/brass_engine",
+    "crates/brass_repl",
+    "crates/brass_driver",
+    "crates/brass_plugin",
+    "crates/brass_plugin_host",
+    "crates/brass_metadata",
 ]
 
 [workspace.package]
@@ -65,31 +65,31 @@ license = "MPL-2.0"
 authors = ["Yuki Okamoto <cord@x56.cx>"]
 
 [workspace.dependencies]
-prepoly_metadata = { path = "crates/prepoly_metadata" }
-prepoly_utils = { path = "crates/prepoly_utils" }
-prepoly_cache = { path = "crates/prepoly_cache" }
+brass_metadata = { path = "crates/brass_metadata" }
+brass_utils = { path = "crates/brass_utils" }
+brass_cache = { path = "crates/brass_cache" }
 serde = { version = "1", features = ["derive"] }
-prepoly_typesys = { path = "crates/prepoly_typesys" }
-prepoly_parser = { path = "crates/prepoly_parser" }
-prepoly_hir = { path = "crates/prepoly_hir" }
-prepoly_mir = { path = "crates/prepoly_mir" }
-prepoly_solver = { path = "crates/prepoly_solver" }
-prepoly_resolve = { path = "crates/prepoly_resolve" }
-prepoly_typeck = { path = "crates/prepoly_typeck" }
-prepoly_runtime = { path = "crates/prepoly_runtime" }
-prepoly_jit_llvm = { path = "crates/prepoly_jit_llvm" }
-prepoly_engine = { path = "crates/prepoly_engine" }
-prepoly_repl = { path = "crates/prepoly_repl" }
-prepoly_formatter = { path = "crates/prepoly_formatter" }
-prepoly_plugin = { path = "crates/prepoly_plugin" }
-prepoly_plugin_host = { path = "crates/prepoly_plugin_host" }
+brass_typesys = { path = "crates/brass_typesys" }
+brass_parser = { path = "crates/brass_parser" }
+brass_hir = { path = "crates/brass_hir" }
+brass_mir = { path = "crates/brass_mir" }
+brass_solver = { path = "crates/brass_solver" }
+brass_resolve = { path = "crates/brass_resolve" }
+brass_typeck = { path = "crates/brass_typeck" }
+brass_runtime = { path = "crates/brass_runtime" }
+brass_jit_llvm = { path = "crates/brass_jit_llvm" }
+brass_engine = { path = "crates/brass_engine" }
+brass_repl = { path = "crates/brass_repl" }
+brass_formatter = { path = "crates/brass_formatter" }
+brass_plugin = { path = "crates/brass_plugin" }
+brass_plugin_host = { path = "crates/brass_plugin_host" }
 
 # LLVM bindings. Native builds link the local LLVM 22.1.0 statically.
 inkwell = { version = "0.9", features = ["llvm22-1"] }
 llvm-sys = { version = "221", features = ["prefer-static"] }
 
 tracing = "0.1"
-# `env-filter` parses the `PREPOLY_LOG` directive the driver feeds it; the rest of
+# `env-filter` parses the `BRASS_LOG` directive the driver feeds it; the rest of
 # the default features (`fmt`, `ansi`) give the stderr formatter.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

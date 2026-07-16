@@ -1,0 +1,33 @@
+// Standard input/output, written in Brass on the standalone stdio
+// primitives (`_print_str`/`_println_str`/`_stdin_read`), so the prelude
+// needs no `File` value. Part of the implicit prelude.
+
+/**
+ * Write a value's text to standard output, without a trailing newline.
+ * Values are combined with string interpolation (`"{a} {b}"`), so a single
+ * argument is the idiomatic form.
+ */
+fun print(value) -> void {
+    _print_str(string.from(value))
+}
+
+/** Like `print`, followed by a newline. */
+fun println(value) -> void {
+    _println_str(string.from(value))
+}
+
+/** Read one line from standard input, without the trailing newline. */
+fun input() {
+    let buf = []
+    while true {
+        let byte = _stdin_read(1)!
+        if len(byte) == 0 {
+            break
+        }
+        if byte[0] == 10 {
+            break
+        }
+        buf.push(byte[0])
+    }
+    return _string_from_bytes(buf)!
+}

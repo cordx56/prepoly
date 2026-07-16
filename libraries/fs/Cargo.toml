@@ -1,8 +1,8 @@
-# The fs library's native half: a prepoly plugin (cdylib) loaded by
-# `libraries/fs.pp`. Build and install it with `libraries/build.sh`.
+# The fs library's native half: a brass plugin (cdylib) loaded by
+# `libraries/fs.cz`. Build and install it with `libraries/build.sh`.
 [package]
-name = "prepoly_lib_fs"
-description = "prepoly plugin: file descriptors and byte I/O"
+name = "brass_lib_fs"
+description = "brass plugin: file descriptors and byte I/O"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,4 +16,4 @@ crate-type = ["cdylib"]
 path = "src/lib.rs"
 
 [dependencies]
-prepoly_plugin = { workspace = true }
+brass_plugin = { workspace = true }

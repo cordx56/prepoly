@@ -1,1 +1,1 @@
-interpolation_error_location.pp:5:22: error: unknown name `undefined_var`
+interpolation_error_location.cz:5:22: error: unknown name `undefined_var`

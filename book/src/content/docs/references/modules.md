@@ -6,12 +6,12 @@ description: "Module resolution, imports, visibility, and execution order."
 ## Files are modules
 
 One file is one module; the directory layout is the module path.
-`geometry/vec.pp` is the module `geometry.vec`. There is no module
+`geometry/vec.cz` is the module `geometry.vec`. There is no module
 declaration inside a file.
 
 ## Imports
 
-```prepoly norun
+```brass norun
 import geometry.vec.{ Vec2, dot }       // named imports (braced list)
 import geometry.vec.{ dot as vdot }    // name import with rename
 import geometry.vec.Vec2               // one name, same as .{ Vec2 }
@@ -46,7 +46,7 @@ qualifier (`let vec = ...` makes a later `vec.x` a field access), and a
 qualifier that collides with a declared or imported name is rejected.
 
 Import paths resolve **relative to the importing file's directory**: inside
-`app/main.pp`, `import geometry.vec.{...}` refers to `app/geometry/vec.pp`.
+`app/main.cz`, `import geometry.vec.{...}` refers to `app/geometry/vec.cz`.
 Paths starting with `std` are global and refer to the embedded standard
 library instead of files on disk. Import cycles are detected and reported.
 
@@ -74,8 +74,8 @@ There is no other visibility control.
 
 Every module is loaded with a constant naming its own source file:
 
-```prepoly norun
-println(_PATH)          // /home/you/project/src/main.pp
+```brass norun
+println(_PATH)          // /home/you/project/src/main.cz
 ```
 
 The path is absolute, so it does not depend on where the program was started.

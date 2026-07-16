@@ -1,5 +1,0 @@
-// A module with a syntax error; also imported by error_in_imported_module.pp,
-// which must see this error at THIS file's position, not at its import.
-fun helper() -> int32 {
-    return )
-}

@@ -37,7 +37,7 @@
   opacity: 1;
 }
 
-/* The splash hero shows the wordmark in place of the "prepoly" text: the two
+/* The splash hero shows the wordmark in place of the "brass" text: the two
    logos are swapped by Starlight's theme utilities, and since the inactive one
    is `display: none` only the visible image's alt text is announced. */
 .hero h1 .hero-logo {

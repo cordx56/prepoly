@@ -1,0 +1,17 @@
+[package]
+name = "brass_jit_llvm"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tracing.workspace = true
+brass_parser.workspace = true
+brass_hir.workspace = true
+brass_mir.workspace = true
+brass_engine.workspace = true
+brass_runtime.workspace = true
+inkwell.workspace = true
+llvm-sys.workspace = true

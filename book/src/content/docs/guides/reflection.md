@@ -3,7 +3,7 @@ title: "Reflection"
 description: "Compile-time field iteration with fields(x) and type naming with typeof(x)."
 ---
 
-prepoly can walk a record's fields at _compile time_: no runtime type
+Brass can walk a record's fields at _compile time_: no runtime type
 information is involved, and everything stays fully type-checked.
 
 ## Walking fields
@@ -12,7 +12,7 @@ information is involved, and everything stays fully type-checked.
 loop. The loop variable is the field **name** (a string) — except in the
 indexing form `x[field]`, which projects the field's **value**:
 
-```prepoly
+```brass
 type Point = { x: int64, y: int64 }
 
 fun dump(p: Point) {
@@ -33,7 +33,7 @@ An annotated `let` may omit its initializer; the compiler then checks the
 binding is definitely assigned before use. Combined with a `fields` loop, this
 builds a record without naming its fields:
 
-```prepoly
+```brass
 type Point = { x: int64, y: int64 }
 
 fun doubled(p: Point) {
@@ -55,7 +55,7 @@ a field.
 `typeof(x)` names the static type of `x`. It is a string in value position, a
 type in type position, and a static receiver for method calls:
 
-```prepoly
+```brass
 let xs = [1, 2, 3]
 println(typeof(xs))            // int32[] — a growable array
 const ys = [1, 2, 3]
@@ -86,7 +86,7 @@ implements only its own `is_<type>` method (`is_string`, `is_int32`,
 And a declared method (`fun T.m`) reads as present exactly on its type, so
 `if v.m { v.m() }` dispatches on whether the receiver implements `m`:
 
-```prepoly
+```brass
 type Point = { x: int32, y: int32 }
 
 fun Point.norm2(self) -> int32 {

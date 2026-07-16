@@ -14,7 +14,7 @@ esac
 
 for dirpath in $(find libraries -type f | grep "Cargo.toml$" | xargs -L 1 dirname); do
     libname="$(basename "$dirpath")"
-    pkgname="prepoly_lib_$libname"
+    pkgname="brass_lib_$libname"
     cargo build -p "$pkgname" --profile="$profile"
 
     built="target/$profile/lib$libname.$suffix"

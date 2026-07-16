@@ -2,7 +2,7 @@
 err: Error {
     value: "bad id",
     location: Location {
-        file: "e2e_tests/types/static_method_prop_infers_fallible.pp",
+        file: "e2e_tests/types/static_method_prop_infers_fallible.cz",
         line: 10,
         col: 16,
     },

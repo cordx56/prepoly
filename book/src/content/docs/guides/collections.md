@@ -13,7 +13,7 @@ complete list with signatures is in the
 An array literal is `[1, 2, 3]`. Arrays index with `arr[i]`, grow with
 `push`, and know their `len`:
 
-```prepoly
+```brass
 let nums = [5, 3, 8, 1, 9, 2]
 println("len      = {nums.len()}")
 println("sorted   = {nums.sort()}")
@@ -27,7 +27,7 @@ println("slice 1..4 = {nums.slice(1, 4)}")
 
 Arrays also support in-place editing:
 
-```prepoly
+```brass
 let a = [1, 2, 3]
 a.insert(1, 10)      // [1, 10, 2, 3]
 let r = a.remove(0)  // r = 1, a = [10, 2, 3]
@@ -36,7 +36,7 @@ let last = a.pop()   // nullable: 3 here, null when the array is empty
 
 The helpers compose nicely into chains:
 
-```prepoly
+```brass
 let sum_of_squares = [1, 2, 3, 4, 5, 6]
     .filter((x) -> x % 2 == 0)
     .map((x) -> x * x)
@@ -49,14 +49,14 @@ println(sum_of_squares)   // 56
 Strings are UTF-8 and immutable; `+` concatenates. The prelude provides the
 usual utilities as methods:
 
-```prepoly
+```brass
 let csv = "alice,bob,carol"
 let names = csv.split(",")
 println("count  = {names.len()}")
 println("joined = {names.join(" | ")}")
 println("upper  = {"hello".to_upper()}")
 println("trimmed = '{"   spaced   ".trim()}'")
-println("starts  = {"prepoly".starts_with("pre")}")
+println("starts  = {"brass".starts_with("pre")}")
 println("replace = {"a-b-c".replace("-", "+")}")
 ```
 
@@ -64,7 +64,7 @@ println("replace = {"a-b-c".replace("-", "+")}")
 absent), and `s.chars()` splits into one-character strings — there is no
 separate character type:
 
-```prepoly
+```brass
 for c in "héllo".chars() {
     print(c)
     print(".")
@@ -82,7 +82,7 @@ on byte positions, and a multibyte character counts as several bytes.
 imported explicitly. `HashMap.new()` takes no arguments; the key and value
 types are inferred from the first insertion:
 
-```prepoly
+```brass
 import std.collections.{ HashMap }
 
 let ages = HashMap.new()

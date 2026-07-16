@@ -3,12 +3,12 @@ title: "Modules"
 description: "Splitting a program across files with imports and visibility."
 ---
 
-prepoly organizes code into modules: every file is a module, and directories
+Brass organizes code into modules: every file is a module, and directories
 form the module path. Let's split a small geometry library across files.
 
-First, write `geometry/vec.pp`:
+First, write `geometry/vec.cz`:
 
-```prepoly
+```brass
 type Vec2 = {
     x: float64
     y: float64
@@ -35,9 +35,9 @@ fun _helper() {
 }
 ```
 
-Then use it from `main.pp`, next to the `geometry` directory:
+Then use it from `main.cz`, next to the `geometry` directory:
 
-```prepoly norun
+```brass norun
 import geometry.vec.{ Vec2, dot }
 
 fun main() {
@@ -51,7 +51,7 @@ fun main() {
 ```
 
 ```bash
-prepoly main.pp
+brass main.cz
 ```
 
 ```
@@ -61,13 +61,13 @@ a . b = 11.0
 ```
 
 The import path follows the directory layout relative to the importing file:
-`geometry.vec` is `geometry/vec.pp`. The braced list names what to import.
+`geometry.vec` is `geometry/vec.cz`. The braced list names what to import.
 
 Two shorter forms cover the other common needs. A single name can skip the
 braces, and importing the module itself makes its exports available
 qualified by the path's last segment. `as` overrides the qualifier:
 
-```prepoly norun
+```brass norun
 import geometry.vec.dot     // one name, same as .{ dot }
 import geometry.vec         // whole module, used as vec.<name>
 import geometry.vec as g    // same, but used as g.<name>

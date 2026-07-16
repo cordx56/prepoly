@@ -3,14 +3,14 @@ title: "Control flow"
 description: "if as an expression, while, for over arrays and ranges, break and continue."
 ---
 
-prepoly has the usual control-flow constructs: `if`/`else`, `while`, `for`,
+Brass has the usual control-flow constructs: `if`/`else`, `while`, `for`,
 `break`, and `continue`. A distinctive point is that `if` (and `match`, covered
 in [Pattern matching](/guides/pattern-matching/)) are _expressions_ — they yield a
 value.
 
 ## `if` is an expression
 
-```prepoly
+```brass
 fun grade(score) {
     let result = if score >= 60 { "pass" } else { "fail" }
     return result
@@ -22,7 +22,7 @@ println(grade(31))   // fail
 
 `else if` chains work as you would expect:
 
-```prepoly
+```brass
 fun size_of(n) {
     if n < 10 {
         return "small"
@@ -38,7 +38,7 @@ fun size_of(n) {
 
 Here is the Collatz step counter — `while` runs as long as the condition holds:
 
-```prepoly
+```brass
 fun collatz_steps(n) {
     let count = 0
     let x = n
@@ -64,7 +64,7 @@ for n in [6, 7, 27] {
 builds the half-open integer range `lo, lo+1, ..., hi-1`, so counting loops
 look like this:
 
-```prepoly
+```brass
 let sum = 0
 for i in [1..11] {
     sum += i
@@ -76,7 +76,7 @@ println(sum)   // 55
 
 `continue` skips to the next iteration, `break` exits the loop:
 
-```prepoly
+```brass
 let sum = 0
 for n in [1, 2, 3, 4, 5, 6, 7, 8] {
     if n % 2 == 1 {

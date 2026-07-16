@@ -1,8 +1,8 @@
-# The net library's native half: a Prepoly plugin (cdylib) loaded by
-# `libraries/net.pp`. Build and install it with `libraries/build.sh`.
+# The net library's native half: a Brass plugin (cdylib) loaded by
+# `libraries/net.cz`. Build and install it with `libraries/build.sh`.
 [package]
-name = "prepoly_lib_net"
-description = "Prepoly plugin: TCP/UDP sockets and TLS client connections"
+name = "brass_lib_net"
+description = "Brass plugin: TCP/UDP sockets and TLS client connections"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,7 +16,7 @@ crate-type = ["cdylib"]
 path = "src/lib.rs"
 
 [dependencies]
-prepoly_plugin = { workspace = true }
+brass_plugin = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = [
     "ring",
     "std",

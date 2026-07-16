@@ -1,7 +1,7 @@
 no size: Error {
     value: "this file was not opened by path; its size is unknown",
     location: Location {
-        file: "libraries/fs.pp",
+        file: "libraries/fs.cz",
         line: 101,
         col: 9,
     },

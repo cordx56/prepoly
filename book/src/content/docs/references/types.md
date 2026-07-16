@@ -3,7 +3,7 @@ title: "Type system"
 description: "The type system in full: literals, conversions, parameter passing, structural typing, nullable, Result, and inference."
 ---
 
-prepoly is statically typed with flexible type inference. The whole program
+Brass is statically typed with flexible type inference. The whole program
 is checked before anything runs; annotations constrain, they are never
 required for safety.
 
@@ -338,7 +338,7 @@ does not hide errors in code that can run.
 ## Result
 
 `T!` is `Result<T, E>` over the `Result` declared in the prelude
-(std/prelude/error.pp) — an ordinary two-variant sum with `Ok { value }` and
+(std/prelude/error.cz) — an ordinary two-variant sum with `Ok { value }` and
 `Err { error }`, resolved by normal scoping at every sugar site, so a module
 may [shadow it](/references/syntax-sugar/#the-result-behind-fallibility). The
 error payload type `E` is inferred from the function's error sources (all
@@ -420,7 +420,7 @@ slot has no runtime storage: it never appears in the layout, in `fields()`, or
 in a construction literal. It only names a type another field is expressed
 over.
 
-```prepoly
+```brass
 type _Entry = {
     key
     value
@@ -438,7 +438,7 @@ type Map = {
 fields) of a record, yielding a concrete instance. Written as the right-hand
 side of an alias declaration it gives that instance a name:
 
-```prepoly norun
+```brass norun
 type StringInts = Map { key: string, value: int64 }
 ```
 

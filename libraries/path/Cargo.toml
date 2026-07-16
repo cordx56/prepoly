@@ -1,9 +1,9 @@
-# The path library's native half: a prepoly plugin (cdylib) loaded by
-# `libraries/path.pp`. Build and install it with `libraries/build.sh`, which
+# The path library's native half: a brass plugin (cdylib) loaded by
+# `libraries/path.cz`. Build and install it with `libraries/build.sh`, which
 # places the cdylib next to this manifest as `path.<dll suffix>`.
 [package]
-name = "prepoly_lib_path"
-description = "prepoly plugin: filesystem queries behind the Path type"
+name = "brass_lib_path"
+description = "brass plugin: filesystem queries behind the Path type"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,4 +17,4 @@ crate-type = ["cdylib"]
 path = "src/lib.rs"
 
 [dependencies]
-prepoly_plugin = { workspace = true }
+brass_plugin = { workspace = true }

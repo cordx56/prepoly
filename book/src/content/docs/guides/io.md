@@ -9,7 +9,7 @@ description: "Printing, reading input, and file I/O."
 a newline. Both take a single argument — combine values with string
 interpolation:
 
-```prepoly
+```brass
 let a = 6
 let b = 7
 println("{a} * {b} = {a * b}")   // 6 * 7 = 42
@@ -17,7 +17,7 @@ println("{a} * {b} = {a * b}")   // 6 * 7 = 42
 
 Any value prints, including records and arrays:
 
-```prepoly
+```brass
 type Point = { x: int32, y: int32 }
 println(Point { x: 1, y: 2 })
 ```
@@ -29,7 +29,7 @@ It returns `string!` (reading can fail), so unwrap it with `!` — at the top
 level a failure just ends the program with the error — or handle it with
 `match`:
 
-```prepoly
+```brass
 println("What's your name?")
 let name = input()!
 println("Hello, {name}!")
@@ -39,12 +39,12 @@ println("Hello, {name}!")
 
 Whole-file text I/O lives in the `fs` library, not in the implicit prelude.
 Import it first; from a repo checkout, build `libraries/build.sh` and set
-`PREPOLY_INCLUDE` to the `libraries/` directory as described in the
+`BRASS_INCLUDE` to the `libraries/` directory as described in the
 [standard library reference](/references/stdlib/#fs-a-library-not-std).
 `read_file(path)` and `write_file(path, content)` both return a Result. In a
 quick script, unwrap with `!` and let a failure stop the program:
 
-```prepoly norun
+```brass norun
 import fs.{ read_file, write_file }
 
 let path = "demo.txt"
@@ -57,7 +57,7 @@ for line in content.split("\n") {
 
 Where a failure should be handled instead, match on the Result:
 
-```prepoly norun
+```brass norun
 import fs.read_file
 
 match read_file("missing.txt") {
@@ -73,6 +73,6 @@ constructors. See the
 [standard library reference](/references/stdlib/#fs-a-library-not-std) for the
 signatures.
 
-Note: the native `prepoly` and `prepoly repl` can both use the plugin-backed
+Note: the native `brass` and `brass repl` can both use the plugin-backed
 libraries, but the browser playground cannot load plugins, so file I/O
 examples are not runnable there.

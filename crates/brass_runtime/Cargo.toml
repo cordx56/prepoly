@@ -1,0 +1,14 @@
+[package]
+name = "brass_runtime"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Native-plugin dispatch (`pp_plugin_call_*`). The host crate stubs itself on
+# wasm targets, so the dependency is unconditional.
+[dependencies]
+brass_plugin_host.workspace = true
+# The driver-published program argument vector `pp_argv` answers with.
+brass_utils.workspace = true

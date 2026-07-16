@@ -3,7 +3,7 @@ title: "Syntax sugar"
 description: "What the language constructs desugar to: the Result behind fallibility, error traces, the Default model behind methods, and sum subtyping."
 ---
 
-Several prepoly constructs are specified as **syntax sugar** over ordinary
+Several Brass constructs are specified as **syntax sugar** over ordinary
 prelude types. The specification is type-level: a program behaves as if the
 expansion had been written out, and a type error in the expansion is
 reported normally. The compiler is free to implement the constructs natively
@@ -14,9 +14,9 @@ the implied fields exist.
 
 ## The `Result` behind fallibility
 
-`Result` is an ordinary two-variant sum declared in `std/prelude/error.pp`:
+`Result` is an ordinary two-variant sum declared in `std/prelude/error.cz`:
 
-```prepoly
+```brass
 type Result =
     | Ok {
         value
@@ -41,7 +41,7 @@ Every fallibility construct is sugar over it:
 The name `Result` resolves through normal scoping at each sugar site, so a
 module may **shadow** it with its own declaration:
 
-```prepoly
+```brass
 type Result =
     | Ok {
         value
@@ -68,9 +68,9 @@ not usable as the other.
 
 ## Error traces
 
-`std/prelude/error.pp` defines the error value model:
+`std/prelude/error.cz` defines the error value model:
 
-```prepoly
+```brass
 type Location = { file: string, line: int32, col: int32 }
 type Frame = { message: string, location: Location }
 type Error = { value, location: Location, frames: Frame[] }
@@ -82,7 +82,7 @@ type Error = { value, location: Location, frames: Frame[] }
 success untouched. An unhandled `!` renders the trace through
 `Error.display`, newest context first:
 
-```prepoly
+```brass
 fun a() -> infer! {
     return error("error in a")
 }
@@ -95,8 +95,8 @@ b()!
 ```
 
 ```text
-[main.pp:6:12] unhandled error: error in b
-    [main.pp:2:12] unhandled error: error in a
+[main.cz:6:12] unhandled error: error in b
+    [main.cz:2:12] unhandled error: error in a
 ```
 
 Two mechanisms make this work:
@@ -122,9 +122,9 @@ what runs.
 
 ## Methods are `Default` fields
 
-`std/prelude/default.pp` declares the protocol type:
+`std/prelude/default.cz` declares the protocol type:
 
-```prepoly
+```brass
 type Default = {
     default() -> Self
 }
@@ -134,7 +134,7 @@ A type **satisfies** `Default` when it provides a `default()` method
 producing its own default value. A method declaration is, semantically, a
 field whose type satisfies `Default`:
 
-```prepoly
+```brass
 type T = { x }
 fun T.get(self) {
     return self.x
@@ -161,7 +161,7 @@ The model implies, and the implementation guarantees:
 - On a sum type, a method is present on every variant, which is also why a
   field shared by **all** variants of a sum may be read without a `match`:
 
-```prepoly
+```brass
 type Shape =
     | Circle { r: int32, label: string }
     | Square { side: int32, label: string }
@@ -190,7 +190,7 @@ A sum may declare another sum as its parent. It must cover **exactly** the
 parent's variant set, and each variant may only *widen* the parent's variant
 record (extra fields; annotated fields stay invariant):
 
-```prepoly
+```brass
 type MyResult: Result =
     | Ok {
         value

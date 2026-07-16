@@ -2,7 +2,7 @@ ok: 1 2
 err: Error {
     value: "missing field 'y'",
     location: Location {
-        file: "e2e_tests/reflection/into_decode_errors.pp",
+        file: "e2e_tests/reflection/into_decode_errors.cz",
         line: 13,
         col: 20,
     },

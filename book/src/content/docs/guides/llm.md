@@ -1,26 +1,26 @@
 ---
 title: "LLM agents"
-description: "A system prompt that teaches LLM agents to write valid prepoly."
+description: "A system prompt that teaches LLM agents to write valid Brass."
 ---
 
-prepoly is new enough that an LLM has not seen it during training, so an agent
+Brass is new enough that an LLM has not seen it during training, so an agent
 will otherwise write code in the dialect of whatever language the syntax most
 resembles. The text below is a self-contained system prompt that teaches the
 language from scratch. Drop it into your agent's project instructions (for
-example `AGENTS.md` or `CLAUDE.md`) so the agent writes valid prepoly —
-projects created with [`ppm new`/`ppm init`](/guides/packages/) already
+example `AGENTS.md` or `CLAUDE.md`) so the agent writes valid Brass —
+projects created with [`czm new`/`czm init`](/guides/packages/) already
 contain it as `AGENTS.md`, with `CLAUDE.md` symlinked to it.
 
 ````markdown
-# Writing prepoly
+# Writing Brass
 
-You are writing **prepoly**, a statically type-checked, structurally typed
+You are writing **Brass**, a statically type-checked, structurally typed
 scripting language with flexible (Hindley-Milner-style, but not textbook HM)
 type inference. It runs like a script — no build step — but every function is
-fully type-checked just before it runs. Source files use the `.pp` extension.
+fully type-checked just before it runs. Source files use the `.cz` extension.
 Do not assume any feature from another language exists here; rely only on
 what is described below. After writing code, type-check it with
-`prepoly check file.pp`.
+`brass check file.cz`.
 
 ## Mental model
 
@@ -36,7 +36,7 @@ what is described below. After writing code, type-check it with
 
 ## Lexical rules
 
-- Comments: `// line`, `# line` (so a leading `#!/usr/bin/env prepoly`
+- Comments: `// line`, `# line` (so a leading `#!/usr/bin/env brass`
   shebang is valid), and `/* block, which may nest */`. A `/** doc comment */`
   written directly above a `fun` or `type` declaration documents it (shown by
   editor tooling); use one per public declaration.
@@ -367,7 +367,7 @@ annotation).
 ## Modules
 
 One file is one module; the directory layout is the module path
-(`geometry/vec.pp` is the module `geometry.vec`). Import selected names with
+(`geometry/vec.cz` is the module `geometry.vec`). Import selected names with
 `import path.{ A, B }`, one name with `import path.Name`, or the whole module
 with `import path` -- its exports are then used qualified by the path's last
 segment (`vec.dot(a, b)`, `vec.Vec2`, `vec.Shape.Circle { r: 1.0 }`).
@@ -474,14 +474,14 @@ the first `set` (`let m = HashMap.new(); m.set("a", 1)` is a
 The toolchain ships a `libraries/` directory. A distributed install finds it
 automatically beside its binary; from a repo checkout, build the native
 plugin halves once with `libraries/build.sh` and set
-`PREPOLY_INCLUDE=<repo>/libraries`. Every library below runs on BOTH back
-ends (the JIT and `prepoly repl`) -- only `spawn` concurrency is JIT-only.
+`BRASS_INCLUDE=<repo>/libraries`. Every library below runs on BOTH back
+ends (the JIT and `brass repl`) -- only `spawn` concurrency is JIT-only.
 
 ### env -- `import env.{ args, var, vars, current_dir }`
 
 - `args() -> string[]` -- the program's argument vector: the program file as
   written on the command line, then everything after it, verbatim
-  (`prepoly main.pp --verbose x` -> `["main.pp", "--verbose", "x"]`; the
+  (`brass main.cz --verbose x` -> `["main.cz", "--verbose", "x"]`; the
   driver consumes nothing after the file). Empty in an interactive REPL.
 - `var(name) -> string!` -- the variable's value; UNSET is an error, not `""`
 - `vars()` -- every environment variable, as a `string -> string` HashMap
@@ -505,7 +505,7 @@ own absolute source path, so "the file I am in" is `Path.parse(_PATH)`.
   `p.extension() -> string?` (text after the LAST dot; `.gitignore` has
   none); `p.stem() -> string`; `p.with_extension(ext) -> Path` (`ext`
   without the dot; `""` removes it)
-- Combine: `p.join(x) -> Path` -- `x` may be a string (`"src/main.pp"`), a
+- Combine: `p.join(x) -> Path` -- `x` may be a string (`"src/main.cz"`), a
   `string[]`, or another `Path`; an ABSOLUTE `x` replaces `p` entirely
 - Resolve: `p.normalize()` (fold `.`/`..` textually);
   `p.to_absolute() -> Path!` (against the cwd; no symlink resolution);
@@ -603,7 +603,7 @@ NO lookaround (`(?=..)`, `(?<=..)`) -- a pattern using one fails to compile.
 Everything else is standard (classes, `{m,n}`, alternation, `^`/`$`/`\b`,
 `(?:..)`, `(?<name>..)`, inline flags `(?i)(?m)(?s)(?x)`).
 
-WRITING A PATTERN -- a prepoly string is NOT raw and it interpolates `{expr}`:
+WRITING A PATTERN -- a Brass string is NOT raw and it interpolates `{expr}`:
 
 - double every backslash: `\\d`, `\\w`, `\\b`
 - escape an opening brace: `"\\d\{4}"`. Writing `"\\d{4}"` SILENTLY compiles
@@ -709,7 +709,7 @@ connection close); chunked transfer coding is NOT decoded.
 
 ### JSON -- `import data.json.{ JsonValue }`
 
-Pure prepoly (no plugin).
+Pure Brass (no plugin).
 
 ```
 type JsonValue =

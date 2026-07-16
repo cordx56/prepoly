@@ -3,7 +3,7 @@ title: "Nullable and Result"
 description: "Nullable types, the Result type, error propagation, and fallible conversions."
 ---
 
-prepoly has no exceptions. "May be absent" is expressed with the nullable type
+Brass has no exceptions. "May be absent" is expressed with the nullable type
 `T?`, and "may fail" with the Result type `T!`.
 
 ## Nullable types
@@ -11,7 +11,7 @@ prepoly has no exceptions. "May be absent" is expressed with the nullable type
 `T?` means the value may be `null`. A nullable value must be _narrowed_ with an
 `if` guard before it can be used:
 
-```prepoly
+```brass
 // Returns the first even number, or null if there is none.
 fun first_even(nums) -> int32? {
     for n in nums {
@@ -45,7 +45,7 @@ function.
 Call `error(x)` to produce an error; returning a plain value where a `Result`
 is expected wraps it as `Ok` automatically:
 
-```prepoly
+```brass
 fun parse_positive(s) {
     let n = int32.parse(s)!          // `!` returns early on a parse error
     if n < 0 {
@@ -81,7 +81,7 @@ module top level (and inside `main`), a failed `!` simply **stops the
 program**: the error is printed and the process exits non-zero. On success it
 unwraps in place, which makes short scripts read naturally:
 
-```prepoly
+```brass
 let n = int32.parse("123")!   // unwraps to 123 right here
 println(n + 1)
 ```
@@ -103,7 +103,7 @@ An error raised by `error(..)` remembers **where** it was raised, and
 When the failure finally goes unhandled, the whole story prints as a nested
 trace, newest step first:
 
-```prepoly
+```brass
 fun read_config() -> infer! {
     return error("missing key `port`")
 }
@@ -116,8 +116,8 @@ start_server()!
 ```
 
 ```text
-[main.pp:6:12] unhandled error: starting the server
-    [main.pp:2:12] unhandled error: missing key `port`
+[main.cz:6:12] unhandled error: starting the server
+    [main.cz:2:12] unhandled error: missing key `port`
 ```
 
 No plumbing is needed: `error` and `context` pick up their call site through
@@ -136,7 +136,7 @@ variants, and each variant may add fields. The `!` operator (and any other
 place a `Result` is expected) accepts it by rebuilding the value as a plain
 `Result`, dropping the extra fields:
 
-```prepoly
+```brass
 type Lookup: Result =
     | Ok {
         value: int32
@@ -178,7 +178,7 @@ exact rules, including how a module can instead shadow `Result` outright.
 Conversions that can fail return a Result. `intN.from(x)` range-checks,
 and `T.parse(s)` parses a string:
 
-```prepoly
+```brass
 let small = uint8.from(42)!         // ok
 let too_big = uint8.from(300)       // Result.Err: out of range
 println(too_big)
@@ -202,7 +202,7 @@ between numeric types.
 returns **null itself** from the enclosing function, so that function's
 return type gains an outer `?`:
 
-```prepoly
+```brass
 fun first_even(nums) -> int32? {
     for n in nums {
         if n % 2 == 0 {
@@ -231,7 +231,7 @@ A body can mix all three return kinds -- plain values, `error(...)`, and a
 nullable `!`. The plain and error returns make it a `Result`, and the null
 propagation wraps that in `?`:
 
-```prepoly
+```brass
 fun f(c: int32) {
     if c == 0 {
         return 1          // Result.Ok { value: 1 }
@@ -265,7 +265,7 @@ Inside a conditional, an inference failure — such as accessing a field the
 value does not have — becomes `null` instead of a compile error. This lets a
 structurally typed function probe for optional fields:
 
-```prepoly
+```brass
 fun get_name(person) {
     if person.name {
         return person.name

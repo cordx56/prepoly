@@ -9,19 +9,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width" />
-    <title>prepoly Playground</title>
+    <title>Brass Playground</title>
   </head>
   <body>
-    <div id="playground" data-prepoly-playground>
+    <div id="playground" data-brass-playground>
       <section>
-        <div class="pp-editor" data-editor></div>
+        <div class="brass-editor" data-editor></div>
       </section>
       <section>
-        <button class="pp-exec" data-exec>Execute</button>
+        <button class="brass-exec" data-exec>Execute</button>
         <h3>stdout</h3>
-        <div class="pp-out" data-stdout></div>
+        <div class="brass-out" data-stdout></div>
         <h3>stderr</h3>
-        <div class="pp-out pp-err" data-stderr></div>
+        <div class="brass-out brass-err" data-stderr></div>
       </section>
     </div>
   </body>
@@ -55,12 +55,12 @@
     height: 100%;
     padding: 12px;
   }
-  .pp-editor {
+  .cz-editor {
     width: 100%;
     height: 100%;
     border: 1px solid #ccc;
   }
-  .pp-exec {
+  .cz-exec {
     width: 100%;
     margin: 8px 0;
     padding: 8px;
@@ -70,18 +70,18 @@
     border: 1px solid #ccc;
     cursor: pointer;
   }
-  .pp-out {
+  .cz-out {
     margin: 8px 0;
     padding: 12px;
     border: 1px solid #ccc;
     font-size: 1.2em;
     overflow-x: auto;
   }
-  .pp-err {
+  .cz-err {
     color: #c88;
   }
-  .pp-out :global(pre),
-  .pp-out :global(code) {
+  .cz-out :global(pre),
+  .cz-out :global(code) {
     margin: 0;
     padding: 0;
   }
@@ -90,7 +90,7 @@
 <script>
   import { mountPlayground } from "../playground/playground";
 
-  for (const el of document.querySelectorAll<HTMLElement>("[data-prepoly-playground]")) {
+  for (const el of document.querySelectorAll<HTMLElement>("[data-brass-playground]")) {
     mountPlayground(el);
   }
 </script>
