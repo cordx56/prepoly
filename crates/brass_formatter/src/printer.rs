@@ -418,7 +418,7 @@ impl<'a> Printer<'a> {
             Stmt::Assign {
                 target, op, value, ..
             } => {
-                let head = format!("{} {} ", self.flat_or_src(target, false), assign_sym(*op));
+                let head = format!("{} {} ", self.flat_or_src(target, false), op.symbol());
                 self.expr_lines(head, value, "", false);
             }
             Stmt::Expr(e) => self.expr_lines(String::new(), e, "", false),
@@ -457,16 +457,5 @@ fn member_span(m: &Member) -> (usize, usize) {
     match m {
         Member::Field(f) => (f.span.lo, f.span.hi),
         Member::Method(me) => (me.span.lo, me.span.hi),
-    }
-}
-
-pub(crate) fn assign_sym(op: AssignOp) -> &'static str {
-    match op {
-        AssignOp::Eq => "=",
-        AssignOp::Add => "+=",
-        AssignOp::Sub => "-=",
-        AssignOp::Mul => "*=",
-        AssignOp::Div => "/=",
-        AssignOp::Rem => "%=",
     }
 }

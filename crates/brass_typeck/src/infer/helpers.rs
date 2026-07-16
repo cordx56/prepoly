@@ -107,7 +107,7 @@ pub(super) fn same_nominal_instance(a: &Type, b: &Type) -> bool {
 /// instance.
 /// The value of a constant non-negative integer index (a tuple position), or
 /// `None` if the index is not a literal.
-pub(super) fn const_index(expr: &Expr) -> Option<i64> {
+pub(crate) fn const_index(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Int(n, _) if *n >= 0 => Some(*n),
         _ => None,
@@ -116,7 +116,7 @@ pub(super) fn const_index(expr: &Expr) -> Option<i64> {
 
 /// The default concrete type of a numeric literal element, for classifying a
 /// bracket literal as array vs tuple (an int literal is `int32`, a float `float64`).
-pub(super) fn numeric_literal_repr(e: &Expr) -> Option<Type> {
+pub(crate) fn numeric_literal_repr(e: &Expr) -> Option<Type> {
     match e {
         Expr::Int(v, _) => Some(Type::Int(int_literal_kind(*v))),
         Expr::Float(_, _) => Some(Type::Float(FloatKind::F64)),

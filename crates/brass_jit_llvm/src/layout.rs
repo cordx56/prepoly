@@ -8,7 +8,7 @@ use inkwell::module::Module;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType};
 use inkwell::values::FunctionValue;
 
-use brass_hir::{IntKind, Type};
+use brass_hir::Type;
 
 /// ABI helpers bound to a module/context for the lifetime of code generation.
 pub struct Abi<'ctx> {
@@ -38,7 +38,7 @@ impl<'ctx> Abi<'ctx> {
     pub fn typed_basic(&self, ty: &Type) -> BasicTypeEnum<'ctx> {
         match ty {
             Type::Bool => self.ctx.bool_type().into(),
-            Type::Int(k) => match int_bits(*k) {
+            Type::Int(k) => match k.bits() {
                 8 => self.ctx.i8_type().into(),
                 16 => self.ctx.i16_type().into(),
                 32 => self.ctx.i32_type().into(),
@@ -103,20 +103,10 @@ impl<'ctx> Abi<'ctx> {
     }
 }
 
-/// Bit width of an integer kind, for its unboxed LLVM `iN` type.
-fn int_bits(k: IntKind) -> u32 {
-    match k {
-        IntKind::I8 | IntKind::U8 => 8,
-        IntKind::I16 | IntKind::U16 => 16,
-        IntKind::I32 | IntKind::U32 => 32,
-        IntKind::I64 | IntKind::U64 => 64,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brass_hir::FloatKind;
+    use brass_hir::{FloatKind, IntKind};
     use inkwell::types::BasicTypeEnum;
 
     /// The typed backend lowers `fun add(a: int32, b: int32) ->

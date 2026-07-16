@@ -210,6 +210,20 @@ pub enum AssignOp {
     Rem,
 }
 
+impl AssignOp {
+    /// The operator's source spelling (`=`, `+=`, ...).
+    pub fn symbol(self) -> &'static str {
+        match self {
+            AssignOp::Eq => "=",
+            AssignOp::Add => "+=",
+            AssignOp::Sub => "-=",
+            AssignOp::Mul => "*=",
+            AssignOp::Div => "/=",
+            AssignOp::Rem => "%=",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BinOp {
     Add,
@@ -232,11 +246,67 @@ pub enum BinOp {
     Shr,
 }
 
+impl BinOp {
+    /// The operator's source spelling (`+`, `==`, ...).
+    pub fn symbol(self) -> &'static str {
+        match self {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Rem => "%",
+            BinOp::Eq => "==",
+            BinOp::Ne => "!=",
+            BinOp::Lt => "<",
+            BinOp::Gt => ">",
+            BinOp::Le => "<=",
+            BinOp::Ge => ">=",
+            BinOp::And => "&&",
+            BinOp::Or => "||",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
+        }
+    }
+
+    /// Binding strength; a higher level binds tighter. MUST mirror the
+    /// parser's recursive-descent cascade (`parse_or` down through
+    /// `parse_mul`), which is the authority on how an unparenthesized
+    /// expression groups -- printers use these levels to decide where
+    /// parentheses are required to re-parse identically.
+    pub fn precedence(self) -> u8 {
+        match self {
+            BinOp::Or => 1,
+            BinOp::And => 2,
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => 3,
+            BinOp::BitOr => 4,
+            BinOp::BitXor => 5,
+            BinOp::BitAnd => 6,
+            BinOp::Shl | BinOp::Shr => 7,
+            BinOp::Add | BinOp::Sub => 8,
+            BinOp::Mul | BinOp::Div | BinOp::Rem => 9,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum UnaryOp {
     Neg,
     Not,
     BitNot,
+}
+
+impl UnaryOp {
+    /// The operator's source spelling (`-`, `!`, `~`).
+    pub fn symbol(self) -> &'static str {
+        match self {
+            UnaryOp::Neg => "-",
+            UnaryOp::Not => "!",
+            UnaryOp::BitNot => "~",
+        }
+    }
 }
 
 /// A segment of a string literal: literal text or an interpolated expression.

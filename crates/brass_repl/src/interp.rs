@@ -20,8 +20,10 @@ use std::io::Write;
 use std::rc::Rc;
 
 use brass_engine::{
-    MonoFunction, MonoProgram, binary_operand_type, closure_symbol, instance_symbol, is_comparison,
-    method_symbol, numeric_conv_ret, operand_type_of, prim_method_instance, static_symbol,
+    MonoFunction, MonoProgram, binary_operand_type, closure_symbol, element_type, float_kind_name,
+    instance_symbol, is_comparison, method_symbol, numeric_conv_ret, operand_type_of,
+    prim_method_instance, record_field_names, record_field_type, record_from_succeeds,
+    result_ok_type, static_symbol, str_const, unwrap_nullable,
 };
 use brass_hir::{FloatKind, IntKind, Program, RESULT_TYPE_ID, Type};
 use brass_mir::{Callee, Literal, MirStmt, Operand, Place, Projection, Rvalue, Terminator};
@@ -935,7 +937,7 @@ impl<'p, 'm> Interp<'p, 'm> {
         }
         let target = if let Some(k) = IntKind::from_name(ty) {
             Type::Int(k)
-        } else if let Some(k) = float_kind(ty) {
+        } else if let Some(k) = float_kind_name(ty) {
             Type::Float(k)
         } else {
             return Err(format!("unknown conversion target `{ty}`"));
@@ -1085,7 +1087,7 @@ fn eval_bin(op: BinOp, a: &Value, b: &Value, ty: &Type) -> Result<Value, String>
 }
 
 fn int_bin(op: BinOp, a: i64, b: i64, k: IntKind) -> Result<Value, String> {
-    let signed = int_signed(k);
+    let signed = k.is_signed();
     let res = match op {
         BinOp::Add => a.wrapping_add(b),
         BinOp::Sub => a.wrapping_sub(b),
@@ -1289,7 +1291,7 @@ fn float_to_int(fx: f64, k: IntKind) -> Value {
         ));
     }
     let truncated = fx.trunc();
-    let (min, max) = int_range(int_bits(k), int_signed(k));
+    let (min, max) = int_range(k.bits(), k.is_signed());
     if truncated < min as f64 || truncated > max as f64 {
         return result_err(&format!(
             "float value {} is out of range for {} ({min}..={max})",
@@ -1303,7 +1305,7 @@ fn float_to_int(fx: f64, k: IntKind) -> Value {
 /// `Result.Ok { value }` when `x` fits integer kind `k`, else `Result.Err`, with
 /// the runtime's exact out-of-range message.
 fn int_in_range(x: i128, k: IntKind) -> Value {
-    let (min, max) = int_range(int_bits(k), int_signed(k));
+    let (min, max) = int_range(k.bits(), k.is_signed());
     if x < min || x > max {
         result_err(&format!(
             "integer value {x} is out of range for {} ({min}..={max})",
@@ -1424,43 +1426,26 @@ fn snap_boundary(bytes: &[u8], mut i: usize) -> usize {
 
 // ===== small type helpers =====
 
-fn int_bits(k: IntKind) -> u32 {
-    match k {
-        IntKind::I8 | IntKind::U8 => 8,
-        IntKind::I16 | IntKind::U16 => 16,
-        IntKind::I32 | IntKind::U32 => 32,
-        IntKind::I64 | IntKind::U64 => 64,
-    }
-}
-
-fn int_signed(k: IntKind) -> bool {
-    matches!(k, IntKind::I8 | IntKind::I16 | IntKind::I32 | IntKind::I64)
-}
-
 /// The integer kind for a `(bit width, signedness)` pair, as the `_int_narrow`
-/// primitive carries them at runtime. A width other than 8/16/32
-/// is the 64-bit kind.
+/// primitive carries them at runtime. The width arrives as an arbitrary runtime
+/// integer, so a width other than 8/16/32 is the 64-bit kind -- unlike
+/// `IntKind::of`, whose odd-width fallback is 32-bit.
 fn int_kind_from_bits(bits: i64, signed: bool) -> IntKind {
-    match (bits, signed) {
-        (8, true) => IntKind::I8,
-        (16, true) => IntKind::I16,
-        (32, true) => IntKind::I32,
-        (8, false) => IntKind::U8,
-        (16, false) => IntKind::U16,
-        (32, false) => IntKind::U32,
-        (_, false) => IntKind::U64,
-        (_, true) => IntKind::I64,
+    match bits {
+        8 | 16 | 32 => IntKind::of(signed, bits as u32),
+        _ if signed => IntKind::I64,
+        _ => IntKind::U64,
     }
 }
 
 /// Truncate `v` to the kind's width and re-extend per its signedness, so the
 /// `i64`-carried value stays in canonical form.
 fn norm_int(v: i64, k: IntKind) -> i64 {
-    let bits = int_bits(k);
+    let bits = k.bits();
     if bits >= 64 {
         return v;
     }
-    if int_signed(k) {
+    if k.is_signed() {
         let shift = 64 - bits;
         (v << shift) >> shift
     } else {
@@ -1473,14 +1458,6 @@ fn round_f32_if(fk: FloatKind, x: f64) -> f64 {
     match fk {
         FloatKind::F32 => (x as f32) as f64,
         FloatKind::F64 => x,
-    }
-}
-
-fn float_kind(s: &str) -> Option<FloatKind> {
-    match s {
-        "float32" => Some(FloatKind::F32),
-        "float64" => Some(FloatKind::F64),
-        _ => None,
     }
 }
 
@@ -1500,90 +1477,8 @@ fn float_kind_of(ty: &Type) -> FloatKind {
     }
 }
 
-/// Strip one level of nullable: the inner type of a `T?`, else `ty` unchanged.
-/// A guard (`if a`) proves a nullable non-null without retyping the MIR local,
-/// so a narrowed aggregate still carries the declared nullable; this unwraps it
-/// for the dispatch and element/field typing (the interpreter's runtime value of
-/// a present nullable is already the inner value, so no value conversion needed).
-fn unwrap_nullable(ty: &Type) -> &Type {
-    match ty {
-        Type::Nullable(inner) => inner,
-        other => other,
-    }
-}
-
-fn element_type(ty: &Type) -> Type {
-    match unwrap_nullable(ty) {
-        Type::Slice(e) | Type::Array(e, _) => (**e).clone(),
-        _ => Type::Void,
-    }
-}
-
-fn record_field_type(record_ty: &Type, name: &str) -> Type {
-    match unwrap_nullable(record_ty) {
-        Type::Record(n) => n.substitution.get(name).cloned().unwrap_or(Type::Void),
-        _ => Type::Void,
-    }
-}
-
-/// The field names of a record type, in its substitution's (sorted) order.
-fn record_field_names(record_ty: &Type) -> Vec<String> {
-    match record_ty {
-        Type::Record(n) => n
-            .substitution
-            .iter()
-            .map(|(name, _)| name.to_string())
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// See through reference/mutability/const wrappers to the underlying type.
-fn strip_wrappers(ty: &Type) -> &Type {
-    match ty {
-        Type::Ref(inner) | Type::Mut(inner) | Type::ConstOf(inner) => strip_wrappers(inner),
-        other => other,
-    }
-}
-
-/// Whether `T.from(source)` succeeds for a per-instance `src_ty` and target record
-/// `target`: the source must be a record carrying every field `target` declares,
-/// each with a matching type. Mirrors the JIT's check so both back ends take the
-/// same branch.
-fn record_from_succeeds(src_ty: &Type, target: &Type) -> bool {
-    let (Type::Record(s), Type::Record(t)) = (strip_wrappers(src_ty), target) else {
-        return false;
-    };
-    t.substitution
-        .iter()
-        .all(|(name, tty)| s.substitution.get(name).is_some_and(|sty| sty == tty))
-}
-
 fn is_result_ty(ty: &Type) -> bool {
     matches!(ty, Type::Sum(n) if n.id == RESULT_TYPE_ID)
-}
-
-fn result_ok_type(ret: &Type) -> Type {
-    // A `Result<..>?` ret (a body that also propagates a null) Ok-wraps at
-    // its inner Result's payload.
-    let ret = match ret {
-        Type::Nullable(inner) if inner.is_result_type() => inner,
-        other => other,
-    };
-    match ret {
-        Type::Sum(n) => n
-            .result_payloads()
-            .map(|(ok, _)| ok.clone())
-            .unwrap_or(Type::Void),
-        _ => Type::Void,
-    }
-}
-
-fn str_const(op: &Operand) -> Option<&str> {
-    match op {
-        Operand::Const(Literal::Str(s)) => Some(s),
-        _ => None,
-    }
 }
 
 /// The last segment of a possibly variant-qualified field name (`Cons.head` ->

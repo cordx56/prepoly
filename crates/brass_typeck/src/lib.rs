@@ -38,9 +38,6 @@ pub struct TypeError {
 pub struct Analysis {
     pub errors: Vec<TypeError>,
     pub typed: TypedProgram,
-    /// Fully-concrete call instances per free-function symbol, the input to
-    /// static monomorphization.
-    pub fn_instances: std::collections::HashMap<String, Vec<Vec<brass_hir::Type>>>,
     /// Per record-type generalized scheme (inferred type parameters and the
     /// field/method signatures over them), keyed by the type's source name. The
     /// language server renders a method generically from this.
@@ -159,15 +156,10 @@ pub fn analyze_with(program: &Program, seed: Option<&ContextTables>) -> Analysis
     // adjacent and collapse in the dedup.
     errors.sort_by(|a, b| (a.span.lo, &a.message).cmp(&(b.span.lo, &b.message)));
     errors.dedup();
-    tracing::debug!(
-        total = errors.len(),
-        fn_instances = infer.fn_instances.len(),
-        "type analysis finished"
-    );
+    tracing::debug!(total = errors.len(), "type analysis finished");
     Analysis {
         errors,
         typed: infer.typed,
-        fn_instances: infer.fn_instances,
         schemes: infer.schemes,
         view_args: infer.view_args,
         sum_views: infer.sum_views,
@@ -928,23 +920,6 @@ mod tests {
         assert!(a.errors.is_empty(), "{:?}", a.errors);
         let scheme = a.schemes.get("Point").expect("Point scheme");
         assert!(scheme.params.is_empty(), "monomorphic: {scheme:?}");
-    }
-
-    #[test]
-    fn collects_concrete_call_instances_for_monomorphization() {
-        // A polymorphic function called with two concrete
-        // types records two instances; the input to static monomorphization.
-        let a = analysis(
-            "fun id(x) {\n    return x\n}\nfun main() {\n    let a: int32 = id(5)\n    let b: string = id(\"s\")\n}\n",
-        );
-        assert!(a.errors.is_empty(), "{:?}", a.errors);
-        let instances = a.fn_instances.get("id").expect("id instances");
-        assert!(
-            instances.contains(&vec![Type::Int(IntKind::I32)]),
-            "{instances:?}"
-        );
-        assert!(instances.contains(&vec![Type::Str]), "{instances:?}");
-        assert_eq!(instances.len(), 2, "two distinct instances: {instances:?}");
     }
 
     #[test]

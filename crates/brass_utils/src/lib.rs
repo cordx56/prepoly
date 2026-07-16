@@ -146,3 +146,16 @@ pub fn perf_phase(phase: &str, elapsed: std::time::Duration) {
         elapsed.as_secs_f64() * 1000.0
     );
 }
+
+/// Render a float the way Brass programs observe it (string conversion,
+/// `print`, REPL echo): an integral finite value below 1e15 keeps a trailing
+/// `.0` (`2.0`, not `2`); everything else uses Rust's shortest round-trip
+/// form. One shared rule so every back end and the runtime print the same
+/// text for the same value.
+pub fn float_str(v: f64) -> String {
+    if v.is_finite() && v == v.trunc() && v.abs() < 1e15 {
+        format!("{v:.1}")
+    } else {
+        format!("{v}")
+    }
+}

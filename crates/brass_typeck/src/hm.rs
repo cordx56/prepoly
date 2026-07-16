@@ -35,6 +35,7 @@ use brass_parser::ast::{BinOp, Block, Expr, Pattern, Stmt, StrSeg, UnaryOp};
 use brass_typesys::{numeric_flows_into, strip_nullable};
 
 use crate::TypeError;
+use crate::infer::helpers::{const_index, numeric_literal_repr};
 use crate::solver::{InferenceVarKind, Scheme, Solver};
 
 /// Type-check `program` with Algorithm W, returning the inferred type errors.
@@ -721,9 +722,20 @@ impl<'p> Hm<'p> {
                     .collect();
                 // The closure has its own return type: a `return` in its body must
                 // bind the closure's result, not the enclosing function's. Swap in
-                // a fresh return var for the duration of the body.
+                // a fresh return var for the duration of the body -- and its own
+                // fallibility: inside a fallible FUNCTION, a closure's bare
+                // `return v` is the closure's result, not the function's Ok
+                // payload (leaving the flag set unified a closure's `return 41`
+                // with the enclosing `-> T!`'s ok type T). The ok/err slots are
+                // swapped alongside so an error site inside the closure cannot
+                // reconcile against the enclosing callable's payloads either.
                 let saved_ret =
                     std::mem::replace(&mut self.ret, self.solver.fresh(InferenceVarKind::Source));
+                let saved_fallible = std::mem::replace(&mut self.fallible, false);
+                let saved_ok =
+                    std::mem::replace(&mut self.ok, self.solver.fresh(InferenceVarKind::Source));
+                let saved_err =
+                    std::mem::replace(&mut self.err, self.solver.fresh(InferenceVarKind::Source));
                 let cret = self.ret.clone();
                 match body.as_ref() {
                     // A block body returns via `return` (binding `cret`); a
@@ -744,6 +756,9 @@ impl<'p> Hm<'p> {
                     }
                 }
                 self.ret = saved_ret;
+                self.fallible = saved_fallible;
+                self.ok = saved_ok;
+                self.err = saved_err;
                 self.scopes.pop();
                 Type::Fun(param_tys, Box::new(cret))
             }
@@ -1829,28 +1844,6 @@ fn expr_constructs_error(e: &Expr) -> bool {
         }
         // A nested closure has its own fallibility; do not descend.
         _ => false,
-    }
-}
-
-/// The compile-time value of a constant non-negative integer index expression
-/// (a tuple position), or `None` if it is not a literal. A tuple's element type
-/// at a position is only known when the index is a constant.
-fn const_index(expr: &Expr) -> Option<i64> {
-    match expr {
-        Expr::Int(n, _) if *n >= 0 => Some(*n),
-        _ => None,
-    }
-}
-
-/// The default concrete type of a numeric literal element, used only to classify
-/// a bracket literal as an array or a tuple: an integer literal is `int32` and a
-/// float literal `float64` (its still-open variable would otherwise unify with
-/// any element). `None` for a non-literal element (its inferred type is used).
-fn numeric_literal_repr(e: &Expr) -> Option<Type> {
-    match e {
-        Expr::Int(v, _) => Some(Type::Int(int_literal_kind(*v))),
-        Expr::Float(_, _) => Some(Type::Float(brass_hir::FloatKind::F64)),
-        _ => None,
     }
 }
 

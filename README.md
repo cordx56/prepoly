@@ -11,11 +11,11 @@
   </p>
   <p>
     <a href="https://brass-lang.cz">Documentation &amp; Playground</a> |
-    <a href="https://prepoly.zulipchat.com/#narrow/channel/614491-announcement">Zulip community</a>
+    <a href="https://brass.zulipchat.com/#narrow/channel/618307-announcement">Zulip community</a>
   </p>
 </div>
 
-Brass is a statically type-checked, structurally typed scripting language with
+Brass is a statically typed, structurally typed scripting language with
 flexible type inference. Its `.cz` source extension is taken from *copper* and
 *zinc* -- the two metals that make up brass; it
 runs like an interpreter, but every function is fully type-checked just before
@@ -26,7 +26,7 @@ REPL and WebAssembly.
 Quick start:
 
 ```bash
-curl -L https://raw.githubusercontent.com/cordx56/prepoly/refs/heads/main/scripts/install.sh | sh
+curl -L https://raw.githubusercontent.com/brass-cz/brass/refs/heads/main/scripts/install.sh | sh
 ```
 
 ## Features

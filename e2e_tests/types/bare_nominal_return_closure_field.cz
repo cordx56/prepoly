@@ -1,0 +1,8 @@
+type Box = { f }
+fun make() -> Box {
+    return Box { f: () -> { return 41 } }
+}
+fun main() {
+    let b = make()
+    println(b.f())
+}

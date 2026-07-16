@@ -303,6 +303,38 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Record whether the `!` (or forwarded return) at `span` re-wraps a raw
+    /// error payload into the prelude `Error`, and reject a generic whose
+    /// instantiations disagree. `lift_errs` is a span SET consumed by ONE
+    /// shared MIR lowering: unioned across instantiations, the lift arm would
+    /// double-wrap an already-`Error` payload of the instance that must not
+    /// lift (or drop the wrap of the one that must). Only called once the
+    /// payload type is resolved, so the template elaboration stays silent.
+    pub(super) fn record_lift_kind(&mut self, span: brass_parser::Span, lifted: bool) {
+        if self.lift_poisoned.contains(&span) {
+            return;
+        }
+        match self.lift_kinds.get(&span) {
+            None => {
+                self.lift_kinds.insert(span, lifted);
+            }
+            Some(prev) if *prev != lifted => {
+                self.errors.push(TypeError {
+                    message: "`!` re-wraps a raw error payload into `Error` in one \
+                              instantiation of this generic function and propagates an \
+                              already-wrapped `Error` in another; the two lower \
+                              differently, so the error payload must resolve to one \
+                              kind in every instantiation (annotate the parameter to \
+                              fix it)"
+                        .to_string(),
+                    span,
+                });
+                self.lift_poisoned.insert(span);
+            }
+            _ => {}
+        }
+    }
+
     fn wrap_inferred_fallible_return(&mut self, ok: Type, props: &LightProps) -> Type {
         let base = if props.errors.is_empty() {
             ok
@@ -469,19 +501,23 @@ impl<'a> Checker<'a> {
                         let err = self.resolve(err);
                         self.check_error_propagation_return_context(&resolved, *span);
                         self.record_prop_kind(*span, PropKind::Err);
+                        self.record_sum_view_identity(inner.span());
                         // A propagated payload that is not the prelude Error
                         // is re-raised wrapped into one (gaining this site's
                         // location); MIR's propagation arm does the rebuild.
-                        if !err.is_unknown()
-                            && crate::lift_err_payload(self.program, err.clone()) != err
-                        {
-                            self.lift_errs.insert(*span);
+                        if !err.is_unknown() {
+                            let lifted = crate::lift_err_payload(self.program, err.clone()) != err;
+                            self.record_lift_kind(*span, lifted);
+                            if lifted {
+                                self.lift_errs.insert(*span);
+                            }
                         }
                         ok
                     }
                     None if resolved.is_result_type() => {
                         self.check_error_propagation_return_context(&resolved, *span);
                         self.record_prop_kind(*span, PropKind::Err);
+                        self.record_sum_view_identity(inner.span());
                         self.fresh_unknown()
                     }
                     None if resolved.is_unknown() => self.fresh_unknown(),
@@ -511,10 +547,13 @@ impl<'a> Checker<'a> {
                             // rebuilt Result whole, pinning the enclosing
                             // callable's Ok side to the SUBTYPE's Ok payload.
                             let err = self.resolve(&err);
-                            if !err.is_unknown()
-                                && crate::lift_err_payload(self.program, err.clone()) != err
-                            {
-                                self.lift_errs.insert(*span);
+                            if !err.is_unknown() {
+                                let lifted =
+                                    crate::lift_err_payload(self.program, err.clone()) != err;
+                                self.record_lift_kind(*span, lifted);
+                                if lifted {
+                                    self.lift_errs.insert(*span);
+                                }
                             }
                             self.check_error_propagation_return_context(&coerced, *span);
                             self.record_prop_kind(*span, PropKind::Err);

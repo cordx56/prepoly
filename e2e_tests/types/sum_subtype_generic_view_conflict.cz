@@ -1,0 +1,36 @@
+// One shared MIR body serves every instantiation of a generic function, and a
+// declared-subtype coercion site bakes its rebuild target into that body. Two
+// instantiations resolving the same site to different parent instances
+// (int32 payload vs string payload) therefore cannot both lower correctly and
+// must be rejected at check time.
+type P =
+    | Pa {
+        v
+    }
+    | Pb
+
+type C: P =
+    | Pa {
+        v
+        extra: int32
+    }
+    | Pb
+
+fun up(c, p) {
+    let x = p
+    x = c
+    return x
+}
+
+fun main() {
+    let a = up(C.Pa { v: 123, extra: 1 }, P.Pa { v: 0 })
+    let b = up(C.Pa { v: "hello", extra: 2 }, P.Pa { v: "z" })
+    match a {
+        Pa { v } => println(v)
+        Pb => println("pb")
+    }
+    match b {
+        Pa { v } => println(v)
+        Pb => println("pb")
+    }
+}

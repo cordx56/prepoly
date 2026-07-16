@@ -4,7 +4,7 @@
 #![cfg(not(target_family = "wasm"))]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The test program: every supported value shape crosses the plugin boundary
@@ -68,7 +68,7 @@ fn project_dir(name: &str) -> PathBuf {
     project_dir_with(name, MAIN_PP).0
 }
 
-fn run(args: &[&str], dir: &PathBuf) -> (bool, String, String) {
+fn run(args: &[&str], dir: &Path) -> (bool, String, String) {
     let bin = env!("CARGO_BIN_EXE_brass");
     let out = Command::new(bin)
         .args(args)
@@ -121,5 +121,39 @@ fn plugin_return_type_mismatch_aborts_cleanly() {
     assert!(
         stderr.contains("plugin returned Str(\"a\") where Bytes was typed"),
         "stderr:\n{stderr}"
+    );
+}
+
+/// A rebuilt plugin library must invalidate the analysis cache: the cached
+/// wrapper module (and the signatures the program was checked against) came
+/// from the OLD manifest, so a swapped library has to force fresh resolution
+/// instead of the stale wrapper marshalling against the new native code.
+#[test]
+fn analysis_cache_misses_when_the_plugin_library_changes() {
+    let (dir, target) = project_dir_with(
+        "plugin_cache_swap",
+        "import plugins.mathx.{ repeat }\nprintln(repeat(\"ha\", 2))\n",
+    );
+    let (ok, out, err) = run(&[], &dir);
+    assert!(ok, "cold run: {out}\n{err}");
+    assert_eq!(out, "ha ha\n");
+    assert!(
+        dir.join("main.czcache").is_file(),
+        "a clean run writes the cache"
+    );
+    let (ok, out, _) = run(&[], &dir);
+    assert!(ok && out == "ha ha\n", "warm run: {out}");
+
+    // Swap in the alternative build, whose manifest lacks `repeat`.
+    let alt = brass_plugin_host::fixture::build_altlib();
+    fs::copy(&alt, &target).expect("swap the plugin library");
+    let (ok, stdout, stderr) = run(&[], &dir);
+    assert!(
+        !ok,
+        "the swapped library must be re-resolved, not served stale; stdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("repeat"),
+        "the new manifest lacks `repeat`: {stderr}"
     );
 }

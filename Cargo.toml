@@ -19,7 +19,6 @@ members = [
     "bootstrap",
     "crates/brass_language_server",
     "crates/brass_formatter",
-    "crates/brass_package_manager",
     "crates/brass_plugin",
     "crates/brass_plugin_host",
     "crates/brass_plugin_testlib",

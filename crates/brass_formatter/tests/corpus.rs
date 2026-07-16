@@ -11,14 +11,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn collect_pp(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_cz(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_pp(&path, out);
+            collect_cz(&path, out);
         } else if path.extension().is_some_and(|e| e == "cz") {
             out.push(path);
         }
@@ -58,7 +58,7 @@ fn check_repo_sources() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut files = Vec::new();
     for dir in ["std", "examples", "e2e_tests"] {
-        collect_pp(&root.join(dir), &mut files);
+        collect_cz(&root.join(dir), &mut files);
     }
     assert!(
         files.len() > 20,

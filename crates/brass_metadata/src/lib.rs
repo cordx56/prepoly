@@ -17,7 +17,7 @@ pub const COMMIT_HASH: &str = env!("COMMIT_HASH");
 /// Use [`build_channel`] function usually
 pub const BUILD_CHANNEL: Option<&str> = option_env!("BUILD_CHANNEL");
 
-pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
+const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildChannel {
@@ -61,7 +61,7 @@ pub fn build_channel() -> BuildChannel {
 
 /// The commit abbreviated the way version output shows it. Returns the whole
 /// value when it is shorter than an abbreviation, i.e. `unknown`.
-pub fn short_commit() -> &'static str {
+fn short_commit() -> &'static str {
     COMMIT_HASH.get(..7).unwrap_or(COMMIT_HASH)
 }
 

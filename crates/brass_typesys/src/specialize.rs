@@ -15,7 +15,7 @@
 //!   call to the FIELD's own specialization (`x.into__<fieldtype>()`), which is
 //!   in turn scheduled for specialization;
 //! - resolves `infer.from(x)` by the from/parse partition
-//!   (`crate::infer_from`): an identity, a named conversion, or -- when
+//!   (`crate::convert::infer_from`): an identity, a named conversion, or -- when
 //!   no conversion exists -- a runtime error (the arm is not viable for this
 //!   key, e.g. a JSON number decoded as a record);
 //! - turns `return null` into a runtime error when the key is not nullable.
@@ -413,11 +413,11 @@ impl Specializer<'_> {
                 span,
             );
         };
-        match crate::infer_from(self.program, &src, self.key) {
+        match crate::convert::infer_from(self.program, &src, self.key) {
             // Identity: the argument already is the target value.
-            crate::InferFrom::Identity => arg.clone(),
+            crate::convert::InferFrom::Identity => arg.clone(),
             // A named conversion `Q.from(arg)`.
-            crate::InferFrom::Static { qualifier, .. } => Expr::Call(
+            crate::convert::InferFrom::Static { qualifier, .. } => Expr::Call(
                 Box::new(Expr::Field(
                     Box::new(Expr::Ident(qualifier, span)),
                     "from".into(),
@@ -428,7 +428,7 @@ impl Specializer<'_> {
             ),
             // No conversion: this variant cannot produce the key -- a runtime
             // decode error (e.g. a JSON string decoded as an int).
-            crate::InferFrom::Absent(_) => self.error_call(span),
+            crate::convert::InferFrom::Absent(_) => self.error_call(span),
         }
     }
 

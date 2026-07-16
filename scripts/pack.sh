@@ -33,17 +33,17 @@ for path in $(find libraries -type f | grep -e '\.cz$' -e '\.so$'); do
 done
 
 #
-# analysis caches
+# smoke check
 #
-# `czm` ships with its `.czcache`: checking it against the freshly packed bin/
-# and libraries/ writes bin/czm.czcache whose source stamps are RELATIVE to the
-# implicit <bin>/../libraries include root, so the cache validates wherever the
-# archive is unpacked. The packer's own resolution environment is cleared so no
-# machine-local root leaks into the stamps. On a release build the compiler tag
-# is portable (channel + commit); a local pack still writes a cache, but only
-# the packing machine's own binary would accept it.
+# Checking `czm` against the freshly packed bin/ and libraries/ validates the
+# archive's contents before they ship. The `.czcache` this writes is NOT
+# packed: czm's graph imports native plugins, whose stamps pin the packer's
+# temporary absolute paths (the synthesized wrappers dlopen exactly those
+# strings), so the cache could never validate on an installed machine; each
+# install writes its own on first run instead.
 #
 env -u BRASS_INCLUDE -u BRASS_PACKAGES "$tmp/bin/brass" check "$tmp/bin/czm"
+rm -f "$tmp/bin/czm.czcache"
 
 #
 # make tarball

@@ -1,0 +1,21 @@
+type Client = {
+    _connect
+    name: string
+}
+
+fun http() -> Client {
+    return Client { _connect: () -> { return 80 }, name: "http" }
+}
+
+fun https() -> Client {
+    return Client { _connect: () -> { return 443 }, name: "https" }
+}
+
+fun describe(c: Client) -> string {
+    return "{c.name}:{c._connect()}"
+}
+
+fun main() {
+    println(describe(http()))
+    println(describe(https()))
+}

@@ -446,16 +446,17 @@ pub(crate) fn typedef_method_signatures(
     // slot variable, or a declared type); the instance pass then replaces the
     // ones this value pins with their concrete types.
     let mut map: BTreeMap<u32, Type> = BTreeMap::new();
-    for (fname, fty) in &scheme.fields {
-        let declared = fields
-            .iter()
-            .find(|f| f.name == *fname)
-            .and_then(|f| f.resolved_ty.as_ref());
-        if let Some(declared) = declared {
-            match_type_vars(fty, declared, &scheme.params, &mut map);
-        }
-    }
-    pin_scheme_params(scheme, substitution, &mut map);
+    pin_scheme_params(
+        scheme,
+        |name| {
+            fields
+                .iter()
+                .find(|f| f.name == name)
+                .and_then(|f| f.resolved_ty.as_ref())
+        },
+        &mut map,
+    );
+    pin_scheme_params(scheme, |name| substitution.get(name), &mut map);
     for (name, m) in methods {
         let Some(sm) = scheme.methods.get(name) else {
             continue;
@@ -517,21 +518,22 @@ fn receiver_scheme<'a>(
 /// string>[]` gives `K -> string`, `V -> string`).
 fn instance_param_map(scheme: &TypeScheme, recv: &NominalType) -> BTreeMap<u32, Type> {
     let mut map = BTreeMap::new();
-    pin_scheme_params(scheme, &recv.substitution, &mut map);
+    pin_scheme_params(scheme, |name| recv.substitution.get(name), &mut map);
     map
 }
 
-/// Pin every scheme parameter that `substitution` fixes: for each field the
-/// substitution gives a type, match it against the field's scheme type and
-/// record what each parameter variable stands for. Layered by callers that
-/// pin from more than one source (a declaration, then an instance).
-fn pin_scheme_params(
+/// Pin every scheme parameter that `lookup` fixes: for each scheme field the
+/// lookup yields a type for (an instance substitution entry, or a declared
+/// field type), match it against the field's scheme type and record what each
+/// parameter variable stands for. Layered by callers that pin from more than
+/// one source (a declaration, then an instance).
+fn pin_scheme_params<'a>(
     scheme: &TypeScheme,
-    substitution: &Substitution,
+    lookup: impl Fn(&str) -> Option<&'a Type>,
     map: &mut BTreeMap<u32, Type>,
 ) {
     for (fname, fty) in &scheme.fields {
-        if let Some(actual) = substitution.get(fname) {
+        if let Some(actual) = lookup(fname) {
             match_type_vars(fty, actual, &scheme.params, map);
         }
     }

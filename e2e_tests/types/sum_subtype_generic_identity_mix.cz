@@ -1,0 +1,40 @@
+// A `!` whose operand is a plain Result in one instantiation (no rebuild) and
+// a declared Result subtype in another (rebuild to the parent) would bake the
+// subtype rebuild into the shared body and execute it on the uncoerced plain
+// value too; the mix is rejected at check time.
+type MyResult: Result =
+    | Ok {
+        value: int32
+    }
+    | Err {
+        error: string
+    }
+
+fun fail_plain() -> int32! {
+    return error("boom")
+}
+
+fun mid() -> int32! {
+    return fail_plain()! + 1
+}
+
+fun myfail(flag: bool) {
+    if flag {
+        return MyResult.Ok { value: 3 }
+    }
+    return MyResult.Err { error: "custom" }
+}
+
+fun fwd(r) {
+    return r! + 1
+}
+
+fun main() {
+    let a = fwd(mid())
+    match a {
+        Ok { value } => println("ok {value}")
+        Err { error } => println("a: {error.value}")
+    }
+    let c = fwd(myfail(false))
+    println(c + 1)
+}

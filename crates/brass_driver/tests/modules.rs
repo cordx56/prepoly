@@ -1681,6 +1681,142 @@ fn czcache_survives_relocation() {
     assert_eq!(out, "8\n", "the edit must be recompiled");
 }
 
+/// Two entries share one cache path (`app` and `app.cz` both map to
+/// `app.czcache`), so a hit requires the entry ITSELF to be the recorded one:
+/// running the extensionless sibling must execute its own program, never the
+/// cached neighbor's.
+#[test]
+fn czcache_is_entry_specific() {
+    let main = setup(
+        "czcache_entry_identity",
+        &[
+            ("app.cz", "fun main() { println(\"from app.cz\") }\n"),
+            ("app", "fun main() { println(\"from app\") }\n"),
+            ("main.cz", "fun main() {}\n"),
+        ],
+    );
+    let root = main.parent().unwrap().to_path_buf();
+    let run = |entry: &PathBuf| {
+        let out = Command::new(env!("CARGO_BIN_EXE_brass"))
+            .arg(entry)
+            .output()
+            .expect("spawn brass");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+
+    let (ok, out) = run(&root.join("app.cz"));
+    assert!(ok, "cold run: {out}");
+    assert_eq!(out, "from app.cz\n");
+    assert!(root.join("app.czcache").is_file());
+
+    let (ok, out) = run(&root.join("app"));
+    assert!(ok, "sibling run: {out}");
+    assert_eq!(
+        out, "from app\n",
+        "the extensionless sibling must not revive app.cz's cached program"
+    );
+}
+
+/// A newly declared `BRASS_PACKAGES` name captures an import's first segment
+/// BEFORE any file search, re-routing the import while every stamped file is
+/// untouched; the recorded name set must catch it and recompile.
+#[test]
+fn czcache_misses_when_package_names_change() {
+    let main = setup(
+        "czcache_pkg_rebind",
+        &[
+            ("util/helpers.cz", "fun answer() -> int32 { return 1 }\n"),
+            (
+                "main.cz",
+                "import util.helpers.{ answer }\nfun main() { println(answer()) }\n",
+            ),
+            (
+                "dep/util/helpers.cz",
+                "fun answer() -> int32 { return 2 }\n",
+            ),
+        ],
+    );
+    let root = main.parent().unwrap().to_path_buf();
+    let run = |packages: Option<String>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_brass"));
+        cmd.arg(&main);
+        if let Some(p) = packages {
+            cmd.env("BRASS_PACKAGES", p);
+        }
+        let out = cmd.output().expect("spawn brass");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+
+    let (ok, out) = run(None);
+    assert!(ok, "cold run: {out}");
+    assert_eq!(out, "1\n", "no package declared: the local file answers");
+
+    let (ok, out) = run(Some(format!("util={}", root.join("dep").display())));
+    assert!(ok, "package-bound run: {out}");
+    assert_eq!(
+        out, "2\n",
+        "declaring the package re-routes the import; the cache must not answer with the local file"
+    );
+}
+
+/// `_PATH` is the one thing a relocated cache must NOT replay: it IS the
+/// module's location. A hit after the project moves re-anchors it while the
+/// analysis itself stays cached.
+#[test]
+fn czcache_reanchors_module_path_on_relocation() {
+    let main = setup(
+        "czcache_path_reanchor",
+        &[
+            (
+                "whereami.cz",
+                "fun where_am_i() -> string { return _PATH }\n",
+            ),
+            (
+                "main.cz",
+                "import whereami.{ where_am_i }\nfun main() { println(where_am_i()) }\n",
+            ),
+        ],
+    );
+    let root = main.parent().unwrap().to_path_buf();
+    let run_at = |root: &PathBuf| {
+        let out = Command::new(env!("CARGO_BIN_EXE_brass"))
+            .arg(root.join("main.cz"))
+            .env("BRASS_LOG", "brass::perf=debug")
+            .output()
+            .expect("spawn brass");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let (ok, out, err) = run_at(&root);
+    assert!(ok, "cold run: {out} {err}");
+    assert!(out.contains("whereami.cz"), "{out}");
+
+    let moved = root.with_file_name("czcache_path_reanchor_moved");
+    let _ = fs::remove_dir_all(&moved);
+    copy_tree(&root, &moved);
+    let (ok, out, err) = run_at(&moved);
+    assert!(ok, "relocated run: {err}");
+    assert!(
+        err.contains("front/cache-hit"),
+        "the moved project must reuse its cache: {err}"
+    );
+    let moved_canon = moved.canonicalize().unwrap();
+    assert!(
+        out.contains(&moved_canon.display().to_string()),
+        "_PATH must point at the module's NEW location, got: {out}"
+    );
+}
+
 /// Recursive copy for the relocation test (no external crates).
 fn copy_tree(from: &PathBuf, to: &PathBuf) {
     fs::create_dir_all(to).unwrap();

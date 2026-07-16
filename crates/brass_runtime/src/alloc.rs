@@ -387,6 +387,46 @@ pub unsafe extern "C-unwind" fn pp_str_const(ptr: *const u8, len: i64) -> *mut H
     }
 }
 
+/// The string object for a compiled string LITERAL, interned by the literal's
+/// data pointer. A literal used in a non-owning position (a comparison, a call
+/// argument, an interpolation operand) has no release site in the generated
+/// code, so materializing a fresh object per evaluation grew without bound in
+/// loops; interning materializes each literal ONCE. The object is frozen (its
+/// count is atomic -- a literal may be evaluated from spawned tasks) and the
+/// count carries a permanent bias, so owning consumers may adopt and later
+/// release references under the fresh-constant convention without the count
+/// ever reaching zero.
+///
+/// # Safety
+/// `ptr` must point to at least `len` readable bytes that stay valid and
+/// unchanged for the process lifetime. Only the code generator's literal
+/// materialization (module constant data) may call this; transient buffers
+/// must use [`pp_str_const`] -- a reused address would alias another literal.
+pub unsafe extern "C-unwind" fn pp_str_intern(ptr: *const u8, len: i64) -> *mut Header {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static INTERNED: OnceLock<Mutex<HashMap<(usize, i64), usize>>> = OnceLock::new();
+    let table = INTERNED.get_or_init(Default::default);
+    let key = (ptr as usize, len);
+    let mut table = match table.lock() {
+        Ok(t) => t,
+        // A panic while holding the lock leaves the table usable; losing the
+        // interning (a fresh allocation) is still a correct string.
+        Err(_) => return unsafe { pp_str_const(ptr, len) },
+    };
+    if let Some(&h) = table.get(&key) {
+        return h as *mut Header;
+    }
+    let h = unsafe { pp_str_const(ptr, len) };
+    unsafe {
+        (*h).rc = 1 << 62;
+        pp_freeze(h);
+    }
+    table.insert(key, h as usize);
+    h
+}
+
 /// The byte length of a string object.
 ///
 /// # Safety
@@ -536,14 +576,10 @@ pub extern "C-unwind" fn pp_int_to_str(v: i64, signed: i64) -> *mut Header {
     unsafe { pp_str_const(s.as_ptr(), s.len() as i64) }
 }
 
-/// Render a float as a string: an integral finite value below 1e15 keeps a
-/// trailing `.0`.
+/// Render a float as a string, with the shared trailing-`.0` rule
+/// (`brass_utils::float_str`).
 pub extern "C-unwind" fn pp_float_to_str(v: f64) -> *mut Header {
-    let s = if v.is_finite() && v == v.trunc() && v.abs() < 1e15 {
-        format!("{v:.1}")
-    } else {
-        format!("{v}")
-    };
+    let s = brass_utils::float_str(v);
     // The pointer/length come from a live local `String`, so they are valid.
     unsafe { pp_str_const(s.as_ptr(), s.len() as i64) }
 }

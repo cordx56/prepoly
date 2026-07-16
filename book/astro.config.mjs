@@ -27,7 +27,7 @@ export default defineConfig({
         {
           icon: "github",
           label: "GitHub",
-          href: "https://github.com/cordx56/prepoly",
+          href: "https://github.com/brass-cz/brass",
         },
       ],
       customCss: ["./src/styles/global.css"],

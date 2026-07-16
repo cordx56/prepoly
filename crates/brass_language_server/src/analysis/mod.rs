@@ -46,7 +46,7 @@ fn context_seed_for(world: &world::World) -> Option<std::sync::Arc<brass_typeck:
             .entries()
             .filter(|(base, _)| *base != world.main_base)
             .map(|(_, src)| brass_cache::content_hash(src.as_bytes())),
-    );
+    )?;
     let seeds = CONTEXT_SEEDS.get_or_init(Default::default);
     if let Some(seed) = seeds.lock().ok()?.get(&key) {
         return Some(seed.clone());
@@ -160,7 +160,15 @@ impl DocAnalyzer {
         // what it checked is not what the driver would run.
         if brass_cache::enabled()
             && std::fs::read_to_string(&self.path).is_ok_and(|disk| disk == text)
-            && brass_cache::load(&self.path, &brass_resolve::SearchPaths::from_env()).is_some()
+            && {
+                // The cache is written by the driver under ITS front-end
+                // flavor; the server cannot know which driver build produced
+                // it, so both flavors are acceptable clean-program proof.
+                let search = brass_resolve::SearchPaths::from_env();
+                brass_cache::load(&self.path, "jit", &search)
+                    .or_else(|| brass_cache::load(&self.path, "repl", &search))
+                    .is_some()
+            }
         {
             return Vec::new();
         }

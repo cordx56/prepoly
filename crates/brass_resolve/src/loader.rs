@@ -63,7 +63,7 @@ pub fn inject_module_path(ast: &mut Module, location: &str, span: Span) {
 /// A module's `_PATH` value: its canonical absolute path, falling back to the
 /// path as written when the file cannot be canonicalized (it was deleted, or an
 /// unsaved language-server buffer).
-fn module_location(file: &Path) -> String {
+pub(crate) fn module_location(file: &Path) -> String {
     std::fs::canonicalize(file)
         .unwrap_or_else(|_| file.to_path_buf())
         .display()
@@ -201,6 +201,17 @@ impl SourceMap {
         self.entries.iter().map(|e| (e.base, e.src.as_str()))
     }
 
+    /// Every on-disk file with the text that was parsed FOR it, in load order.
+    /// The analysis cache stamps sources from this text (not a re-read of the
+    /// file, which races an editor saving during the analysis); note that a
+    /// native plugin library's entry pairs the library path with its
+    /// synthesized WRAPPER text, so such entries are stamped from the file.
+    pub fn sourced(&self) -> impl Iterator<Item = (&std::path::Path, &str)> {
+        self.entries
+            .iter()
+            .filter_map(|e| Some((e.path.as_deref()?, e.src.as_str())))
+    }
+
     pub fn locate(&self, off: usize) -> Option<Located<'_>> {
         self.entries.iter().find_map(|e| {
             (off >= e.base && off <= e.base + e.src.len()).then_some(Located {
@@ -292,7 +303,7 @@ fn distribution_libraries_dir() -> Option<PathBuf> {
 
 /// What a module path resolved to on disk: a `.cz` source file, or a native
 /// plugin library serving the path as a synthesized module.
-enum ModuleFile {
+pub enum ModuleFile {
     Source(PathBuf),
     Plugin(PathBuf),
 }
@@ -323,6 +334,39 @@ fn find_module_file(root: &Path, search: &SearchPaths, segs: &[String]) -> Optio
     std::iter::once(root)
         .chain(search.includes.iter().map(PathBuf::as_path))
         .find_map(|r| module_file_under(r, segs))
+}
+
+/// [`find_module_file`] for callers outside the loader: what file currently
+/// serves module path `segs` from `root`. The analysis cache uses this on a
+/// hit to re-anchor each cached module's `_PATH` constant to where the module
+/// lives NOW -- the stamps are location-independent, but `_PATH` is exactly
+/// the module's location.
+pub fn resolve_module_file(
+    root: &Path,
+    search: &SearchPaths,
+    segs: &[String],
+) -> Option<ModuleFile> {
+    find_module_file(root, search, segs)
+}
+
+/// Replace the value of the `_PATH` constant [`inject_module_path`] planted in
+/// `ast`, keeping its span (span-keyed channels must keep matching). Used when
+/// a cached module AST is reused from a different location than it was
+/// analyzed at.
+pub fn reinject_module_path(ast: &mut Module, location: &str) {
+    for item in &mut ast.items {
+        if let TopLevel::Stmt(Stmt::Let {
+            pat: Pattern::Binding(name, _),
+            value: Some(Expr::Str(segs, _)),
+            is_const: true,
+            ..
+        }) = item
+            && name == MODULE_PATH_CONST
+        {
+            *segs = vec![StrSeg::Lit(location.to_string())];
+            return;
+        }
+    }
 }
 
 /// The source text serving module path `segs` as seen from `root`: the `.cz`
@@ -643,7 +687,11 @@ fn load_synthesized(
     errors: &mut Vec<LoadError>,
 ) {
     let label = format!("<plugin:{}>", lib.display());
-    let base = sources.add(None, label.clone(), src.clone());
+    // The library file is registered as this entry's path so the analysis
+    // cache stamps the `.so` itself: a rebuilt plugin (new manifest, new
+    // native code) must invalidate a cache whose wrapper was synthesized from
+    // the old one.
+    let base = sources.add(Some(lib.to_path_buf()), label.clone(), src.clone());
     match parse_with_base(&src, base) {
         Ok(mut ast) => {
             inject_module_path(&mut ast, &label, Span::new(base, base));

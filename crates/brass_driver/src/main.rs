@@ -339,22 +339,20 @@ fn auto_acquire_modules(modules: &mut [LoadedModule]) -> Vec<(String, Span)> {
 /// mutated captures into explicit `with` scopes: the warning must reflect what
 /// auto-acquire is about to do, so it has to see the pre-transform source.
 #[cfg(jit_backend)]
-fn report_spawn_ownership(modules: &[LoadedModule]) {
+fn report_spawn_ownership(modules: &[LoadedModule]) -> Vec<String> {
     use brass_jit_llvm::ownership::{CaptureDecision, Ownership, analyze_spawns_stmts};
     use brass_parser::ast::{Member, TypeBody};
 
-    fn warn(decisions: Vec<CaptureDecision>, ctx: &str) {
+    fn warn(out: &mut Vec<String>, decisions: Vec<CaptureDecision>, ctx: &str) {
         for d in decisions {
             if d.ownership == Ownership::Cown {
-                eprintln!(
+                out.push(format!(
                     "warning: variable '{}' is shared with a spawned task; every \
-                     access to it is auto-guarded by its cown lock{ctx}",
+                     access to it is auto-guarded by its cown lock{ctx}\n  = note: for \
+                     finer-grained concurrency, acquire it explicitly with 'with(cown, \
+                     (c) -> {{ ... }})'",
                     d.var
-                );
-                eprintln!(
-                    "  = note: for finer-grained concurrency, acquire it explicitly \
-                     with 'with(cown, (c) -> {{ ... }})'"
-                );
+                ));
             }
         }
     }
@@ -363,11 +361,13 @@ fn report_spawn_ownership(modules: &[LoadedModule]) {
         params.iter().map(|p| p.name.clone()).collect()
     }
 
+    let mut out = Vec::new();
     for m in modules {
         let mut init_stmts: Vec<Stmt> = Vec::new();
         for item in &m.ast.items {
             match item {
                 TopLevel::Fun(f) => warn(
+                    &mut out,
                     analyze_spawns_stmts(&f.body.stmts, &param_names(&f.params)),
                     &format!(" in `{}`", f.name),
                 ),
@@ -381,6 +381,7 @@ fn report_spawn_ownership(modules: &[LoadedModule]) {
                             && let Some(body) = &method.body
                         {
                             warn(
+                                &mut out,
                                 analyze_spawns_stmts(&body.stmts, &param_names(&method.params)),
                                 &format!(" in `{}.{}`", t.name, method.name),
                             );
@@ -392,11 +393,13 @@ fn report_spawn_ownership(modules: &[LoadedModule]) {
         }
         if !init_stmts.is_empty() {
             warn(
+                &mut out,
                 analyze_spawns_stmts(&init_stmts, &HashSet::new()),
                 &format!(" in module `{}`", m.path.join(".")),
             );
         }
     }
+    out
 }
 
 /// Make any Rust panic abort the process instead of unwinding. JIT-compiled
@@ -817,6 +820,81 @@ fn drive(mode: Mode, file: &str) -> Result<(), u8> {
     }
 }
 
+/// The front-end flavor stamped into cache tags: a JIT driver rewrites spawn
+/// bodies (auto-acquire) before caching ASTs; a REPL-only build does not, so
+/// the two must never accept each other's caches.
+#[cfg(jit_backend)]
+const CACHE_FLAVOR: &str = "jit";
+#[cfg(not(jit_backend))]
+const CACHE_FLAVOR: &str = "repl";
+
+/// Re-anchor each cached module's `_PATH` constant to where the module lives
+/// NOW. The cache's stamps are deliberately location-independent (a moved
+/// project still hits), but `_PATH` is precisely the module's location, so a
+/// hit must refresh it rather than replay the analysis machine's paths.
+fn reanchor_module_paths(
+    modules: &mut [LoadedModule],
+    entry: &Path,
+    root: &Path,
+    search: &brass_resolve::SearchPaths,
+) {
+    for m in modules {
+        // Embedded modules (prelude, nested std) have no location to refresh,
+        // and a plugin wrapper's `_PATH` is its label -- its library is pinned
+        // by an Absolute stamp, so a hit means it did not move.
+        if m.is_prelude || m.path.first().is_some_and(|s| s == "std") {
+            continue;
+        }
+        if matches!(m.path.as_slice(), [p] if p == "main") {
+            let loc = std::fs::canonicalize(entry)
+                .unwrap_or_else(|_| entry.to_path_buf())
+                .display()
+                .to_string();
+            brass_resolve::reinject_module_path(&mut m.ast, &loc);
+            continue;
+        }
+        if let Some(brass_resolve::ModuleFile::Source(file)) =
+            brass_resolve::resolve_module_file(root, search, &m.path)
+        {
+            let loc = std::fs::canonicalize(&file)
+                .unwrap_or(file)
+                .display()
+                .to_string();
+            brass_resolve::reinject_module_path(&mut m.ast, &loc);
+        }
+    }
+}
+
+/// The context seed for `ctx` (every module except the entry): from the
+/// shared on-disk store under `key` when caching is enabled, else built by a
+/// context-only run and stored back. `None` when the context itself has
+/// diagnostics -- the unseeded full run then reports them as before.
+fn cached_context_seed(
+    key: &Option<[u8; 20]>,
+    ctx: &[LoadedModule],
+    phase_name: &'static str,
+) -> Option<brass_typeck::ContextTables> {
+    if let Some(key) = key
+        && brass_cache::enabled()
+        && let Some(seed) = brass_cache::load_context(key)
+    {
+        tracing::debug!(target: "brass::perf", "context seed loaded from disk");
+        return Some(seed);
+    }
+    let t = std::time::Instant::now();
+    let (ctx_program, ctx_errors) = lower(ctx);
+    let seed = if ctx_errors.is_empty() {
+        brass_typeck::context_seed(&ctx_program)
+    } else {
+        None
+    };
+    brass_utils::perf_phase(phase_name, t.elapsed());
+    if let (Some(key), Some(seed), true) = (key, &seed, brass_cache::enabled()) {
+        brass_cache::save_context(key, seed);
+    }
+    seed
+}
+
 /// Parse, resolve the module graph, lower, and statically check `main_src` (a
 /// program whose label is `main_label`, imports resolved relative to `root`).
 /// Returns the checked program or the rendered diagnostics. Shared by file
@@ -834,11 +912,17 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
     let entry_path = PathBuf::from(main_label);
     let search = brass_resolve::SearchPaths::from_env();
     if brass_cache::enabled()
-        && let Some(payload) = brass_cache::load(&entry_path, &search)
+        && let Some(mut payload) = brass_cache::load(&entry_path, CACHE_FLAVOR, &search)
     {
         let t = std::time::Instant::now();
+        reanchor_module_paths(&mut payload.modules, &entry_path, root, &search);
         let (program, lower_errors) = lower(&payload.modules);
         if lower_errors.is_empty() {
+            // The full pipeline's clean-program warnings replay so warm runs
+            // are not silently quieter than cold ones.
+            for w in &payload.warnings {
+                eprintln!("{w}");
+            }
             let c = payload.channels;
             phase("front/cache-hit", t);
             return Ok(Checked {
@@ -856,89 +940,27 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         }
         tracing::debug!(target: "brass::perf", "cache: re-lowering failed, falling back");
     }
-    let mut sources = brass_resolve::SourceMap::default();
     let t = std::time::Instant::now();
-    #[allow(unused_mut)]
-    let mut modules: Vec<LoadedModule> =
-        brass_resolve::parse_stdlib(&mut sources).map_err(|m| vec![m])?;
-    phase("front/parse-stdlib", t);
-    let t = std::time::Instant::now();
-
-    let base = sources.add(
-        Some(PathBuf::from(main_label)),
-        main_label.to_string(),
-        main_src.to_string(),
-    );
-    let (mut main_ast, parse_errors) = brass_parser::parse_recovering(main_src, base);
-    brass_resolve::inject_module_path(
-        &mut main_ast,
-        &std::fs::canonicalize(main_label)
-            .unwrap_or_else(|_| PathBuf::from(main_label))
-            .display()
-            .to_string(),
-        Span::new(base, base),
-    );
-    if !parse_errors.is_empty() {
-        let rendered: Vec<(String, Span)> = parse_errors
-            .into_iter()
-            .map(|e| (format!("syntax error: {}", e.message), e.span))
-            .collect();
-        return Err(render_errors(&rendered, &sources));
+    let front = brass_resolve::frontend::assemble(&entry_path, main_src, root, &search);
+    // A prelude parse failure is a build bug; nothing else can be trusted.
+    if let Some(message) = front.stdlib_error {
+        return Err(vec![message]);
     }
-
-    let mut visited = HashSet::new();
-    let mut stack = HashSet::new();
-    let mut deps = Vec::new();
-    let mut load_errors = Vec::new();
-    for (target, span) in
-        brass_resolve::canonicalize_imports(&[], root, &mut main_ast.imports, &search)
-    {
-        brass_resolve::load_module(
-            &target,
-            root,
-            &mut sources,
-            &mut visited,
-            &mut stack,
-            &mut deps,
-            span,
-            &mut load_errors,
-            &search,
-        );
+    let sources = front.sources;
+    let base = front.entry_base;
+    // The driver's error policy: abort per problem class, everything in the
+    // failing class reported with its location. The entry's own syntax errors
+    // come first (checking a recovered AST would bury them under cascading
+    // name/type errors); a broken module graph aborts before lowering, because
+    // analyzing a partial graph would drown the real problem in cascading
+    // unknown-name errors.
+    if !front.parse_errors.is_empty() {
+        return Err(render_errors(&front.parse_errors, &sources));
     }
-    // A broken module graph aborts before lowering: analyzing a partial graph
-    // would drown the real problem in cascading unknown-name errors. Unlike the
-    // old first-error abort, every load problem is reported, with its location.
-    if !load_errors.is_empty() {
-        let rendered: Vec<(String, Span)> = load_errors
-            .into_iter()
-            .map(|e| (e.message, e.span))
-            .collect();
-        return Err(render_errors(&rendered, &sources));
+    if !front.load_errors.is_empty() {
+        return Err(render_errors(&front.load_errors, &sources));
     }
-    modules.extend(deps);
-    modules.push(LoadedModule {
-        is_prelude: false,
-        path: vec!["main".into()],
-        ast: main_ast,
-    });
-
-    // Nested std modules (`std.collections`, ...) are not in
-    // the implicit prelude; load only the ones actually imported, transitively.
-    let nested = brass_resolve::load_std_nested(&modules, &[], &mut sources);
-    modules.extend(nested);
-    // The entry goes LAST: everything before it is the CONTEXT, and keeping the
-    // context a prefix gives it the same lowering ids in a context-only run as
-    // in the full one -- which is what lets a context seed's tables apply to
-    // the full program. It also runs the entry's top-level statements after
-    // every dependency's, which is the initialization order they already have
-    // with respect to each other.
-    if let Some(pos) = modules
-        .iter()
-        .position(|m| matches!(m.path.as_slice(), [p] if p == "main"))
-    {
-        let main_module = modules.remove(pos);
-        modules.push(main_module);
-    }
+    let mut modules = front.modules;
     phase("front/load-modules", t);
 
     // The context key: module names plus the hash of every source that is not
@@ -947,14 +969,14 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
     // context. The rewrites applied below are deterministic functions of these
     // sources, so pre-rewrite content identifies the post-rewrite context.
     let ctx_end = modules.len() - 1;
-    let ctx_key = Some(brass_cache::context_key(
-        "jit",
+    let ctx_key = brass_cache::context_key(
+        CACHE_FLAVOR,
         modules[..ctx_end].iter().map(|m| m.path.join(".")),
         sources
             .entries()
             .filter(|(b, _)| *b != base)
             .map(|(_, src)| brass_cache::content_hash(src.as_bytes())),
-    ));
+    );
 
     // Resolve qualified uses of module imports (`import a.b` + `b.name`),
     // promoting the used names onto the imports so everything downstream sees
@@ -966,44 +988,22 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
     // The pass may reject a `spawn` it cannot analyze; those diagnostics join the
     // front-end errors below.
     #[cfg(jit_backend)]
-    let spawn_errors: Vec<(String, Span)> = {
-        report_spawn_ownership(&modules);
-        auto_acquire_modules(&mut modules)
+    let (warnings, spawn_errors): (Vec<String>, Vec<(String, Span)>) = {
+        let warnings = report_spawn_ownership(&modules);
+        for w in &warnings {
+            eprintln!("{w}");
+        }
+        (warnings, auto_acquire_modules(&mut modules))
     };
     #[cfg(not(jit_backend))]
-    let spawn_errors: Vec<(String, Span)> = Vec::new();
+    let (warnings, spawn_errors): (Vec<String>, Vec<(String, Span)>) = (Vec::new(), Vec::new());
 
     // The context seed: the analysis tables of every module EXCEPT the entry,
     // reused so the full check below re-infers only the entry. Looked up in the
     // shared on-disk store when caching is enabled; rebuilt (and stored) from a
     // context-only run otherwise. A context with diagnostics yields no seed and
     // the full run reports everything as before.
-    let ctx_seed = {
-        let cached = match &ctx_key {
-            Some(key) if brass_cache::enabled() => brass_cache::load_context(key),
-            _ => None,
-        };
-        match cached {
-            Some(seed) => {
-                tracing::debug!(target: "brass::perf", "context seed loaded from disk");
-                Some(seed)
-            }
-            None => {
-                let t = std::time::Instant::now();
-                let (ctx_program, ctx_errors) = lower(&modules[..ctx_end]);
-                let seed = if ctx_errors.is_empty() {
-                    brass_typeck::context_seed(&ctx_program)
-                } else {
-                    None
-                };
-                phase("front/context-check", t);
-                if let (Some(key), Some(seed), true) = (&ctx_key, &seed, brass_cache::enabled()) {
-                    brass_cache::save_context(key, seed);
-                }
-                seed
-            }
-        }
-    };
+    let ctx_seed = cached_context_seed(&ctx_key, &modules[..ctx_end], "front/context-check");
 
     tracing::debug!(modules = modules.len(), "lowering module graph to HIR");
     let t = std::time::Instant::now();
@@ -1058,32 +1058,11 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         });
         match specialize_keyed(&mut modules, &program, &analysis) {
             Ok(()) => {
-                let repass_seed = {
-                    let cached = match &repass_key {
-                        Some(key) if brass_cache::enabled() => brass_cache::load_context(key),
-                        _ => None,
-                    };
-                    match cached {
-                        Some(seed) => Some(seed),
-                        None => {
-                            let t = std::time::Instant::now();
-                            let ctx_end = modules.len() - 1;
-                            let (ctx_program, ctx_errors) = lower(&modules[..ctx_end]);
-                            let seed = if ctx_errors.is_empty() {
-                                brass_typeck::context_seed(&ctx_program)
-                            } else {
-                                None
-                            };
-                            phase("front/keyed-context-check", t);
-                            if let (Some(key), Some(seed), true) =
-                                (&repass_key, &seed, brass_cache::enabled())
-                            {
-                                brass_cache::save_context(key, seed);
-                            }
-                            seed
-                        }
-                    }
-                };
+                let repass_seed = cached_context_seed(
+                    &repass_key,
+                    &modules[..modules.len() - 1],
+                    "front/keyed-context-check",
+                );
                 let t = std::time::Instant::now();
                 let (program2, lower_errors2) = lower(&modules);
                 for e in lower_errors2 {
@@ -1107,17 +1086,31 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
 
     let expr_types = aggregate_result_types(&analysis.typed, &program);
     let call_locations = call_site_locations(&modules, &sources);
-    // Persist the clean analysis for the next run. Every stat'able source in
+    // Persist the clean analysis for the next run. Every on-disk source in
     // the map is stamped (the embedded stdlib has no path and is covered by
-    // the compiler tag in the header); a file that cannot be stamped anymore
-    // makes the build uncacheable rather than wrongly cacheable.
+    // the compiler tag in the header): `.cz` sources from the very text that
+    // was parsed -- a re-read would race an editor saving during the analysis
+    // -- and native plugin libraries from the file itself (their entry's text
+    // is the synthesized wrapper, not the library). The entry file is the
+    // first path-bearing source (the stdlib precedes it pathless), which is
+    // the load-time entry-identity contract. A file that cannot be stamped
+    // anymore makes the build uncacheable rather than wrongly cacheable.
     if brass_cache::enabled() {
         let t = std::time::Instant::now();
         let roots = brass_cache::StampRoots::new(&entry_path, &search);
         let mut deps = Vec::new();
         let mut stampable = true;
-        for path in sources.file_paths() {
-            match brass_cache::FileStamp::of(path, &roots) {
+        for (path, text) in sources.sourced() {
+            let native = matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("so" | "dylib" | "dll")
+            );
+            let stamp = if native {
+                brass_cache::FileStamp::of(path, &roots)
+            } else {
+                Some(brass_cache::FileStamp::of_text(path, text, &roots))
+            };
+            match stamp {
                 Some(stamp) => deps.push(stamp),
                 None => stampable = false,
             }
@@ -1125,9 +1118,12 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         if stampable {
             brass_cache::save(
                 &entry_path,
+                CACHE_FLAVOR,
                 &brass_cache::Payload {
                     deps,
+                    packages: brass_cache::package_names(&search),
                     modules,
+                    warnings,
                     channels: brass_cache::Channels {
                         expr_types: expr_types.iter().map(|(s, t)| (*s, t.clone())).collect(),
                         view_args: analysis.view_args.iter().copied().collect(),

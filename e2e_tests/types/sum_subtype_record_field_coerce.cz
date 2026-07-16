@@ -1,0 +1,27 @@
+// Storing a child sum into a record field annotated with the parent type is a
+// coercion site: the construction rebuilds the value at the parent layout, so
+// reading the field back matches on the parent's variants correctly.
+type IP =
+    | Ia {
+        n: int32
+    }
+    | Ib
+
+type IC: IP =
+    | Ia {
+        pad: string
+        n: int32
+    }
+    | Ib
+
+type Box = {
+    inner: IP
+}
+
+fun main() {
+    let b = Box { inner: IC.Ia { pad: "xx", n: 42 } }
+    match b.inner {
+        Ia { n } => println(n)
+        Ib => println("ib")
+    }
+}

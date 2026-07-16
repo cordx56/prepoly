@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// `root`-relative extensionless key and its `include_base`-relative include
 /// path (the repo root, so paths read `std/...`), sorted by key so the
 /// generated tables are deterministic.
-fn collect_pp(
+fn collect_cz(
     root: &Path,
     include_base: &Path,
     dir: &Path,
@@ -83,8 +83,8 @@ fn main() {
 
     let repo_root = std_dir.parent().expect("std has a parent").to_path_buf();
     let prelude_dir = std_dir.join("prelude");
-    let prelude = collect_pp(&prelude_dir, &repo_root, &prelude_dir, None);
-    let nested = collect_pp(&std_dir, &repo_root, &std_dir, Some(prelude_dir.as_path()));
+    let prelude = collect_cz(&prelude_dir, &repo_root, &prelude_dir, None);
+    let nested = collect_cz(&std_dir, &repo_root, &std_dir, Some(prelude_dir.as_path()));
     assert!(
         !prelude.is_empty(),
         "no prelude modules found under {}",

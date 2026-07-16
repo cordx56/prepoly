@@ -132,20 +132,6 @@ impl<'a> Checker<'a> {
                     .clone()
                     .or_else(|| self.function_returns.get(&symbol).cloned())
                     .unwrap_or_else(|| self.fresh_unknown());
-                // Record a fully-concrete call instance for static
-                // monomorphization.
-                let resolved_args: Vec<Type> = arg_types.iter().map(|t| self.resolve(t)).collect();
-                if resolved_args.iter().all(is_concrete_type) {
-                    let entry = self.fn_instances.entry(symbol.clone()).or_default();
-                    if !entry.iter().any(|t| t == &resolved_args) {
-                        tracing::debug!(
-                            symbol = %symbol,
-                            args = ?resolved_args.iter().map(|t| t.display()).collect::<Vec<_>>(),
-                            "recording new monomorphization instance"
-                        );
-                        entry.push(resolved_args);
-                    }
-                }
                 // An ANONYMOUS structural argument to a row-covered eligible
                 // parameter is checked against the callee's derived row HERE, at
                 // the value's own span: presence of every Required field and its

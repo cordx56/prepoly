@@ -23,7 +23,7 @@ impl<'a> Checker<'a> {
                 self.errors.push(TypeError {
                     message: format!(
                         "operator `{}` is not defined for `{}`",
-                        unary_op_str(op),
+                        op.symbol(),
                         other.display()
                     ),
                     span,
@@ -161,7 +161,7 @@ impl<'a> Checker<'a> {
         self.errors.push(TypeError {
             message: format!(
                 "operator `{}` is not defined for `{}` and `{}` (no applicable conversion)",
-                op_str(op),
+                op.symbol(),
                 left.display(),
                 right.display()
             ),
@@ -220,7 +220,76 @@ impl<'a> Checker<'a> {
             }
         }
         let resolved = self.resolve(want);
+        self.note_sum_view(span, Some(&resolved));
         self.sum_views.insert(span, resolved);
+    }
+
+    /// Evidence that the sum flow at `span` needs NO rebuild in this
+    /// elaboration (the value already has the required nominal). Recorded so
+    /// a generic body where another instantiation coerces at the same span is
+    /// rejected instead of executing the baked rebuild on an uncoerced value.
+    pub(super) fn record_sum_view_identity(&mut self, span: brass_parser::Span) {
+        self.note_sum_view(span, None);
+    }
+
+    /// Track how the sum flow at `span` lowers and reject a generic whose
+    /// instantiations disagree. The `sum_views` channel is consumed by ONE
+    /// shared MIR lowering, so a span must resolve to a single shape: one
+    /// parent instance to rebuild to, or no rebuild at all. A not-yet-concrete
+    /// target (the template elaboration of a generic) is no information --
+    /// neither recorded nor a conflict. Two concrete targets agree when their
+    /// nominal matches and no payload slot pinned by both differs; the more
+    /// refined observation is kept for later comparisons.
+    fn note_sum_view(&mut self, span: brass_parser::Span, view: Option<&Type>) {
+        if self.sum_view_poisoned.contains(&span) {
+            return;
+        }
+        let view: Option<NominalType> = match view {
+            None => None,
+            Some(t) if is_concrete_type(t) => match t {
+                Type::Sum(n) => Some(n.clone()),
+                _ => return,
+            },
+            Some(_) => return,
+        };
+        let Some(prev) = self.sum_view_seen.get(&span) else {
+            self.sum_view_seen.insert(span, view);
+            return;
+        };
+        let conflict = match (prev, &view) {
+            (None, None) => false,
+            (Some(p), Some(n)) => {
+                p.id != n.id
+                    || p.substitution
+                        .iter()
+                        .any(|(k, pt)| n.substitution.get(k).is_some_and(|nt| pt != nt))
+            }
+            _ => true,
+        };
+        if conflict {
+            let message = match (prev, &view) {
+                (Some(_), Some(_)) => {
+                    "this value coerces to different parent sum \
+                     instantiations across instantiations of this generic function; the \
+                     shared lowering can only rebuild one shape (annotate the parameter \
+                     to fix it)"
+                }
+                _ => {
+                    "this value coerces to a declared parent sum in one instantiation \
+                     of this generic function and flows unchanged in another; the two \
+                     lower differently (annotate the parameter to fix it)"
+                }
+            };
+            self.errors.push(TypeError {
+                message: message.to_string(),
+                span,
+            });
+            self.sum_view_poisoned.insert(span);
+        } else if let (Some(p), Some(n)) = (prev, view)
+            && n.substitution.iter().count() > p.substitution.iter().count()
+        {
+            self.sum_view_seen.insert(span, Some(n));
+        }
     }
 
     pub(super) fn expect_expr_assignable(&mut self, got: &Type, want: &Type, expr: &Expr) {
@@ -252,6 +321,12 @@ impl<'a> Checker<'a> {
         false
     }
 
+    /// Check that a `got` value is usable where `want` is required, reporting
+    /// a diagnostic otherwise. The accept/reject core is the shared value-flow
+    /// rule in `brass_typesys` (nullable-stripped unification plus numeric
+    /// widening), layered here with the infer pass's own concerns: sum-view
+    /// recording for MIR, bidirectional structural subtyping, and the rich
+    /// per-case diagnostics (nullable use, narrowing hints, mismatch display).
     pub(super) fn expect_assignable(&mut self, got: &Type, want: &Type, span: brass_parser::Span) {
         let got = self.resolve(got);
         let want = self.resolve(want);
@@ -307,40 +382,48 @@ impl<'a> Checker<'a> {
             self.report_nullable_use(span);
             return;
         }
+        // The value-flow view of the requirement: a `T?` position accepts
+        // whatever its `T` accepts (the store wraps the converted value).
+        let want_flow = brass_typesys::strip_nullable(want.clone());
         // A declared sum subtype flowing into its parent must be RECORDED so
-        // MIR rebuilds the value -- `can_unify`'s structural fallback would
+        // MIR rebuilds the value -- the structural fallback below would
         // otherwise accept it silently and the unboxed layout would be
         // misread. Checked before the general acceptance paths, against the
         // nullable-stripped requirement (`Result<..>?` still coerces the sum).
-        {
-            let want_inner = match &want {
-                Type::Nullable(inner) => inner.as_ref().clone(),
-                other => other.clone(),
-            };
-            if let (Type::Sum(h), Type::Sum(w)) = (&got, &want_inner)
-                && h.id != w.id
-                && crate::structural::types_compatible(self.program, &got, &want_inner)
-            {
-                self.record_sum_view(&got, &want_inner, span);
+        if let (Type::Sum(h), Type::Sum(w)) = (&got, &want_flow) {
+            if h.id != w.id && crate::structural::types_compatible(self.program, &got, &want_flow) {
+                self.record_sum_view(&got, &want_flow, span);
                 return;
             }
+            if h.id == w.id {
+                // Same-nominal flow: no rebuild here, and another
+                // instantiation must not bake one at this span.
+                self.record_sum_view_identity(span);
+            }
         }
-        if let Type::Nullable(inner) = &want
-            && (self.can_unify(&got, inner)
-                || numeric_flows_into(&got, &self.resolve(inner))
-                || matches!(got, Type::Never))
-        {
-            return;
-        }
-        if self.can_unify(&got, &want)
-            || crate::structural::types_compatible(self.program, &got, &want)
-        {
+        // Core value-flow acceptance, delegated to the shared authority
+        // (`brass_typesys::valueflow`): the same nullable-stripping
+        // unification the hm pass and the MIR checker apply, probed here
+        // without committing -- an assignability check must not pin a
+        // polymorphic value probed at several sites (a store that should
+        // constrain the value commits through `constrain_stored_value`).
+        if brass_typesys::flow_probe(&mut self.solver, &got, &want) {
             return;
         }
         // Automatic numeric conversion: a numeric value flows into a numeric
-        // position of another type (int widths/signedness, int -> float); the
-        // back ends convert at the flow point. float -> int stays explicit.
-        if numeric_flows_into(&got, &want) {
+        // position of another type (int widths/signedness, int -> float),
+        // also through a nullable requirement; the back ends convert at the
+        // flow point. float -> int stays explicit.
+        if numeric_flows_into(&got, &want_flow) {
+            return;
+        }
+        // Structural record/sum subtyping: flow positions accept a structural
+        // relative in either direction, against both the requirement and its
+        // nullable-stripped view (a wider record also flows into a `T?`
+        // position, where unification alone would refuse the nullable).
+        if self.structural_flow_accepts(&got, &want)
+            || (want_flow != want && self.structural_flow_accepts(&got, &want_flow))
+        {
             return;
         }
         // A numeric pair that is not value-preserving gets the dedicated
@@ -365,6 +448,15 @@ impl<'a> Checker<'a> {
             message: format!("cannot use `{got}` where `{want}` is required"),
             span,
         });
+    }
+
+    /// Structural record/sum compatibility in either direction. Flow
+    /// positions (assignment, argument, return) accept a structural relative
+    /// whichever side is the wider one; storage positions with invariant
+    /// elements use `types_invariant` instead and never call this.
+    fn structural_flow_accepts(&self, got: &Type, want: &Type) -> bool {
+        crate::structural::types_compatible(self.program, got, want)
+            || crate::structural::types_compatible(self.program, want, got)
     }
 
     /// Check a value pushed/inserted into a slice against its element type. Unlike
@@ -574,36 +666,5 @@ fn nullable_common_side(ty: &Type) -> Type {
     match ty {
         Type::Unknown(_) | Type::Nullable(_) => ty.clone(),
         other => Type::Nullable(Box::new(other.clone())),
-    }
-}
-
-fn op_str(op: BinOp) -> &'static str {
-    match op {
-        BinOp::Add => "+",
-        BinOp::Sub => "-",
-        BinOp::Mul => "*",
-        BinOp::Div => "/",
-        BinOp::Rem => "%",
-        BinOp::Eq => "==",
-        BinOp::Ne => "!=",
-        BinOp::Lt => "<",
-        BinOp::Gt => ">",
-        BinOp::Le => "<=",
-        BinOp::Ge => ">=",
-        BinOp::And => "&&",
-        BinOp::Or => "||",
-        BinOp::BitAnd => "&",
-        BinOp::BitOr => "|",
-        BinOp::BitXor => "^",
-        BinOp::Shl => "<<",
-        BinOp::Shr => ">>",
-    }
-}
-
-fn unary_op_str(op: UnaryOp) -> &'static str {
-    match op {
-        UnaryOp::Neg => "-",
-        UnaryOp::Not => "!",
-        UnaryOp::BitNot => "~",
     }
 }

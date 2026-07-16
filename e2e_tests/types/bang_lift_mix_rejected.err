@@ -1,0 +1,1 @@
+in one instantiation of this generic function and propagates an already-wrapped `Error` in another

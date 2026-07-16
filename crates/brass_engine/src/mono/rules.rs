@@ -389,11 +389,37 @@ pub(super) fn merge_return_types(a: &Type, b: &Type) -> Type {
     }
 }
 
+/// Whether `specific` is `general` with equal-or-more payload information:
+/// the same shape through nullables, the same nominal, and every
+/// record-field/variant-payload slot `general` pins present in `specific`
+/// with a matching (or further-refined) type. A bare nominal return
+/// annotation relates to the body's inferred instance exactly this way, so
+/// the inferred side may stand in for the annotation without loosening the
+/// contract the annotation states.
+pub(super) fn is_refinement_of(general: &Type, specific: &Type) -> bool {
+    match (general, specific) {
+        // An open slot (a declaration's shared inference variable carried
+        // into a bare instance) is information-free: anything refines it.
+        (Type::Unknown(_), _) => true,
+        (Type::Nullable(g), Type::Nullable(s)) => is_refinement_of(g, s),
+        (Type::Record(g), Type::Record(s)) | (Type::Sum(g), Type::Sum(s)) => {
+            g.id == s.id
+                && (g.id >= 0 || g.name() == s.name())
+                && g.substitution.iter().all(|(k, gt)| {
+                    s.substitution
+                        .get(k)
+                        .is_some_and(|st| is_refinement_of(gt, st))
+                })
+        }
+        _ => general == specific,
+    }
+}
+
 /// Strip one level of nullable: the inner type of a `T?`, else `ty` unchanged.
 /// Used to narrow a value proven non-null by a guard (`if a`) -- the MIR local
 /// still carries the declared nullable -- in arithmetic/comparison and as the
 /// receiver of an aggregate operation (field/element/`len`/`push`/...).
-pub(crate) fn unwrap_nullable(ty: &Type) -> &Type {
+pub fn unwrap_nullable(ty: &Type) -> &Type {
     match ty {
         Type::Nullable(inner) => inner,
         other => other,

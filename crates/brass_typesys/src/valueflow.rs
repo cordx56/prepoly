@@ -16,6 +16,17 @@ pub fn strip_nullable(ty: Type) -> Type {
     }
 }
 
+/// The two sides of a value flow, resolved and with a top-level nullable
+/// stripped from each: the normalization every flow entry point applies
+/// before unifying, factored so the committing ([`flow_unify`]) and probing
+/// ([`flow_probe`]) forms cannot drift.
+fn flow_sides(solver: &Solver, a: &Type, b: &Type) -> (Type, Type) {
+    (
+        strip_nullable(solver.resolve(a)),
+        strip_nullable(solver.resolve(b)),
+    )
+}
+
 /// Unify with Brass's value-flow leniency, returning whether it succeeded.
 /// A top-level nullable is stripped from each side (see [`strip_nullable`]),
 /// and array-like types reconcile by element type -- a `[1,2,3]` literal,
@@ -26,8 +37,7 @@ pub fn strip_nullable(ty: Type) -> Type {
 /// attempt is rolled back), so a caller can try further fallbacks -- numeric
 /// conversion, structural subtyping -- against unpolluted state.
 pub fn flow_unify(solver: &mut Solver, a: &Type, b: &Type) -> bool {
-    let a = strip_nullable(solver.resolve(a));
-    let b = strip_nullable(solver.resolve(b));
+    let (a, b) = flow_sides(solver, a, b);
     if let (Some(x), Some(y)) = (index_element(&a), index_element(&b)) {
         return flow_unify(solver, &x, &y);
     }
@@ -37,6 +47,25 @@ pub fn flow_unify(solver: &mut Solver, a: &Type, b: &Type) -> bool {
     }
     solver.rollback(snapshot);
     false
+}
+
+/// Non-committing probe of the nullable-stripping unification at the core of
+/// [`flow_unify`]: whether the two sides unify once a top-level nullable is
+/// stripped from each, with every binding rolled back even on success. This
+/// is the acceptance core of the infer pass's assignability checks, which
+/// probe one polymorphic value against many positions and must not pin it (a
+/// store that should constrain the value commits separately).
+///
+/// Unlike [`flow_unify`] this does NOT reconcile array-like types by element:
+/// assignability guards storage whose element layout is exact -- a `T?[]` is
+/// cell storage that a `T[]` requirement must not accept -- so elements have
+/// to unify as written.
+pub fn flow_probe(solver: &mut Solver, a: &Type, b: &Type) -> bool {
+    let (a, b) = flow_sides(solver, a, b);
+    let snapshot = solver.snapshot();
+    let ok = solver.unify(&a, &b).is_ok();
+    solver.rollback(snapshot);
+    ok
 }
 
 #[cfg(test)]
@@ -63,6 +92,40 @@ mod tests {
             &Type::Ref(Box::new(arr)),
             &Type::Ref(Box::new(fixed))
         ));
+    }
+
+    /// The probe shares the nullable-stripping core but never commits: it
+    /// accepts a `T` against a `T?` requirement, and a success against an
+    /// open variable leaves that variable unbound afterwards.
+    #[test]
+    fn probe_strips_nullable_and_commits_nothing() {
+        let mut solver = Solver::new();
+        let int = Type::Int(IntKind::I32);
+        assert!(flow_probe(
+            &mut solver,
+            &int,
+            &Type::Nullable(Box::new(int.clone()))
+        ));
+        let v = solver.fresh(InferenceVarKind::Source);
+        assert!(flow_probe(&mut solver, &int, &v));
+        assert!(
+            solver.resolve(&v).is_unknown(),
+            "a successful probe leaked a binding: {:?}",
+            solver.resolve(&v)
+        );
+    }
+
+    /// The probe keeps array elements exact: a nullable-element slice must not
+    /// pass where a plain-element slice is required (the two have different
+    /// storage layouts), even though the committing form's element
+    /// reconciliation would strip the nullable per level.
+    #[test]
+    fn probe_does_not_reconcile_array_elements() {
+        let mut solver = Solver::new();
+        let int = Type::Int(IntKind::I32);
+        let nullable_elems = Type::Slice(Box::new(Type::Nullable(Box::new(int.clone()))));
+        let plain_elems = Type::Slice(Box::new(int));
+        assert!(!flow_probe(&mut solver, &nullable_elems, &plain_elems));
     }
 
     /// A failed flow unification must commit nothing: the variable bound while

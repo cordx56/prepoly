@@ -1,0 +1,19 @@
+type Box = {
+    f
+}
+
+fun make(flag: bool) -> Box! {
+    if flag {
+        return error("nope")
+    }
+    return Box { f: () -> { return 41 } }
+}
+
+fun main() {
+    let b = make(false)!
+    println(b.f())
+    match make(true) {
+        Ok { value } => println("ok")
+        Err { error } => println("err: {error.value}")
+    }
+}

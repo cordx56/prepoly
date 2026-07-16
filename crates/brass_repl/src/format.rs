@@ -11,11 +11,12 @@
 //!  - a record renders as `T {\n    field: <value>,\n}` and a sum variant as
 //!    `T.Variant {\n    field: <value>,\n}` (a field-less variant as bare
 //!    `T.Variant`), each field rendered recursively and indented one level so
-//!    nested aggregates step in. The field order is the declaration order recovered
-//!    from the HIR type, not the value's hash-map order.
+//!    nested aggregates step in. Which fields render, in what order, at what
+//!    types is not decided here: both back ends resolve that through
+//!    `brass_engine::render_record_fields` / `render_variant_fields`, so the
+//!    field decision cannot drift between them.
 
-use brass_hir::types::{RESULT_ERR_ERROR, RESULT_OK_VALUE};
-use brass_hir::{IntKind, NominalType, Program, Type, TypeKind};
+use brass_hir::{IntKind, NominalType, Program, Type};
 
 use crate::value::{MAX_VALUE_DEPTH, Value, VariantObj};
 
@@ -79,7 +80,8 @@ fn format_value_at(
         }
         Type::Record(n) => match v {
             Value::Record(fields) => {
-                let layout = record_field_layout(program, n);
+                // An unavailable layout renders as the bare `T {}`, like the JIT.
+                let layout = brass_engine::render_record_fields(program, n).unwrap_or_default();
                 render_named_fields(program, record_header(n), &layout, &fields.borrow(), depth)?
             }
             _ => n.name.clone(),
@@ -99,7 +101,7 @@ fn bool_str(b: bool) -> String {
 
 /// Signed or unsigned decimal, per the integer kind.
 fn int_str(v: i64, k: IntKind) -> String {
-    if int_signed(k) {
+    if k.is_signed() {
         v.to_string()
     } else {
         // The value is normalized (zero-extended) for widths below 64; for uint64
@@ -109,17 +111,7 @@ fn int_str(v: i64, k: IntKind) -> String {
 }
 
 /// A float with the typed path's trailing-`.0` rule.
-pub fn float_str(v: f64) -> String {
-    if v.is_finite() && v == v.trunc() && v.abs() < 1e15 {
-        format!("{v:.1}")
-    } else {
-        format!("{v}")
-    }
-}
-
-fn int_signed(k: IntKind) -> bool {
-    matches!(k, IntKind::I8 | IntKind::I16 | IntKind::I32 | IntKind::I64)
-}
+pub use brass_utils::float_str;
 
 /// Build `<header> {\n    f: <v>,\n}` for the named fields (or `<header> {}` when
 /// the type has none). Each field value is rendered recursively and indented one
@@ -167,84 +159,21 @@ fn render_named_fields(
 }
 
 /// Render a sum value as `T.Variant { ... }` (bare `T.Variant` when field-less).
+/// A variant the shared resolver cannot resolve renders as the bare type name,
+/// which is where the JIT's unknown-tag default lands for the same value.
 fn render_sum(
     program: &Program,
     n: &NominalType,
     var: &VariantObj,
     depth: usize,
 ) -> Result<String, String> {
+    let Some((_tag, fields)) = brass_engine::render_variant_fields(program, n, &var.variant) else {
+        return Ok(n.name.clone());
+    };
     let header = format!("{}.{}", n.name, var.variant);
-    let fields = variant_field_layout(program, n, &var.variant);
     if fields.is_empty() {
         Ok(header)
     } else {
         render_named_fields(program, &header, &fields, &var.fields.borrow(), depth)
     }
-}
-
-/// The `(field name, concrete type)` of each record field in declaration order.
-/// A constructed record carries each field's concrete type in its substitution;
-/// a bare reference falls back to the declared type. An unrecognized nominal (a
-/// structural boundary record) renders its substitution in sorted-name order.
-fn record_field_layout(program: &Program, n: &NominalType) -> Vec<(String, Type)> {
-    if let Some(info) = program.type_by_id(n.id)
-        && let TypeKind::Record { fields, .. } = &info.kind
-    {
-        return fields
-            .iter()
-            .filter_map(|f| {
-                let ty = n
-                    .substitution
-                    .get(&f.name)
-                    .cloned()
-                    .or_else(|| f.resolved_ty.clone())?;
-                Some((f.name.clone(), ty))
-            })
-            .collect();
-    }
-    n.substitution
-        .iter()
-        .map(|(k, t)| (k.to_string(), t.clone()))
-        .collect()
-}
-
-/// The `(field name, concrete type)` of the named variant's fields in declaration
-/// order. `Result` is handled directly (its payloads live in the nominal
-/// substitution under `Ok.value` / `Err.error`).
-fn variant_field_layout(program: &Program, n: &NominalType, variant: &str) -> Vec<(String, Type)> {
-    if n.is_result_type() {
-        let key = if variant == "Ok" {
-            RESULT_OK_VALUE
-        } else {
-            RESULT_ERR_ERROR
-        };
-        let fname = if variant == "Ok" { "value" } else { "error" };
-        return match n.substitution.get(key) {
-            Some(t) => vec![(fname.to_string(), t.clone())],
-            None => Vec::new(),
-        };
-    }
-    let Some(info) = program.type_by_id(n.id) else {
-        return Vec::new();
-    };
-    let TypeKind::Sum { variants } = &info.kind else {
-        return Vec::new();
-    };
-    let Some(v) = variants.iter().find(|v| v.name == variant) else {
-        return Vec::new();
-    };
-    v.fields
-        .iter()
-        .filter_map(|f| {
-            // A field's concrete type may be carried in the substitution (keyed
-            // `Variant.field`) when it was inferred at construction; otherwise the
-            // declared type is concrete enough to render.
-            let ty = n
-                .substitution
-                .get(&format!("{variant}.{}", f.name))
-                .cloned()
-                .or_else(|| f.resolved_ty.clone())?;
-            Some((f.name.clone(), ty))
-        })
-        .collect()
 }

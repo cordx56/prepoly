@@ -45,7 +45,7 @@ pub use boundary::{
 };
 pub use fold::{cond_static_truthiness, locals_only_in_dead_blocks, reachable_blocks};
 pub use rules::binary_operand_type;
-pub(crate) use rules::unwrap_nullable;
+pub use rules::unwrap_nullable;
 pub use scan::operand_type_of;
 
 // `is_comparison` lives with the constraint generator; re-exported here so the
@@ -57,8 +57,8 @@ pub use symbols::{
 };
 
 use rules::{
-    bin_validation_types, binary_operand_common, check_bin, const_type, is_supported,
-    merge_return_types, resolve_nominal, variant_field_layoutable,
+    bin_validation_types, binary_operand_common, check_bin, const_type, is_refinement_of,
+    is_supported, merge_return_types, resolve_nominal, variant_field_layoutable,
 };
 use scan::{
     binding_name_of, body_has_error_source, collect_array_pushes, collect_closure_passes,
@@ -767,21 +767,56 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             .map(|t| t.clone().unwrap_or(Type::Never))
             .collect();
         let reachable = reachable_blocks(body, &probe);
-        if sym.contains("get_or") {
-            tracing::debug!(target: "brass_mono", "{sym} ret={:?}", ret.as_ref().map(|t| t.display_full()));
-            for (i, t) in local_types.iter().enumerate() {
-                tracing::debug!(target: "brass_mono", "  local _{i}: {:?}", t.as_ref().map(|t| t.display_full()));
-            }
-            for (i, (live, e)) in reachable.iter().zip(&block_errors).enumerate() {
-                tracing::debug!(target: "brass_mono", "  bb{i} live={live} err={e:?}");
-            }
-        }
         if let Some(e) = reachable
             .iter()
             .zip(&block_errors)
             .find_map(|(live, e)| live.then_some(e.as_ref()).flatten())
         {
             return Err(e.clone());
+        }
+
+        // A return annotation is authoritative for the nominal it names, but a
+        // BARE nominal annotation carries no substitution for the slots only
+        // the body's constructions can type (an unannotated closure field).
+        // Freezing the bare annotation washes those types out: the caller's
+        // local goes bare, `resolve_nominal` cannot supply an unannotated
+        // field, and reading it yields `?`. So join the reachable returns the
+        // way the unannotated path does and promote to the joined instance
+        // when it merely REFINES the annotation -- the nominal identity the
+        // annotation states is preserved, its open slots are filled. Anything
+        // else keeps the annotation, exactly the pre-existing behavior.
+        if annotated && !fallible {
+            let mut merged: Option<Type> = None;
+            for (i, block) in body.blocks.iter().enumerate() {
+                if reachable[i]
+                    && let Terminator::Return(op) = &block.term
+                    && let Some(t) = self.operand_type(op, &local_types)?
+                {
+                    merged = Some(match &merged {
+                        Some(prev) => merge_return_types(prev, &t),
+                        None => t,
+                    });
+                }
+            }
+            if let (Some(ann), Some(m)) = (&ret, merged)
+                && &m != ann
+                && is_refinement_of(ann, &m)
+            {
+                ret = Some(m);
+            }
+        } else if fallible
+            && declared_ok.is_some()
+            && let Some(t) = self.infer_result_ret(body, &local_types, None)?
+            && ret
+                .as_ref()
+                .is_some_and(|cur| cur != &t && is_refinement_of(cur, &t))
+        {
+            // The fallible mirror: `-> T!` fixes the Ok payload, but a bare
+            // nominal `T` needs the body's inferred Ok instance the same way.
+            // Gated on `declared_ok` (not `annotated`): a `T!` annotation with
+            // an open error payload is filtered from `ret_ann` as unsupported
+            // while its Ok side still froze the payload via `declared_ok`.
+            ret = Some(t);
         }
 
         let dead_locals = locals_only_in_dead_blocks(body, &reachable);
@@ -864,9 +899,14 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         // Validate what mutual recursion assumed about this instance while it
         // was in progress: a mismatch (e.g. a fallible body whose error payload
         // is not the guessed `string`) must fail the frame -- the consumer was
-        // already typed against the assumption.
+        // already typed against the assumption. An assumption taken from a
+        // bare annotation that the final return merely refines is compatible:
+        // the consumer typed against the same nominal, just with fewer slots
+        // pinned (the reverse -- a concrete assumption, bare final -- stays an
+        // error).
         if let Some(assumed) = self.assumed_rets.remove(&sym)
             && assumed != ret
+            && !is_refinement_of(&assumed, &ret)
         {
             return Err(format!(
                 "mutual recursion typed `{sym}` as returning `{}`, but its body returns `{}`",
@@ -913,11 +953,29 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         // Whether some nullable-operand `expr!` returns `null` from this body:
         // the fallible return type is then wrapped in an outer `?`.
         let mut saw_null_prop = false;
+        // Ok-slot notes merge instead of freezing on the first sighting: a
+        // directly-returned `error(...)` Result carries an UNINHABITED Ok
+        // payload (`void`), which must yield to the real payload of a bare
+        // return elsewhere in the body -- first-come froze `ok` to void and
+        // the real value was read back as 0. A later sighting that merely
+        // REFINES the current one (same nominal, more slots pinned) also
+        // upgrades it, mirroring the bare-annotation promotion.
         let note = |slot: &mut Option<Type>, t: Option<Type>| {
-            if slot.is_none()
-                && let Some(t) = t
-            {
-                *slot = Some(t);
+            let Some(t) = t else {
+                return;
+            };
+            match slot {
+                None => *slot = Some(t),
+                Some(existing)
+                    if matches!(existing, Type::Void | Type::Never)
+                        && !matches!(t, Type::Void | Type::Never) =>
+                {
+                    *slot = Some(t)
+                }
+                Some(existing) if *existing != t && is_refinement_of(existing, &t) => {
+                    *slot = Some(t)
+                }
+                _ => {}
             }
         };
         // The Err slot prefers the LIFTED payload (the prelude `Error`): a
@@ -1184,6 +1242,16 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                     // the lifted (prelude `Error`) shape: the pre-lift typing
                     // was provisional (see `infer_result_ret`).
                     (Some(cur), Some(t)) if self.result_err_upgrade(&cur, &t) => {
+                        local_types[local.index()] = Some(t);
+                        *changed = true;
+                    }
+                    // A destination seeded with a BARE nominal (the checker's
+                    // seed of a call whose callee declares a bare `-> T`)
+                    // upgrades to the rvalue's REFINEMENT of it: the nominal
+                    // is unchanged, the slots only the callee's body could
+                    // type (unannotated fields) fill in. Refinement strictly
+                    // adds information, so the fixpoint stays monotone.
+                    (Some(cur), Some(t)) if cur != t && is_refinement_of(&cur, &t) => {
                         local_types[local.index()] = Some(t);
                         *changed = true;
                     }

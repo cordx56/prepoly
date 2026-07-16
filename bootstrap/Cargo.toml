@@ -6,7 +6,6 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-tracing.workspace = true
 tar = "0.4"
 xz = "0.1"
 sha2 = "0.11"

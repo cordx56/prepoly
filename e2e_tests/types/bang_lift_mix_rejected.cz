@@ -1,0 +1,32 @@
+// The `!` lift arm (re-wrapping a raw error payload into the prelude Error)
+// is baked per span into one shared MIR body. A generic `!` whose operand
+// propagates an already-wrapped Error in one instantiation and a raw string
+// payload of a declared Result subtype in another has no single correct
+// lowering and must be rejected at check time.
+type Mine: Result =
+    | Ok {
+        value: int32
+    }
+    | Err {
+        error: string
+    }
+
+fun lifted() -> int32! {
+    return error("already Error")
+}
+
+fun relay(r) -> infer! {
+    let v = r!
+    return v
+}
+
+fun main() {
+    match relay(lifted()) {
+        Ok { value } => { println("ok {value}") }
+        Err { error } => { println("A: {error.display()}") }
+    }
+    match relay(Mine.Err { error: "raw string" }) {
+        Ok { value } => { println("ok {value}") }
+        Err { error } => { println("B: {error.display()}") }
+    }
+}

@@ -1,0 +1,37 @@
+// A pinned payload slot of a sum instance is storage: same-id flow inserts no
+// rebuild, so `P<Pa.v=IC>` must not pass where `P<Pa.v=IP>` is required even
+// though IC declares IP as its parent (reading the child's layout through the
+// parent's would corrupt the unboxed representation).
+type IP =
+    | Ia {
+        n: int32
+    }
+    | Ib
+
+type IC: IP =
+    | Ia {
+        pad: string
+        n: int32
+    }
+    | Ib
+
+type P =
+    | Pa {
+        v
+    }
+    | Pb
+
+fun main() {
+    let child = P.Pa { v: IC.Ia { pad: "xx", n: 42 } }
+    let parent = P.Pa { v: IP.Ia { n: 99 } }
+    parent = child
+    match parent {
+        Pa { v } => {
+            match v {
+                Ia { n } => println(n)
+                Ib => println("ib")
+            }
+        }
+        Pb => println("pb")
+    }
+}

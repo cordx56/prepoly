@@ -15,17 +15,27 @@
 //! A cache is written next to its entry file (`app.cz` -> `app.czcache`), only
 //! after an analysis with NO diagnostics, and names every source file that went
 //! into the build. It is reused only when every one of those files still has
-//! the same contents (length and SHA-1 -- see `FileStamp`) and the compiler tag
-//! matches. Sources are named RELATIVE to the root each was resolved under
-//! (the entry file's directory, an include root, a package root), never by
-//! machine path -- so a cache survives the whole project moving, and one packed
-//! alongside a release's `bin/` and `libraries/` validates wherever they are
-//! installed. The resolution environment is not part of the key either: if
-//! `BRASS_PACKAGES` or `BRASS_INCLUDE` change WHERE a name resolves, the
-//! resolved file's contents decide -- equal bytes are the same program, and
-//! different bytes miss. Any mismatch, short read, or decode error falls back
-//! to the full pipeline -- the cache can never make a build wrong, only
-//! faster.
+//! the same contents (length and SHA-1 -- see `FileStamp`), the compiler tag
+//! matches, the entry file itself is the one recorded (the first dep -- so
+//! `app` and `app.cz`, which share a cache path, cannot revive each other's
+//! program), and the set of declared `BRASS_PACKAGES` names is unchanged (a
+//! name newly bound captures an import's first segment BEFORE any file search,
+//! so the same on-disk files no longer describe the same program). Source
+//! files are named RELATIVE to the root each was resolved under (the entry
+//! file's directory, an include root, a package root), never by machine path
+//! -- so a cache survives the whole project moving. Native plugin libraries
+//! are the exception: the synthesized wrapper embeds the library's absolute
+//! path (the runtime dlopens exactly that string), so their stamps are pinned
+//! `Absolute` and a cache involving plugins misses after a move instead of
+//! re-lowering wrappers that would open the old location. Any mismatch, short
+//! read, or decode error falls back to the full pipeline -- the cache can
+//! never make a build wrong, only faster.
+//!
+//! Known accepted limit: a module served by an include-root file at save time
+//! that a native plugin under an EARLIER root would now shadow (or the
+//! reverse, a project `.cz` newly shadowing a plugin) is not re-judged by the
+//! stamps; the wrapper/file distinction is only re-checked through the entry
+//! and package guards above.
 //!
 //! The format is binary (postcard: varint-packed serde, no field names), chosen
 //! for load speed and size; it is not meant to be read by humans, and no
@@ -40,7 +50,7 @@ use brass_parser::Span;
 
 /// Bumped whenever the payload layout changes, so an old file is discarded by
 /// the header check instead of misread by postcard (which carries no schema).
-pub const FORMAT_VERSION: u16 = 2;
+pub const FORMAT_VERSION: u16 = 3;
 
 /// Leading magic, so a foreign file is rejected before any decoding.
 const MAGIC: &[u8; 8] = b"PPCACHE\0";
@@ -94,7 +104,12 @@ pub struct StampRoots<'a> {
 
 impl<'a> StampRoots<'a> {
     pub fn new(entry: &Path, search: &'a brass_resolve::SearchPaths) -> StampRoots<'a> {
-        let dir = entry.parent().unwrap_or(Path::new("."));
+        // A bare filename entry (`brass main.cz`) has `Some("")` as its parent,
+        // which neither canonicalizes nor joins usefully; it means the CWD.
+        let dir = match entry.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
         StampRoots {
             entry_dir: dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()),
             search,
@@ -108,6 +123,19 @@ impl FileStamp {
     /// include roots. `None` when the file cannot be read.
     pub fn of(path: &Path, roots: &StampRoots) -> Option<FileStamp> {
         let bytes = std::fs::read(path).ok()?;
+        Some(Self::of_content(path, &bytes, roots))
+    }
+
+    /// Stamp `path` with `content` standing in for the file's bytes: the text
+    /// the compiler actually PARSED, not a re-read of the file. Re-reading at
+    /// save time races an editor writing during the (long) analysis -- the new
+    /// content's hash would be attached to the old content's analysis and every
+    /// later run would hit a permanently stale cache.
+    pub fn of_text(path: &Path, content: &str, roots: &StampRoots) -> FileStamp {
+        Self::of_content(path, content.as_bytes(), roots)
+    }
+
+    fn of_content(path: &Path, bytes: &[u8], roots: &StampRoots) -> FileStamp {
         let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let rel_under = |root: &Path| -> Option<String> {
             let root = root.canonicalize().ok()?;
@@ -118,7 +146,17 @@ impl FileStamp {
                 .collect();
             Some(parts.join("/"))
         };
-        let origin = if let Some(rel) = rel_under(&roots.entry_dir) {
+        // A native plugin library is pinned to its absolute path: the
+        // synthesized wrapper in the cached AST embeds this exact string as
+        // the runtime's dlopen target, so validating the stamp anywhere else
+        // would re-lower wrappers that open the OLD location.
+        let relocatable = !matches!(
+            canon.extension().and_then(|e| e.to_str()),
+            Some("so" | "dylib" | "dll")
+        );
+        let origin = if !relocatable {
+            StampOrigin::Absolute(canon.display().to_string())
+        } else if let Some(rel) = rel_under(&roots.entry_dir) {
             StampOrigin::Entry(rel)
         } else if let Some((name, rel)) = roots
             .search
@@ -137,11 +175,11 @@ impl FileStamp {
         } else {
             StampOrigin::Absolute(canon.display().to_string())
         };
-        Some(FileStamp {
+        FileStamp {
             origin,
             len: bytes.len() as u64,
-            sha1: sha1(&bytes),
-        })
+            sha1: sha1(bytes),
+        }
     }
 
     /// Re-anchor this stamp under the CURRENT roots and check the file it finds.
@@ -209,8 +247,6 @@ fn sha1(bytes: &[u8]) -> [u8; 20] {
 pub struct Channels {
     pub expr_types: Vec<(Span, Type)>,
     pub view_args: Vec<Span>,
-    // No serde default: an old cache missing this field must fail to load (a
-    // full recheck) rather than silently drop the coercions it encodes.
     pub sum_views: Vec<(Span, Type)>,
     pub call_locations: Vec<(Span, (String, u32, u32))>,
     pub lift_errs: Vec<Span>,
@@ -223,11 +259,25 @@ pub struct Channels {
 /// Everything a `.czcache` stores.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Payload {
-    /// Every on-disk source the build read, entry file included.
+    /// Every on-disk source the build read. The FIRST stamp is the entry
+    /// file's: on load its content is compared against the file the user
+    /// actually named, so two entries sharing one cache path (`app` and
+    /// `app.cz` both map to `app.czcache`) can never revive each other's
+    /// program, and `brass app.czcache` misses instead of executing itself.
     pub deps: Vec<FileStamp>,
+    /// The `BRASS_PACKAGES` names declared when the cache was written
+    /// (sorted). A declared name binds an import's first segment BEFORE any
+    /// file search, so a changed name set can re-route imports while every
+    /// stamped file is untouched; any difference is a miss. Names only --
+    /// paths would break relocation, and a package's CONTENT is already
+    /// covered by its stamps.
+    pub packages: Vec<String>,
     /// The final module graph: post-resolution, post-rewrite, post-keyed
     /// specialization. Re-lowering these reproduces the checked program.
     pub modules: Vec<LoadedModule>,
+    /// Diagnostics the full pipeline prints for a CLEAN program (the spawn
+    /// auto-acquire notes); replayed on a hit so warm runs warn identically.
+    pub warnings: Vec<String>,
     pub channels: Channels,
 }
 
@@ -238,9 +288,12 @@ pub fn cache_path(entry: &Path) -> PathBuf {
 }
 
 /// The tag written into the header: the compiler's identity
-/// ([`brass_metadata::compiler_tag`] -- version, channel, commit) and the
-/// payload format version, plus -- for a working-tree build ONLY -- the running
-/// executable's modification time.
+/// ([`brass_metadata::compiler_tag`] -- version, channel, commit), the payload
+/// format version, and the caller's `flavor` -- the front-end configuration
+/// whose rewrite passes shape the cached ASTs (the JIT driver auto-acquires
+/// `spawn` bodies; a REPL-only driver does not), so two differently-configured
+/// binaries of the same compiler never accept each other's caches -- plus, for
+/// a working-tree build ONLY, the running executable's modification time.
 ///
 /// A released compiler (a channel the release workflow stamped) is fully
 /// identified by its channel and commit, so its tag is the same on every machine
@@ -255,13 +308,15 @@ pub fn cache_path(entry: &Path) -> PathBuf {
 /// of the same commit must not survive the recompile, and the executable's mtime
 /// is what rules it out. The mtime, rather than the executable's contents,
 /// because it must be read on every cache hit and the compiler is tens of
-/// megabytes; a local rebuild always moves it.
-fn cache_tag() -> String {
-    let tag = format!("{}/{}", compiler_tag(), FORMAT_VERSION);
+/// megabytes; a local rebuild always moves it. A nightly build whose own mtime
+/// cannot be determined gets NO tag at all -- caching is skipped rather than
+/// letting two such builds silently share one.
+fn cache_tag(flavor: &str) -> Option<String> {
+    let tag = format!("{}/{}/{flavor}", compiler_tag(), FORMAT_VERSION);
     if brass_metadata::build_channel() != BuildChannel::Nightly {
-        return tag;
+        return Some(tag);
     }
-    format!("{tag}/{}", exe_mtime_nanos().unwrap_or(0))
+    Some(format!("{tag}/{}", exe_mtime_nanos()?))
 }
 
 fn exe_mtime_nanos() -> Option<u128> {
@@ -276,25 +331,79 @@ pub fn enabled() -> bool {
     !matches!(std::env::var("BRASS_CACHE").as_deref(), Ok("off") | Ok("0"))
 }
 
+/// Frame `body` with the header every cache file shares: magic, length-prefixed
+/// tag, and the body's SHA-1 -- postcard is positional varint data with no
+/// checksum of its own, so a corrupted body could otherwise decode into a
+/// shape-valid payload whose stamps still validate.
+fn encode_file(tag: &str, body: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(MAGIC.len() + 1 + tag.len() + 20 + body.len());
+    bytes.extend_from_slice(MAGIC);
+    bytes.push(tag.len() as u8);
+    bytes.extend_from_slice(tag.as_bytes());
+    bytes.extend_from_slice(&sha1(body));
+    bytes.extend_from_slice(body);
+    bytes
+}
+
+/// The body of a cache file whose magic, tag, and body checksum all match;
+/// `None` rejects foreign, stale-versioned, or corrupted files before any
+/// payload decoding.
+fn decode_file<'a>(bytes: &'a [u8], tag: &str) -> Option<&'a [u8]> {
+    let rest = bytes.strip_prefix(MAGIC.as_slice())?;
+    let n = *rest.first()? as usize;
+    if std::str::from_utf8(rest.get(1..1 + n)?).ok()? != tag {
+        return None;
+    }
+    let checksum: &[u8; 20] = rest.get(1 + n..1 + n + 20)?.try_into().ok()?;
+    let body = rest.get(1 + n + 20..)?;
+    (sha1(body) == *checksum).then_some(body)
+}
+
+/// Write `bytes` to `path` through a uniquely-named temporary file and a
+/// rename, best-effort: the cache is an accelerator, never a requirement, and
+/// two concurrent writers publish whole files instead of interleaving into one
+/// shared temp name.
+fn write_atomic(path: &Path, bytes: &[u8]) {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// The current sorted `BRASS_PACKAGES` name set, the payload's `packages`
+/// guard on both save and load.
+pub fn package_names(search: &brass_resolve::SearchPaths) -> Vec<String> {
+    let mut names: Vec<String> = search.packages.keys().cloned().collect();
+    names.sort();
+    names
+}
+
 /// Load and validate the cache for `entry` under the current resolution roots.
 /// `None` -- silently, the caller falls back to the full pipeline -- when the
-/// file is missing, foreign, from another compiler version or format, or any
-/// recorded source reference now resolves to different contents.
-pub fn load(entry: &Path, search: &brass_resolve::SearchPaths) -> Option<Payload> {
+/// file is missing, foreign, from another compiler version, format, or front
+/// end `flavor`, the entry file is not the recorded one, the declared package
+/// names changed, or any recorded source reference now resolves to different
+/// contents.
+pub fn load(entry: &Path, flavor: &str, search: &brass_resolve::SearchPaths) -> Option<Payload> {
     let roots = StampRoots::new(entry, search);
     let path = cache_path(entry);
     let bytes = std::fs::read(&path).ok()?;
-    let rest = bytes.strip_prefix(MAGIC.as_slice())?;
-    let (tag, body) = {
-        let n = *rest.first()? as usize;
-        let tag = std::str::from_utf8(rest.get(1..1 + n)?).ok()?;
-        (tag, rest.get(1 + n..)?)
-    };
-    if tag != cache_tag() {
-        tracing::debug!(target: "brass::perf", "cache: compiler tag mismatch, ignoring {}", path.display());
+    let body = decode_file(&bytes, &cache_tag(flavor)?)?;
+    let payload: Payload = postcard::from_bytes(body).ok()?;
+    // The first dep must BE the file the user named: same length, same hash.
+    // `still_valid` alone would only prove the recorded file exists somewhere.
+    let entry_bytes = std::fs::read(entry).ok()?;
+    let first = payload.deps.first()?;
+    if first.len != entry_bytes.len() as u64 || first.sha1 != sha1(&entry_bytes) {
+        tracing::debug!(target: "brass::perf", "cache: entry is not the recorded one, ignoring {}", path.display());
         return None;
     }
-    let payload: Payload = postcard::from_bytes(body).ok()?;
+    if payload.packages != package_names(search) {
+        tracing::debug!(target: "brass::perf", "cache: BRASS_PACKAGES names changed, ignoring {}", path.display());
+        return None;
+    }
     for dep in &payload.deps {
         if !dep.still_valid(&roots) {
             tracing::debug!(target: "brass::perf", "cache: {:?} changed, ignoring {}", dep.origin, path.display());
@@ -304,34 +413,16 @@ pub fn load(entry: &Path, search: &brass_resolve::SearchPaths) -> Option<Payload
     Some(payload)
 }
 
-/// Write the cache for `entry`, best-effort: a read-only directory or any
-/// other write failure is ignored -- the cache is an accelerator, never a
-/// requirement. The write goes through a temporary file and a rename, so a
-/// concurrent reader never sees a torn cache.
-pub fn save(entry: &Path, payload: &Payload) {
-    let Ok(body) = postcard::to_stdvec(payload) else {
+/// Write the cache for `entry`, best-effort (see [`write_atomic`]).
+pub fn save(entry: &Path, flavor: &str, payload: &Payload) {
+    let (Ok(body), Some(tag)) = (postcard::to_stdvec(payload), cache_tag(flavor)) else {
         return;
     };
-    let tag = cache_tag();
-    let mut bytes = Vec::with_capacity(MAGIC.len() + 1 + tag.len() + body.len());
-    bytes.extend_from_slice(MAGIC);
-    bytes.push(tag.len() as u8);
-    bytes.extend_from_slice(tag.as_bytes());
-    bytes.extend_from_slice(&body);
-    let path = cache_path(entry);
-    let tmp = path.with_extension("czcache.tmp");
-    if std::fs::write(&tmp, &bytes).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    write_atomic(&cache_path(entry), &encode_file(&tag, &body));
 }
 
 // ===== the context seed cache (`.czctx`) =====
 
-/// The key of a context (every module of a program except its entry): the
-/// compiler tag hashed together with the modules' full serialized form --
-/// module paths, ASTs, spans -- so any change of content, name, or order is a
-/// different context. Content-addressed, so no further validation is needed
-/// beyond the tag echo inside the file.
 /// The key of a context (every module of a program except its entry): the
 /// compiler tag, the module names in load order, and the SHA-1 of every source
 /// text that is not the entry's -- so any change of content, name, or order is
@@ -339,15 +430,13 @@ pub fn save(entry: &Path, payload: &Payload) {
 /// span) is not. `flavor` distinguishes front ends whose rewrite passes differ
 /// (the driver auto-acquires `spawn` bodies; the language server does not), so
 /// each seeds its own entry rather than consuming tables built over different
-/// ASTs.
+/// ASTs. `None` when this build cannot form a tag (see [`cache_tag`]).
 pub fn context_key(
     flavor: &str,
     module_names: impl Iterator<Item = String>,
     source_hashes: impl Iterator<Item = [u8; 20]>,
-) -> [u8; 20] {
-    let mut keyed = cache_tag().into_bytes();
-    keyed.push(b'/');
-    keyed.extend_from_slice(flavor.as_bytes());
+) -> Option<[u8; 20]> {
+    let mut keyed = cache_tag(flavor)?.into_bytes();
     for name in module_names {
         keyed.push(0);
         keyed.extend_from_slice(name.as_bytes());
@@ -356,7 +445,7 @@ pub fn context_key(
     for h in source_hashes {
         keyed.extend_from_slice(&h);
     }
-    sha1(&keyed)
+    Some(sha1(&keyed))
 }
 
 /// SHA-1 of arbitrary bytes, for callers assembling a [`context_key`].
@@ -379,17 +468,14 @@ fn context_file(key: &[u8; 20]) -> Option<PathBuf> {
     Some(context_dir()?.join(format!("ctx-{hex}.czctx")))
 }
 
-/// Load the context seed for `key`, `None` when absent, foreign, or from
-/// another compiler build.
+/// Load the context seed for `key`, `None` when absent, foreign, corrupted,
+/// or from another compiler build. The key already encodes the flavor, so the
+/// in-file tag echo only needs the compiler identity; the neutral flavor
+/// keeps it uniform.
 pub fn load_context(key: &[u8; 20]) -> Option<brass_typeck::ContextTables> {
     let bytes = std::fs::read(context_file(key)?).ok()?;
-    let rest = bytes.strip_prefix(MAGIC.as_slice())?;
-    let n = *rest.first()? as usize;
-    let tag = std::str::from_utf8(rest.get(1..1 + n)?).ok()?;
-    if tag != cache_tag() {
-        return None;
-    }
-    postcard::from_bytes(rest.get(1 + n..)?).ok()
+    let body = decode_file(&bytes, &cache_tag("ctx")?)?;
+    postcard::from_bytes(body).ok()
 }
 
 /// Write the context seed for `key`, best-effort and atomic like [`save`].
@@ -401,17 +487,8 @@ pub fn save_context(key: &[u8; 20], seed: &brass_typeck::ContextTables) {
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
-    let Ok(body) = postcard::to_stdvec(seed) else {
+    let (Ok(body), Some(tag)) = (postcard::to_stdvec(seed), cache_tag("ctx")) else {
         return;
     };
-    let tag = cache_tag();
-    let mut bytes = Vec::with_capacity(MAGIC.len() + 1 + tag.len() + body.len());
-    bytes.extend_from_slice(MAGIC);
-    bytes.push(tag.len() as u8);
-    bytes.extend_from_slice(tag.as_bytes());
-    bytes.extend_from_slice(&body);
-    let tmp = path.with_extension("czctx.tmp");
-    if std::fs::write(&tmp, &bytes).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    write_atomic(&path, &encode_file(&tag, &body));
 }

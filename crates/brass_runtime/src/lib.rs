@@ -38,6 +38,7 @@ pub fn symbols() -> Vec<(&'static str, usize)> {
         alloc::pp_arr_remove,
         alloc::pp_arr_pop,
         alloc::pp_str_const,
+        alloc::pp_str_intern,
         alloc::pp_str_len,
         alloc::pp_str_concat,
         alloc::pp_str_eq,

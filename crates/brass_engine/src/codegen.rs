@@ -1877,7 +1877,9 @@ fn classify_call<'c>(
 }
 
 /// The `Ok` payload type of a `Result` return type (`void` if not a `Result`).
-fn result_ok_type(ret: &Type) -> Type {
+/// A `Result<..>?` return (a body that also propagates a null) reads as its
+/// inner `Result`.
+pub fn result_ok_type(ret: &Type) -> Type {
     match strip_ret_nullable(ret) {
         Type::Sum(n) => n
             .result_payloads()
@@ -1897,7 +1899,7 @@ fn strip_ret_nullable(ret: &Type) -> &Type {
 }
 
 /// The concrete type of field `name` in a record type, or `void` if absent.
-fn record_field_type(record_ty: &Type, name: &str) -> Type {
+pub fn record_field_type(record_ty: &Type, name: &str) -> Type {
     match unwrap_nullable(record_ty) {
         Type::Record(n) => n.substitution.get(name).cloned().unwrap_or(Type::Void),
         _ => Type::Void,
@@ -1905,7 +1907,7 @@ fn record_field_type(record_ty: &Type, name: &str) -> Type {
 }
 
 /// The field names of a record type, in its substitution's (sorted) order.
-fn record_field_names(record_ty: &Type) -> Vec<String> {
+pub fn record_field_names(record_ty: &Type) -> Vec<String> {
     match record_ty {
         Type::Record(n) => n
             .substitution
@@ -1918,7 +1920,7 @@ fn record_field_names(record_ty: &Type) -> Vec<String> {
 
 /// See through reference/mutability/const wrappers (erased before the back ends,
 /// but peeled defensively) to the underlying type.
-fn strip_wrappers(ty: &Type) -> &Type {
+pub fn strip_wrappers(ty: &Type) -> &Type {
     match ty {
         Type::Ref(inner) | Type::Mut(inner) | Type::ConstOf(inner) => strip_wrappers(inner),
         other => other,
@@ -1984,7 +1986,7 @@ pub fn view_field_plans(view_ty: &Type, src_ty: &Type) -> Vec<(String, Type, Vie
 /// `target` declares, each with a matching type. A mismatch (a missing field or a
 /// differently-typed one) means the conversion yields null rather than reading a
 /// field that is absent or laid out differently.
-fn record_from_succeeds(src_ty: &Type, target: &Type) -> bool {
+pub fn record_from_succeeds(src_ty: &Type, target: &Type) -> bool {
     let (Type::Record(s), Type::Record(t)) = (strip_wrappers(src_ty), target) else {
         return false;
     };
@@ -1995,7 +1997,7 @@ fn record_from_succeeds(src_ty: &Type, target: &Type) -> bool {
 
 /// The string payload of a constant string operand (the variant/panic argument
 /// of a MIR-internal builtin call), if it is one.
-fn str_const(op: &Operand) -> Option<&str> {
+pub fn str_const(op: &Operand) -> Option<&str> {
     match op {
         Operand::Const(Literal::Str(s)) => Some(s),
         _ => None,

@@ -1,0 +1,43 @@
+// A parent variant field with a declared annotation constrains the child's
+// payload even though the annotation never enters the instance substitution:
+// the coercion rebuild copies the payload into the parent's `IP`-typed slot
+// without nested coercion, so a child value whose payload is the IC layout
+// must be rejected instead of being read through IP's layout.
+type IP =
+    | Ia {
+        n: int32
+    }
+    | Ib
+
+type IC: IP =
+    | Ia {
+        pad: string
+        n: int32
+    }
+    | Ib
+
+type P =
+    | Wrap {
+        inner: IP
+    }
+
+type C: P =
+    | Wrap {
+        inner
+    }
+
+fun take(p: P) {
+    match p {
+        Wrap { inner } => {
+            match inner {
+                Ia { n } => println(n)
+                Ib => println("ib")
+            }
+        }
+    }
+}
+
+fun main() {
+    let c = C.Wrap { inner: IC.Ia { pad: "pp", n: 7 } }
+    take(c)
+}

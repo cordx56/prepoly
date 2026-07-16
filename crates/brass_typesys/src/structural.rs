@@ -143,11 +143,16 @@ fn record_refinement_compatible(program: &Program, sub: &NominalType, sup: &Nomi
 /// is rejected. The required type may not demand a refinement the value lacks.
 fn sum_assignable(program: &Program, have: &NominalType, want: &NominalType) -> bool {
     if have.id == want.id {
+        // A pinned payload slot is storage read back at the required side's
+        // type with no coercion site (same-id flow inserts no rebuild), so it
+        // is invariant like a record field: accepting `S<A.v=Child>` where
+        // `S<A.v=Parent>` is required would read the child's layout as the
+        // parent's. Unknowns stay flexible through `types_invariant`.
         return (have.id >= 0 || have.name() == want.name())
             && want.substitution.iter().all(|(key, wt)| {
                 have.substitution
                     .get(key)
-                    .is_some_and(|ht| types_compatible(program, ht, wt))
+                    .is_some_and(|ht| types_invariant(program, ht, wt))
             });
     }
     declared_sum_subtype(program, have, want)
@@ -156,34 +161,37 @@ fn sum_assignable(program: &Program, have: &NominalType, want: &NominalType) -> 
 /// Whether sum `have` declares (transitively) `want`'s sum as a parent
 /// (`type Child: Parent = | ..`) with a compatible instantiation. The
 /// variant-set/field conformance itself is enforced once at the declaration
-/// (interface checking); here only the instances must agree: every payload
-/// the required instance pins (`"Variant.field"` in its substitution) must be
-/// compatible with the value's type for that field -- from the value's own
-/// substitution, or the child's declared field annotation. The declaration is
-/// the gate: undeclared same-shaped sums stay unrelated, and the back ends
-/// insert the rebuild coercion (SumView) exactly where this accepts.
+/// (interface checking); here the instances must agree on every payload slot
+/// the required side fixes -- pinned in `want`'s substitution or annotated on
+/// the parent declaration itself. The rebuild the back ends insert (SumView)
+/// copies the value's payload into a slot read at the required side's type
+/// with no nested coercion, so a slot fixed on both sides is invariant; a
+/// slot the required side leaves open takes the value's refinement instead.
+/// The declaration is the gate: undeclared same-shaped sums stay unrelated.
 fn declared_sum_subtype(program: &Program, have: &NominalType, want: &NominalType) -> bool {
     if !declares_sum_parent(program, have.id, want.id, 0) {
         return false;
     }
-    want.substitution.iter().all(|(key, wt)| {
-        let declared = || {
-            let (vname, fname) = key.split_once('.')?;
-            let info = program.type_by_id(have.id)?;
-            let TypeKind::Sum { variants } = &info.kind else {
-                return None;
-            };
-            variants
-                .iter()
-                .find(|v| v.name == vname)?
-                .fields
-                .iter()
-                .find(|f| f.name == fname)?
-                .resolved_ty
-                .clone()
-        };
-        match have.substitution.get(key).cloned().or_else(declared) {
-            Some(ht) => types_compatible(program, &ht, wt),
+    let Some(TypeKind::Sum { variants }) = program.type_by_id(want.id).map(|info| &info.kind)
+    else {
+        return false;
+    };
+    // Slots the parent declaration annotates constrain the value even when the
+    // required instance does not pin them (an annotated field never enters the
+    // substitution), so walk the declared fields alongside the substitution.
+    let declared_slots = variants.iter().flat_map(|v| {
+        v.fields.iter().filter_map(|f| {
+            let ty = f.resolved_ty.clone().filter(|t| !t.is_unknown())?;
+            Some((format!("{}.{}", v.name, f.name), ty))
+        })
+    });
+    let pinned_slots = want
+        .substitution
+        .iter()
+        .map(|(key, ty)| (key.to_string(), ty.clone()));
+    pinned_slots.chain(declared_slots).all(|(key, wt)| {
+        match sum_field_payload(program, have, &key) {
+            Some(ht) => types_invariant(program, &ht, &wt),
             None => wt.is_unknown(),
         }
     })

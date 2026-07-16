@@ -14,4 +14,6 @@ brass_mir.workspace = true
 brass_engine.workspace = true
 brass_runtime.workspace = true
 inkwell.workspace = true
+# Not referenced in code: pins the `prefer-static` feature on the llvm-sys
+# build that inkwell links against.
 llvm-sys.workspace = true

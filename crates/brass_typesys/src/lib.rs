@@ -15,15 +15,14 @@ pub mod specialize;
 pub mod structural;
 pub mod valueflow;
 
-pub use convert::{InferFrom, infer_from};
 pub use defaults::default_constructible;
 pub use flow::{Flow, common_numeric_type, numeric_flow, numeric_flows_into};
 pub use rows::{
     ParamRow, Presence, Row, RowField, RowInfo, RowTy, check_row, field_satisfies, view_type,
 };
-pub use specialize::{Generated, KeyedNeed, mangled_name, specialize_all, type_to_expr};
+pub use specialize::{Generated, KeyedNeed, mangled_name, specialize_all};
 pub use structural::{
     function_part_compatible, record_satisfies, record_satisfies_fields, signature_satisfies,
     types_compatible, types_invariant,
 };
-pub use valueflow::{flow_unify, strip_nullable};
+pub use valueflow::{flow_probe, flow_unify, strip_nullable};

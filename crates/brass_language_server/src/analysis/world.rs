@@ -1,42 +1,20 @@
 //! Module-graph assembly for analysis.
 //!
-//! The loading itself (embedded prelude, `SourceMap`, transitive import
-//! resolution) is the shared front end in [`brass_resolve::loader`] -- one
-//! implementation for the driver and the language server. What this module adds
-//! is the editor-specific policy: the active document's text comes from the
-//! editor (unsaved), load problems become diagnostics instead of aborting, and
-//! the parsed prelude is cached once for the life of the process -- it never
-//! changes -- so only the edited file is re-parsed per keystroke.
+//! The graph itself comes from the shared front end
+//! ([`brass_resolve::frontend`]) -- one orchestration for the driver and the
+//! language server. What this module adds is the editor-specific policy: the
+//! active document's text comes from the editor (unsaved), load and syntax
+//! problems become diagnostics instead of aborting, and the active document's
+//! AST is kept separate from its context so the incremental layer can re-check
+//! a subset of its items.
 
-use std::collections::HashSet;
 use std::path::Path;
-use std::sync::OnceLock;
 
 use brass_hir::LoadedModule;
 use brass_parser::Span;
 use brass_parser::ast::Module;
-use brass_parser::parse_recovering;
 
 pub use brass_resolve::{SourceMap, prelude_module_names, prelude_source};
-
-/// The parsed prelude shared across analyses: its modules and the `SourceMap`
-/// prefix they occupy. Cloned as the starting point of every `World` so the
-/// prelude is parsed exactly once for the life of the process.
-struct StdlibCache {
-    modules: Vec<LoadedModule>,
-    sources: SourceMap,
-}
-
-fn stdlib_cache() -> &'static StdlibCache {
-    static CACHE: OnceLock<StdlibCache> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        let mut sources = SourceMap::default();
-        // The embedded prelude is known-good; a parse failure here is a build
-        // bug, so an empty module set is a safe degradation rather than a panic.
-        let modules = brass_resolve::parse_stdlib(&mut sources).unwrap_or_default();
-        StdlibCache { modules, sources }
-    })
-}
 
 /// The assembled module graph for one analysis of the active document.
 pub struct World {
@@ -63,72 +41,26 @@ pub struct World {
 /// Build the module graph for `main_src` (the active document at `main_path`).
 /// Never fails: the active document's syntax errors are collected into
 /// `parse_errors` (with the recovered AST in `main_ast`), and dependency
-/// problems into `load_errors`, so the rest of the file still checks.
+/// problems into `load_errors`, so the rest of the file still checks. A parse
+/// failure in the embedded prelude (a build bug) degrades to an empty prelude
+/// rather than dying, so the editor keeps working.
 pub fn build(main_path: &Path, main_src: &str) -> World {
     let search = brass_resolve::SearchPaths::from_env();
-    let cache = stdlib_cache();
-    let mut sources = cache.sources.clone();
-    let mut context_modules = cache.modules.clone();
-
-    let main_base = sources.add(
-        Some(main_path.to_path_buf()),
-        main_path.display().to_string(),
-        main_src.to_string(),
-    );
-    let (mut main_ast, parse_errors) = parse_recovering(main_src, main_base);
-    brass_resolve::inject_module_path(
-        &mut main_ast,
-        &std::fs::canonicalize(main_path)
-            .unwrap_or_else(|_| main_path.to_path_buf())
-            .display()
-            .to_string(),
-        Span::new(main_base, main_base),
-    );
-    let parse_errors: Vec<(String, Span)> = parse_errors
-        .into_iter()
-        .map(|e| (format!("syntax error: {}", e.message), e.span))
-        .collect();
-
-    let root = main_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let mut load_errors = Vec::new();
-    let mut visited = HashSet::new();
-    let mut stack = HashSet::new();
-    for (target, span) in
-        brass_resolve::canonicalize_imports(&[], &root, &mut main_ast.imports, &search)
-    {
-        brass_resolve::load_module(
-            &target,
-            &root,
-            &mut sources,
-            &mut visited,
-            &mut stack,
-            &mut context_modules,
-            span,
-            &mut load_errors,
-            &search,
-        );
-    }
-
-    // Nested std modules (`std.collections`, ...) are not in
-    // the implicit prelude; load the ones imported by the document or a
-    // dependency, transitively.
-    let extra: Vec<Vec<String>> = main_ast
-        .imports
-        .iter()
-        .map(|imp| imp.path.clone())
-        .collect();
-    let nested = brass_resolve::load_std_nested(&context_modules, &extra, &mut sources);
-    context_modules.extend(nested);
-
+    let root = main_path.parent().unwrap_or(Path::new("."));
+    let mut front = brass_resolve::frontend::assemble(main_path, main_src, root, &search);
+    // The shared front end appends the entry module last; split its AST off
+    // so everything remaining is the context.
+    let main_ast = front
+        .modules
+        .pop()
+        .expect("the shared front end always appends the entry module")
+        .ast;
     World {
-        sources,
-        main_base,
-        context_modules,
+        sources: front.sources,
+        main_base: front.entry_base,
+        context_modules: front.modules,
         main_ast,
-        load_errors: load_errors
-            .into_iter()
-            .map(|e| (e.message, e.span))
-            .collect(),
-        parse_errors,
+        load_errors: front.load_errors,
+        parse_errors: front.parse_errors,
     }
 }

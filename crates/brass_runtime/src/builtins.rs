@@ -72,23 +72,13 @@ fn int_tag_name(t: i64) -> &'static str {
     }
 }
 
-/// Render a float matching the typed string path: an integral finite value below
-/// 1e15 keeps a trailing `.0`.
-fn format_float(f: f64) -> String {
-    if f.is_finite() && f == f.trunc() && f.abs() < 1e15 {
-        format!("{f:.1}")
-    } else {
-        format!("{f}")
-    }
-}
-
 /// Truncate a float toward zero to an integral value, range-checked against
 /// `tag` and rejecting non-finite inputs.
 fn float_to_integral(f: f64, tag: i64) -> Result<i128, String> {
     if !f.is_finite() {
         return Err(format!(
             "cannot convert non-finite float `{}` to {}",
-            format_float(f),
+            brass_utils::float_str(f),
             int_tag_name(tag)
         ));
     }
@@ -97,7 +87,7 @@ fn float_to_integral(f: f64, tag: i64) -> Result<i128, String> {
     if truncated < min as f64 || truncated > max as f64 {
         return Err(format!(
             "float value {} is out of range for {} ({}..={})",
-            format_float(f),
+            brass_utils::float_str(f),
             int_tag_name(tag),
             min,
             max

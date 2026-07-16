@@ -20,10 +20,13 @@ mod codegen;
 mod engine;
 mod mir_infer;
 mod mono;
+mod render;
 mod runtime;
 
 pub use codegen::{
-    Codegen, ViewFieldPlan, element_type, program_uses_with, rc_managed, view_field_plans,
+    Codegen, ViewFieldPlan, element_type, program_uses_with, rc_managed, record_field_names,
+    record_field_type, record_from_succeeds, result_ok_type, str_const, strip_wrappers,
+    view_field_plans,
 };
 pub use engine::Engine;
 pub use mir_infer::{
@@ -36,6 +39,7 @@ pub use mono::{
     check_instances, closure_symbol, cond_static_truthiness, float_kind_name, instance_symbol,
     int_kind_name, is_comparison, method_symbol, monomorphize, monomorphize_instance,
     numeric_conv_ret, operand_type_of, parse_structural_descriptor, prim_method_instance,
-    static_symbol,
+    static_symbol, unwrap_nullable,
 };
+pub use render::{render_record_fields, render_variant_fields};
 pub use runtime::{MonomorphCache, RuntimeJit, resolve_or_compile};

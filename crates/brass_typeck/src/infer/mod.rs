@@ -30,7 +30,7 @@ mod assign;
 mod builtins;
 mod call;
 mod expr;
-mod helpers;
+pub(crate) mod helpers;
 mod instantiate;
 mod light;
 mod literals;
@@ -247,8 +247,6 @@ impl ContextTables {
 pub struct Inference {
     pub errors: Vec<TypeError>,
     pub typed: TypedProgram,
-    /// Fully-concrete call instances per free-function symbol.
-    pub fn_instances: HashMap<String, Vec<Vec<Type>>>,
     /// Per record-type generalized scheme (its inferred type parameters and the
     /// field/method signatures over them), keyed by the type's source name. Read
     /// by the language server to render a method generically; see `build_schemes`.
@@ -651,7 +649,6 @@ pub fn analyze_with(program: &Program, seed: Option<&ContextTables>) -> Inferenc
     Inference {
         errors: checker.errors,
         typed: checker.typed,
-        fn_instances: checker.fn_instances,
         schemes: checker.schemes,
         view_args: checker.view_args,
         lift_errs: checker.lift_errs,
@@ -784,12 +781,6 @@ struct Checker<'a> {
     /// payload is one of their own parameter variables: a generic error type
     /// named per call site, exempt from the uninferable-error report.
     generic_error_returns: HashSet<String>,
-    /// Fully-concrete call instances per free-function symbol: every distinct
-    /// tuple of resolved argument types a function is called with. This is the
-    /// input to static monomorphization: the
-    /// typed backend can compile one specialized instance per tuple. Stored as a
-    /// deduplicated `Vec` because `Type` is not `Hash`/`Eq`.
-    fn_instances: HashMap<String, Vec<Vec<Type>>>,
     /// Per record-type generalized scheme, keyed by type name. Built after the
     /// method bodies are co-checked and consulted at call sites to type a method
     /// call's result by instantiating the method's scheme against the receiver.
@@ -857,6 +848,23 @@ struct Checker<'a> {
     /// the kinds are tracked here and a disagreement is a checker error
     /// (`None` marks a span already reported, so re-elaborations stay quiet).
     prop_kinds: HashMap<Span, Option<PropKind>>,
+    /// Per-span evidence of how each sum flow site lowered in this
+    /// elaboration: `Some(parent)` = coerced (rebuilt) to that declared-parent
+    /// instance, `None` = same-nominal flow needing no rebuild. `sum_views` is
+    /// keyed by span while one MIR body is shared across a generic's
+    /// instantiations and the baked rebuild has no per-instance escape hatch,
+    /// so instantiations that disagree -- different parent instances, or
+    /// view in one and identity in another -- are rejected like `prop_kinds`.
+    sum_view_seen: HashMap<Span, Option<NominalType>>,
+    /// Sum-view spans whose cross-instantiation conflict is already reported.
+    sum_view_poisoned: HashSet<Span>,
+    /// Whether each `!`/forwarded-return span re-wraps a raw error payload
+    /// into the prelude `Error` (`true`) or propagates one that already is
+    /// (`false`). `lift_errs` is a span SET under the same shared-body
+    /// constraint, so a kind that differs across instantiations is rejected.
+    lift_kinds: HashMap<Span, bool>,
+    /// Lift spans whose cross-instantiation conflict is already reported.
+    lift_poisoned: HashSet<Span>,
     /// Whether the body currently being checked is the entry `main` (the root
     /// module's bare `main` symbol). Its `!` propagations abort at runtime
     /// instead of returning a `Result`, so the return-context requirement is
@@ -921,7 +929,6 @@ impl<'a> Checker<'a> {
             current_module: Vec::new(),
             reported_result_shadow: HashSet::new(),
             generic_error_returns: HashSet::new(),
-            fn_instances: HashMap::new(),
             schemes: HashMap::new(),
             fixed_array_binding: false,
             call_expected: None,
@@ -929,6 +936,10 @@ impl<'a> Checker<'a> {
             typeof_types: HashMap::new(),
             typeof_poisoned: HashSet::new(),
             prop_kinds: HashMap::new(),
+            sum_view_seen: HashMap::new(),
+            sum_view_poisoned: HashSet::new(),
+            lift_kinds: HashMap::new(),
+            lift_poisoned: HashSet::new(),
             narrowed_bindings: Vec::new(),
             closure_write_targets: HashSet::new(),
             rows: brass_typesys::RowInfo::analyze(program),
@@ -1226,6 +1237,7 @@ impl<'a> Checker<'a> {
         // every error a fallible body hands back has one shape. The flowed
         // type -- what the return is checked at -- carries the lifted slot.
         let lifted = crate::lift_err_payload(self.program, g_err.clone());
+        self.record_lift_kind(span, lifted != g_err);
         let flowed = if lifted != g_err {
             self.lift_errs.insert(span);
             match got {
@@ -1577,6 +1589,20 @@ impl<'a> Checker<'a> {
                 message: format!(
                     "the fields-loop variable `{var}` must not be shadowed in the body"
                 ),
+                span: s.span(),
+            });
+            return;
+        }
+        // Defensive: the channel is span-keyed and consumed by one shared MIR
+        // lowering. A generic `fields(..)` operand is rejected before reaching
+        // here today, but a disagreement must never be baked silently.
+        if let Some(prev) = self.fields_loops.get(&s.span())
+            && prev != &field_names
+        {
+            self.errors.push(TypeError {
+                message: "`fields(..)` expands different field sets across instantiations \
+                          of this generic function (annotate the operand to fix it)"
+                    .to_string(),
                 span: s.span(),
             });
             return;

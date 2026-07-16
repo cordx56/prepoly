@@ -1,0 +1,12 @@
+fun make2(flag: bool) {
+    if flag {
+        return error("nope")
+    }
+    return 41
+}
+fun main() {
+    match make2(false) {
+        Ok { value } => println(value)
+        Err { error } => println("e")
+    }
+}

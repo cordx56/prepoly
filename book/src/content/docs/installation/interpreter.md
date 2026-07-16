@@ -10,7 +10,7 @@ Here we describe how to build and install the Brass command-line driver.
 First, clone the Brass source code:
 
 ```bash
-git clone https://github.com/cordx56/prepoly.git
+git clone https://github.com/brass-cz/brass.git
 ```
 
 ## Install the Rust compiler

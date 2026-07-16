@@ -1011,12 +1011,7 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
 
 /// Whether an integer kind is signed (arithmetic shift / signed div/cmp).
 fn ty_is_signed(ty: &Type) -> bool {
-    matches!(ty, Type::Int(k) if int_signed(*k))
-}
-
-/// Whether an integer kind is signed.
-fn int_signed(k: IntKind) -> bool {
-    matches!(k, IntKind::I8 | IntKind::I16 | IntKind::I32 | IntKind::I64)
+    matches!(ty, Type::Int(k) if k.is_signed())
 }
 
 /// The generated function that auto-freezes immutable heap globals after module
@@ -1140,16 +1135,6 @@ fn int_runtime_tag(k: IntKind) -> i64 {
     }
 }
 
-/// Bit width of an integer kind.
-fn int_bits_of(k: IntKind) -> u32 {
-    match k {
-        IntKind::I8 | IntKind::U8 => 8,
-        IntKind::I16 | IntKind::U16 => 16,
-        IntKind::I32 | IntKind::U32 => 32,
-        IntKind::I64 | IntKind::U64 => 64,
-    }
-}
-
 /// The byte offsets and total size of a closure environment: a function pointer at
 /// offset 16, a capture-releasing destructor pointer at offset 24, then the
 /// captured values packed (and aligned) from offset 32. The destructor slot is at
@@ -1223,44 +1208,14 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
     }
 
     /// A record's `(field name, concrete type, byte offset)` list, or `None` for a
-    /// non-record type. For a constructed value the substitution is authoritative:
-    /// fields are taken in declaration order with their substituted types (correct
-    /// even when two modules share a type name), and a declared field absent from
-    /// the substitution makes the whole layout unavailable. For a bare nominal
-    /// reference (empty substitution -- a sum variant binding or a nested declared
-    /// field type) the HIR declaration's field names and declared types are used,
-    /// so the nominal still lays out and renders.
+    /// non-record type or an unavailable layout. The field decision -- which
+    /// fields, in what order, at what types -- comes from
+    /// [`brass_engine::render_record_fields`], the shared authority both back
+    /// ends' renderers resolve fields through, so a record renders identically
+    /// here and on the REPL interpreter. This adds the byte placement: fields
+    /// laid out in list order after the 16-byte header, naturally aligned.
     fn record_fields(&self, n: &NominalType) -> Option<Vec<(String, Type, u64)>> {
-        let pairs: Vec<(String, Type)> = if n.substitution.is_empty() {
-            let info = self.program.type_by_id(n.id)?;
-            let TypeKind::Record { fields, .. } = &info.kind else {
-                return None;
-            };
-            fields
-                .iter()
-                .filter_map(|f| f.resolved_ty.clone().map(|t| (f.name.clone(), t)))
-                .collect()
-        } else {
-            // Declaration order (a structural record built at the deserialize
-            // boundary has no declaration; use the substitution's field-name order).
-            let names: Vec<String> = match self.program.type_by_id(n.id) {
-                Some(info) => match &info.kind {
-                    TypeKind::Record { fields, .. } => {
-                        fields.iter().map(|f| f.name.clone()).collect()
-                    }
-                    _ => return None,
-                },
-                None => n
-                    .substitution
-                    .iter()
-                    .map(|(name, _)| name.to_string())
-                    .collect(),
-            };
-            names
-                .into_iter()
-                .map(|name| n.substitution.get(&name).cloned().map(|t| (name, t)))
-                .collect::<Option<Vec<_>>>()?
-        };
+        let pairs = brass_engine::render_record_fields(self.program, n)?;
         let mut offset = 16u64; // header size
         let mut out = Vec::with_capacity(pairs.len());
         for (name, ty) in pairs {
@@ -1384,7 +1339,10 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
 
     /// The concrete type of a sum variant's field: a `Result`-style generic sum
     /// carries its payloads in the nominal substitution (keyed `Variant.field`),
-    /// overriding the HIR's (possibly generic) declared type.
+    /// overriding the HIR's (possibly generic) declared type. Used for sizing
+    /// ([`sum_total_size`] counts an unresolvable field as an opaque `void` slot);
+    /// the per-variant layout itself resolves fields through
+    /// [`brass_engine::render_variant_fields`] in [`variant_layout`].
     fn variant_field_type(
         &self,
         n: &NominalType,
@@ -1400,26 +1358,24 @@ impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
 
     /// Lay out one sum variant's fields after the `{ header(16) | tag(@16) }`
     /// prefix (payload starts at offset 24): `(tag, [(name, type, offset)])`.
+    /// The field decision comes from [`brass_engine::render_variant_fields`],
+    /// the shared authority both back ends' renderers resolve fields through;
+    /// this adds the byte placement.
     fn variant_layout(
         &self,
         n: &NominalType,
         variant: &str,
     ) -> Option<(i32, Vec<VariantFieldLayout>)> {
-        let info = self.program.type_by_id(n.id)?;
-        let TypeKind::Sum { variants } = &info.kind else {
-            return None;
-        };
-        let v = variants.iter().find(|v| v.name == variant)?;
+        let (tag, pairs) = brass_engine::render_variant_fields(self.program, n, variant)?;
         let mut offset = 24u64; // header(16) + i32 tag(@16) + pad
-        let mut out = Vec::with_capacity(v.fields.len());
-        for fld in &v.fields {
-            let fty = self.variant_field_type(n, &v.name, &fld.name, &fld.resolved_ty)?;
+        let mut out = Vec::with_capacity(pairs.len());
+        for (name, fty) in pairs {
             let (size, align) = type_size_align(&fty);
             offset = align_up(offset, align);
-            out.push((fld.name.clone(), fty, offset));
+            out.push((name, fty, offset));
             offset += size;
         }
-        Some((v.tag, out))
+        Some((tag, out))
     }
 
     /// Total size of a sum object: the header+tag prefix plus the largest
@@ -2315,12 +2271,15 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
         self.ctx.bool_type().const_int(v as u64, false).into()
     }
     fn const_str(&mut self, s: &str) -> BasicValueEnum<'ctx> {
+        // Interned, not freshly allocated: a literal evaluated in a loop's
+        // non-owning position (comparison, argument, interpolation) has no
+        // release site, so per-evaluation allocation grew without bound.
         let (ptr, len) = self.global_str(s);
         let ty = self
             .abi
             .ptr()
             .fn_type(&[self.abi.ptr().into(), self.abi.i64t().into()], false);
-        let f = self.abi.runtime_fn(&self.module, "pp_str_const", ty);
+        let f = self.abi.runtime_fn(&self.module, "pp_str_intern", ty);
         self.builder
             .build_call(f, &[ptr.into(), self.i64c(len as i64).into()], "str")
             .unwrap()
@@ -2352,7 +2311,7 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
     fn coerce(&mut self, v: BasicValueEnum<'ctx>, from: &Type, to: &Type) -> BasicValueEnum<'ctx> {
         match (from, to) {
             (Type::Int(fk), Type::Int(tk)) => {
-                let (fb, tb) = (int_bits_of(*fk), int_bits_of(*tk));
+                let (fb, tb) = (fk.bits(), tk.bits());
                 if fb == tb {
                     return v;
                 }
@@ -2361,7 +2320,7 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
                 };
                 let iv = v.into_int_value();
                 if tb > fb {
-                    if int_signed(*fk) {
+                    if fk.is_signed() {
                         self.builder
                             .build_int_s_extend(iv, target, "sx")
                             .unwrap()
@@ -2397,7 +2356,7 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
                     FloatKind::F64 => self.ctx.f64_type(),
                 };
                 let iv = v.into_int_value();
-                if int_signed(*k) {
+                if k.is_signed() {
                     self.builder
                         .build_signed_int_to_float(iv, target, "sitofp")
                         .unwrap()
@@ -2725,13 +2684,13 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
             }
             Type::Int(k) => {
                 let iv = v.into_int_value();
-                let wide = if int_signed(*k) {
+                let wide = if k.is_signed() {
                     self.builder.build_int_s_extend(iv, self.abi.i64t(), "sx")
                 } else {
                     self.builder.build_int_z_extend(iv, self.abi.i64t(), "zx")
                 }
                 .unwrap();
-                let signed = self.i64c(int_signed(*k) as i64);
+                let signed = self.i64c(k.is_signed() as i64);
                 self.call_to_str("pp_int_to_str", &[wide.into(), signed.into()])
             }
             Type::Float(_) => {

@@ -22,7 +22,7 @@
 use brass_parser::Span;
 use brass_parser::ast::*;
 
-use crate::printer::{Printer, assign_sym};
+use crate::printer::Printer;
 
 /// Binding strength used to re-insert grouping parentheses: an operand whose
 /// own strength is below its context is printed in parentheses.
@@ -31,7 +31,7 @@ fn prec(e: &Expr) -> u8 {
         // A closure's body extends as far as possible, so a closure used as an
         // operand always needs parentheses.
         Expr::Closure(..) => 0,
-        Expr::Binary(op, ..) => bin_prec(*op),
+        Expr::Binary(op, ..) => op.precedence(),
         Expr::Unary(..) => PREC_UNARY,
         Expr::Call(..) | Expr::Field(..) | Expr::Index(..) | Expr::ErrorProp(..) => PREC_POSTFIX,
         _ => PREC_PRIMARY,
@@ -41,51 +41,6 @@ fn prec(e: &Expr) -> u8 {
 const PREC_UNARY: u8 = 10;
 const PREC_POSTFIX: u8 = 11;
 const PREC_PRIMARY: u8 = 12;
-
-fn bin_prec(op: BinOp) -> u8 {
-    match op {
-        BinOp::Or => 1,
-        BinOp::And => 2,
-        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => 3,
-        BinOp::BitOr => 4,
-        BinOp::BitXor => 5,
-        BinOp::BitAnd => 6,
-        BinOp::Shl | BinOp::Shr => 7,
-        BinOp::Add | BinOp::Sub => 8,
-        BinOp::Mul | BinOp::Div | BinOp::Rem => 9,
-    }
-}
-
-fn bin_sym(op: BinOp) -> &'static str {
-    match op {
-        BinOp::Add => "+",
-        BinOp::Sub => "-",
-        BinOp::Mul => "*",
-        BinOp::Div => "/",
-        BinOp::Rem => "%",
-        BinOp::Eq => "==",
-        BinOp::Ne => "!=",
-        BinOp::Lt => "<",
-        BinOp::Gt => ">",
-        BinOp::Le => "<=",
-        BinOp::Ge => ">=",
-        BinOp::And => "&&",
-        BinOp::Or => "||",
-        BinOp::BitAnd => "&",
-        BinOp::BitOr => "|",
-        BinOp::BitXor => "^",
-        BinOp::Shl => "<<",
-        BinOp::Shr => ">>",
-    }
-}
-
-fn unary_sym(op: UnaryOp) -> &'static str {
-    match op {
-        UnaryOp::Neg => "-",
-        UnaryOp::Not => "!",
-        UnaryOp::BitNot => "~",
-    }
-}
 
 /// One postfix link of a call/field/index chain, outermost decomposition
 /// reversed into source order.
@@ -155,20 +110,16 @@ impl<'a> Printer<'a> {
             Expr::Ident(n, _) => n.clone(),
             Expr::SelfExpr(_) => "self".to_string(),
             Expr::Unary(op, inner, _) => {
-                format!(
-                    "{}{}",
-                    unary_sym(*op),
-                    self.flat_prec(inner, PREC_UNARY, ns)?
-                )
+                format!("{}{}", op.symbol(), self.flat_prec(inner, PREC_UNARY, ns)?)
             }
             Expr::Binary(op, l, r, _) => {
-                let p = bin_prec(*op);
+                let p = op.precedence();
                 // Left-associative: an equal-precedence right operand keeps
                 // its parentheses.
                 format!(
                     "{} {} {}",
                     self.flat_prec(l, p, ns)?,
-                    bin_sym(*op),
+                    op.symbol(),
                     self.flat_prec(r, p + 1, ns)?
                 )
             }
@@ -337,7 +288,7 @@ impl<'a> Printer<'a> {
             }
             Expr::Binary(..) => self.break_binary(head, e, tail, ns),
             Expr::Unary(op, inner, _) => {
-                let h = format!("{head}{}", unary_sym(*op));
+                let h = format!("{head}{}", op.symbol());
                 self.operand_lines(h, inner, PREC_UNARY, tail, ns);
             }
             // Atoms have no breaking rule: emit the line over-width.
@@ -362,7 +313,7 @@ impl<'a> Printer<'a> {
         let Expr::Binary(op, ..) = e else {
             unreachable!()
         };
-        let p = bin_prec(*op);
+        let p = op.precedence();
         let mut operands = Vec::new();
         let mut ops = Vec::new();
         collect_operands(e, p, &mut operands, &mut ops);
@@ -370,7 +321,7 @@ impl<'a> Printer<'a> {
         // each line ending in its operator so the parser reads on.
         for (i, operand) in operands.iter().enumerate() {
             let suffix = match ops.get(i) {
-                Some(op) => format!(" {}", bin_sym(*op)),
+                Some(op) => format!(" {}", op.symbol()),
                 None => tail.to_string(),
             };
             let min = if i == 0 { p } else { p + 1 };
@@ -666,7 +617,7 @@ impl<'a> Printer<'a> {
                     let head = format!(
                         "{pat} => {} {} ",
                         self.flat_or_src(target, false),
-                        assign_sym(*op)
+                        op.symbol()
                     );
                     self.expr_lines(head, value, ",", false);
                 } else {
@@ -807,7 +758,7 @@ fn collect_operands<'e>(e: &'e Expr, p: u8, operands: &mut Vec<&'e Expr>, ops: &
     match e {
         // Only the left spine flattens: a same-precedence right operand came
         // from explicit parentheses and keeps them.
-        Expr::Binary(op, l, r, _) if bin_prec(*op) == p => {
+        Expr::Binary(op, l, r, _) if op.precedence() == p => {
             collect_operands(l, p, operands, ops);
             ops.push(*op);
             operands.push(r);
