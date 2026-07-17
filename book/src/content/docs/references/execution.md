@@ -22,18 +22,25 @@ compiled on the spot — waiting for the checker first if its body is still
 being inferred. A `spawn` pre-compiles everything the spawned task could
 reach, since worker threads never compile.
 
-Lazy checking changes **when** diagnostics surface, never **whether**:
+A lazy run's verdict covers **what the run executes**:
 
-- Any diagnostic found before execution starts aborts the run with the same
-  full report the eager pipeline prints, and nothing executes.
-- An error in a function first reached mid-run reports identically at that
-  moment and the run exits non-zero (output already produced stands).
-- Code execution never needs (an uncalled function, an unimported branch of
-  a library) keeps checking concurrently while the program runs. If the
-  checker finds an error there, the run still exits non-zero with the
-  diagnostic — possibly after the program's own output.
-- A well-typed program behaves identically either way; unreachable code
-  simply no longer delays start-up.
+- A diagnostic in the entry (a module initializer, `main`, or top-level
+  code) aborts the run before anything executes, with the same report the
+  eager pipeline prints.
+- A function first reached mid-run is settled — at the concrete argument
+  types of the call that reached it — before it executes; a diagnostic in
+  it stops the run at that moment, non-zero (output already produced
+  stands).
+- A function the run never calls — including one only reachable from a
+  branch the run never takes — keeps checking in the background while the
+  program runs, and what that finds is saved for the next run; it does not
+  affect this run's outcome. The complete whole-program verdict is `brass
+  check`'s (or `--eager`'s) job.
+- The unit of this verdict is the **function body**: a diagnostic anywhere
+  in a body the run needs is fatal, even inside a branch of it execution
+  would never take.
+- A well-typed program behaves identically either way; code the run never
+  reaches simply no longer delays it.
 
 `brass check` always checks **eagerly** — the whole program, on the calling
 thread, before reporting; it prints nothing when the program is well-typed.

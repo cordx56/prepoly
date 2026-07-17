@@ -121,7 +121,7 @@ pub fn analyze(program: &Program) -> Analysis {
 /// context also defines: the collision qualifies the context's storage symbols
 /// in the combined program, detaching every seeded table key.
 pub fn analyze_with(program: &Program, seed: Option<&ContextTables>) -> Analysis {
-    analyze_impl(program, seed, None)
+    analyze_impl(program, seed, None, None)
 }
 
 /// [`analyze_with`], streaming progress to `sched` (the lazy-check
@@ -130,18 +130,23 @@ pub fn analyze_with(program: &Program, seed: Option<&ContextTables>) -> Analysis
 /// delta of checker channels recorded in its window (see [`stream`]). The
 /// returned `Analysis` is equivalent to the eager one; the event stream is
 /// an incremental view of it, ending with [`stream::CheckEvent::Finished`].
+/// `resume` seeds the run with a prior stopped run's snapshot: its settled
+/// bodies are skipped (announced immediately), and the flush bookkeeping
+/// starts from what that run already delivered, so only new work streams.
 pub fn analyze_streaming(
     program: &Program,
     seed: Option<&ContextTables>,
     sched: &mut dyn stream::Scheduler,
+    resume: Option<&stream::StreamSnapshot>,
 ) -> Analysis {
-    analyze_impl(program, seed, Some(sched))
+    analyze_impl(program, seed, Some(sched), resume)
 }
 
 fn analyze_impl(
     program: &Program,
     seed: Option<&ContextTables>,
     sched: Option<&mut dyn stream::Scheduler>,
+    resume: Option<&stream::StreamSnapshot>,
 ) -> Analysis {
     let entry_declares =
         |name: &str| {
@@ -172,7 +177,11 @@ fn analyze_impl(
     // verdict before any body event: an error here is fatal to execution.
     let mut ctl = sched.map(|sched| stream::StreamCtl {
         sched,
-        state: Default::default(),
+        state: resume.map_or_else(Default::default, stream::FlushState::from_snapshot),
+        skip_fns: resume.map_or_else(Default::default, |snap| {
+            snap.checked.iter().cloned().collect()
+        }),
+        skip_inits: resume.map_or(0, |snap| snap.inits_checked),
     });
     if let Some(ctl) = &mut ctl {
         ctl.sched

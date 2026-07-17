@@ -79,11 +79,20 @@ fn check_callable(
 
 /// The declared return type when it is explicitly annotated and not `void`.
 /// Inferred return types are not enforced here so that fallthrough remains a
-/// `void` return rather than an error.
+/// `void` return rather than an error. A fallible void return (`-> void!`)
+/// is exempt like `void` itself: falling off the end IS the Ok exit (the
+/// back ends construct `Ok` on the fall-through path of a fallible body),
+/// so completeness has nothing to demand.
 fn non_void_return(sig: &CallableSignature) -> Option<&Type> {
     sig.ret.as_ref()?;
     match sig.ret_ty.as_ref()? {
         Type::Void => None,
+        ty if ty
+            .result_payloads()
+            .is_some_and(|(ok, _)| matches!(ok, Type::Void)) =>
+        {
+            None
+        }
         ty => Some(ty),
     }
 }

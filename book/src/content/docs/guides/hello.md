@@ -48,6 +48,42 @@ It prints nothing when the program is well-typed, and exits 0; otherwise it
 prints the type errors and exits non-zero.
 Running `brass` with no arguments starts an interactive REPL.
 
+### A run only checks what it runs
+
+`brass hello.cz` checks **lazily**: the run's verdict covers the code the run
+actually needs. A type error in a function the run never calls does not stop
+the run:
+
+```brass norun
+fun broken() -> int32 {
+    return "oops"    // a type error -- but nothing calls broken()
+}
+
+println("Hello, world!")
+```
+
+`brass hello.cz` prints `Hello, world!` and exits 0. `brass check hello.cz`
+reports the error in `broken`.
+
+What this means in practice:
+
+- **A green run is not a full type check.** Use `brass check` where you want
+  the whole-program verdict — in CI, before a commit, after a refactor.
+- Errors in code the run does need still stop it: an error in the top-level
+  statements or in `main` aborts before anything executes, and an error in a
+  function first reached mid-run stops the run right there — output already
+  produced by then stands, and the run exits non-zero. The unit is the whole
+  function: an error anywhere in a function the run calls counts, even in a
+  branch execution would never take.
+- The unused code keeps checking in the background while your program runs;
+  what it finds is remembered to speed up later runs, but it never changes
+  the current run's outcome.
+- `brass --eager hello.cz` runs with the check-everything-first behavior
+  (identical to `brass check` followed by the run). The REPL and the
+  interpreter back end always check eagerly.
+
+See [Execution model](/references/execution/) for the full rules.
+
 ## Running as a script
 
 `#` starts a line comment, so a source file may begin with a **shebang** line.

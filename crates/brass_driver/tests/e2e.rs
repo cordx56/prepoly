@@ -94,17 +94,76 @@ fn install_library_plugins() {
 /// library (`process/` and `path/` do). Cases that import nothing from there
 /// are unaffected.
 fn run_case(bin: &str, pp: &Path) -> std::process::Output {
-    Command::new(bin)
-        .env("BRASS_CACHE", "off")
-        .arg(pp)
+    run_case_mode(bin, pp, false)
+}
+
+/// [`run_case`] with the check mode chosen: `eager` inserts `--eager` before
+/// the file, forcing the whole-program check the annotated cases pin per
+/// mode. (An interpreter-only build checks eagerly either way.)
+fn run_case_mode(bin: &str, pp: &Path, eager: bool) -> std::process::Output {
+    let mut cmd = Command::new(bin);
+    cmd.env("BRASS_CACHE", "off");
+    if eager {
+        cmd.arg("--eager");
+    }
+    cmd.arg(pp)
         .env("BRASS_INCLUDE", libraries_root())
         .output()
         .expect("spawn brass")
 }
 
+/// Per-mode expectations parsed from a case's leading annotation lines:
+///
+/// ```text
+/// // @lazy: pass
+/// // @eager: fail
+/// ```
+///
+/// Lazy checking ignores diagnostics in code execution never needs, so a
+/// case can pass when run (the default, lazy) yet fail its whole-program
+/// check (`--eager`). An annotated case carries BOTH a `.out` (the passing
+/// mode's exact stdout) and a `.err` (the failing mode's diagnostic
+/// substring) and runs in both modes; unannotated cases keep the
+/// single-expectation behavior. The grammar is strict -- a typo must fail
+/// the suite, not silently skip an expectation.
+fn mode_expectations(src: &str) -> Option<(bool, bool)> {
+    let mut lazy = None;
+    let mut eager = None;
+    for line in src.lines() {
+        let Some(rest) = line.strip_prefix("// @") else {
+            if line.starts_with("//") || line.trim().is_empty() {
+                continue;
+            }
+            break;
+        };
+        let (mode, value) = rest
+            .split_once(':')
+            .unwrap_or_else(|| panic!("malformed mode annotation `{line}`"));
+        let passes = match value.trim() {
+            "pass" => true,
+            "fail" => false,
+            other => panic!("mode annotation value must be `pass` or `fail`, got `{other}`"),
+        };
+        match mode.trim() {
+            "lazy" => lazy = Some(passes),
+            "eager" => eager = Some(passes),
+            other => panic!("unknown mode annotation `@{other}`"),
+        }
+    }
+    match (lazy, eager) {
+        (None, None) => None,
+        (Some(l), Some(e)) => Some((l, e)),
+        _ => panic!("a case with mode annotations must specify both @lazy and @eager"),
+    }
+}
+
 /// Run a success case: the program must exit zero and print exactly `expected`.
 fn check_success(bin: &str, pp: &Path, expected: &str) {
-    let out = run_case(bin, pp);
+    check_success_mode(bin, pp, expected, false)
+}
+
+fn check_success_mode(bin: &str, pp: &Path, expected: &str, eager: bool) {
+    let out = run_case_mode(bin, pp, eager);
     assert!(
         out.status.success(),
         "{} failed to run (status {:?})\nstderr:\n{}",
@@ -124,7 +183,11 @@ fn check_success(bin: &str, pp: &Path, expected: &str) {
 /// every line of `expected` (trimmed) as a substring, so the diagnostic is pinned
 /// without coupling to the absolute source path the driver prints.
 fn check_error(bin: &str, pp: &Path, expected: &str) {
-    let out = run_case(bin, pp);
+    check_error_mode(bin, pp, expected, false)
+}
+
+fn check_error_mode(bin: &str, pp: &Path, expected: &str, eager: bool) {
+    let out = run_case_mode(bin, pp, eager);
     assert!(
         !out.status.success(),
         "{} was expected to fail but succeeded\nstdout:\n{}",
@@ -161,6 +224,51 @@ fn e2e_cases_produce_expected_output() {
     );
 
     for pp in &cases {
+        let src = fs::read_to_string(pp).expect("read case source");
+        if let Some((lazy_passes, eager_passes)) = mode_expectations(&src) {
+            // Expectation files per verdict: `.out` for a passing mode's
+            // exact stdout, `.err` for a failing mode's diagnostics. A lazy
+            // failure may legitimately report FEWER diagnostics than the
+            // whole-program check (only the execution path's), so a
+            // `.lazy.err` beside the case overrides `.err` for the lazy leg.
+            let expect_out = || {
+                fs::read_to_string(pp.with_extension("out"))
+                    .unwrap_or_else(|_| panic!("{}: passing mode needs a .out", pp.display()))
+            };
+            let expect_err = || {
+                fs::read_to_string(pp.with_extension("err"))
+                    .unwrap_or_else(|_| panic!("{}: failing mode needs a .err", pp.display()))
+            };
+            let expect_lazy_err = || {
+                fs::read_to_string(pp.with_extension("lazy.err")).unwrap_or_else(|_| expect_err())
+            };
+            // A JIT build runs both modes (default = lazy, --eager = eager);
+            // an interpreter-only build checks eagerly regardless, so only
+            // the @eager expectation applies there.
+            #[cfg(feature = "jit")]
+            {
+                if lazy_passes {
+                    check_success_mode(bin, pp, &expect_out(), false);
+                } else {
+                    check_error_mode(bin, pp, &expect_lazy_err(), false);
+                }
+                if eager_passes {
+                    check_success_mode(bin, pp, &expect_out(), true);
+                } else {
+                    check_error_mode(bin, pp, &expect_err(), true);
+                }
+            }
+            #[cfg(not(feature = "jit"))]
+            {
+                let _ = (lazy_passes, &expect_lazy_err);
+                if eager_passes {
+                    check_success(bin, pp, &expect_out());
+                } else {
+                    check_error(bin, pp, &expect_err());
+                }
+            }
+            continue;
+        }
         match (
             fs::read_to_string(pp.with_extension("out")).ok(),
             fs::read_to_string(pp.with_extension("err")).ok(),
@@ -168,7 +276,10 @@ fn e2e_cases_produce_expected_output() {
             (Some(expected), None) => check_success(bin, pp, &expected),
             (None, Some(expected)) => check_error(bin, pp, &expected),
             (Some(_), Some(_)) => {
-                panic!("{} has both a .out and a .err expectation", pp.display())
+                panic!(
+                    "{} has both a .out and a .err expectation but no mode annotations",
+                    pp.display()
+                )
             }
             (None, None) => panic!("missing .out/.err expectation for {}", pp.display()),
         }

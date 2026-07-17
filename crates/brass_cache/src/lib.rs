@@ -428,6 +428,56 @@ pub fn load(entry: &Path, flavor: &str, search: &brass_resolve::SearchPaths) -> 
     Some(payload)
 }
 
+/// A PARTIAL analysis cache: what a stopped lazy run had settled when its
+/// program ended -- a `brass_typeck::stream::StreamSnapshot` under the same
+/// validity guards as the full [`Payload`] (compiler tag via the header,
+/// entry identity, package names, every recorded source unchanged). The
+/// next lazy run resumes checking from it; it never stands in for a full
+/// analysis (its flavor tag keeps [`load`] from ever accepting it).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PartialPayload {
+    pub deps: Vec<FileStamp>,
+    pub packages: Vec<String>,
+    pub snapshot: brass_typeck::stream::StreamSnapshot,
+}
+
+/// [`load`] for a partial payload (same validation, its own flavor tag).
+pub fn load_partial(
+    entry: &Path,
+    flavor: &str,
+    search: &brass_resolve::SearchPaths,
+) -> Option<brass_typeck::stream::StreamSnapshot> {
+    let roots = StampRoots::new(entry, search);
+    let path = cache_path(entry);
+    let bytes = std::fs::read(&path).ok()?;
+    let body = decode_file(&bytes, &cache_tag(flavor)?)?;
+    let payload: PartialPayload = postcard::from_bytes(body).ok()?;
+    let entry_bytes = std::fs::read(entry).ok()?;
+    let first = payload.deps.first()?;
+    if first.len != entry_bytes.len() as u64 || first.sha1 != sha1(&entry_bytes) {
+        return None;
+    }
+    if payload.packages != package_names(search) {
+        return None;
+    }
+    for dep in &payload.deps {
+        if !dep.still_valid(&roots) {
+            tracing::debug!(target: "brass::perf", "partial cache: {:?} changed, ignoring", dep.origin);
+            return None;
+        }
+    }
+    tracing::debug!(target: "brass::perf", "partial cache: resuming from {}", path.display());
+    Some(payload.snapshot)
+}
+
+/// [`save`] for a partial payload (its own flavor tag, same file).
+pub fn save_partial(entry: &Path, flavor: &str, payload: &PartialPayload) {
+    let (Ok(body), Some(tag)) = (postcard::to_stdvec(payload), cache_tag(flavor)) else {
+        return;
+    };
+    write_atomic(&cache_path(entry), &encode_file(&tag, &body));
+}
+
 /// Write the cache for `entry`, best-effort (see [`write_atomic`]).
 pub fn save(entry: &Path, flavor: &str, payload: &Payload) {
     let (Ok(body), Some(tag)) = (postcard::to_stdvec(payload), cache_tag(flavor)) else {

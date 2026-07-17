@@ -21,6 +21,37 @@ pub fn check(program: &Program, typed: &TypedProgram) -> Vec<TypeError> {
     v.errors
 }
 
+/// [`check`] scoped to one body block. The streaming (lazy) profile runs
+/// this right after a body's dedicated pass, so a non-exhaustive match
+/// surfaces in that body's own delta -- deterministically, before execution
+/// could reach it -- instead of only in the terminal whole-program pass,
+/// which a stopped lazy run never reaches. Instantiations recorded later can
+/// only ADD required coverage, so the early check under-approximates and
+/// never falsely rejects; `check` (run by `brass check` and eager runs)
+/// remains the complete verdict.
+pub fn check_block(program: &Program, typed: &TypedProgram, block: &Block) -> Vec<TypeError> {
+    let mut v = ExhaustiveVisitor {
+        program,
+        typed,
+        errors: Vec::new(),
+    };
+    crate::walk::walk_block(block, &mut v);
+    v.errors
+}
+
+/// [`check_block`] for a module initializer's statement list.
+pub fn check_stmts(program: &Program, typed: &TypedProgram, stmts: &[Stmt]) -> Vec<TypeError> {
+    let mut v = ExhaustiveVisitor {
+        program,
+        typed,
+        errors: Vec::new(),
+    };
+    for s in stmts {
+        crate::walk::walk_stmt(s, &mut v);
+    }
+    v.errors
+}
+
 /// Whether a bare name in a pattern names some sum's variant (a refutable
 /// unit-variant test) rather than a plain binding.
 fn is_variant_name(program: &Program, name: &str) -> bool {

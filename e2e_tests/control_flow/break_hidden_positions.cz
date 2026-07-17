@@ -1,3 +1,9 @@
+// @lazy: fail
+// @eager: fail
+//
+// Both modes reject this program, but lazily only the diagnostics on the
+// execution path surface (`f` is the first call): the whole-program check
+// pins all three messages, the lazy leg just the first (.lazy.err).
 // Pins that `break` is found wherever it hides:
 //  - a break in a call argument or a let value makes a `while true` breakable,
 //    so a `-> int32` function ending in that loop can fall through and must be

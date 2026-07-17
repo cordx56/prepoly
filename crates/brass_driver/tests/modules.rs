@@ -1372,10 +1372,20 @@ fn distributed_binary_includes_its_sibling_libraries_dir() {
             "import shipped.{ greet }\nfun main() { println(greet()) }\n",
         )],
     );
-    let out = Command::new(&bin)
-        .arg(&main)
-        .output()
-        .expect("spawn dist brass");
+    // Retried: a PARALLEL test thread fork+execing at the wrong moment
+    // inherits the just-closed write fd of the `fs::copy` above between its
+    // fork and exec, and executing `bin` then fails ETXTBSY until that child
+    // execs. Transient by construction, so spin briefly.
+    let out = (0..50)
+        .find_map(|_| match Command::new(&bin).arg(&main).output() {
+            Ok(out) => Some(out),
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                None
+            }
+            Err(e) => panic!("spawn dist brass: {e}"),
+        })
+        .expect("spawn dist brass (ETXTBSY persisted)");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -1595,8 +1605,10 @@ fn czcache_survives_a_rewrite_with_identical_contents() {
     );
     // The perf log is the only place a hit is visible: a hit and a miss agree on
     // the program's output, which is the point of the cache.
+    // `--eager` so the FULL cache write cannot race the lazy stop-at-exit.
     let run_logged = || {
         let out = Command::new(env!("CARGO_BIN_EXE_brass"))
+            .arg("--eager")
             .arg(&main)
             .env("BRASS_LOG", "brass::perf=debug")
             .output()
@@ -1685,6 +1697,39 @@ fn czcache_survives_relocation() {
 /// `app.czcache`), so a hit requires the entry ITSELF to be the recorded one:
 /// running the extensionless sibling must execute its own program, never the
 /// cached neighbor's.
+/// A LAZY run persists a cache too: the full payload when its checker
+/// finished first, the partial (resume) payload when the exit stopped it.
+/// Either way the file exists, and a rerun -- resumed or replayed -- prints
+/// the same output. (Which flavor wins is a benign race; both are pinned
+/// valid by the reruns.)
+#[test]
+fn lazy_runs_persist_and_reuse_a_cache() {
+    let main = setup(
+        "lazy_cache_reuse",
+        &[(
+            "main.cz",
+            "fun greet(n: int32) -> int32 { return n + 1 }\nfun main() { println(greet(41)) }\n",
+        )],
+    );
+    let run = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_brass"))
+            .arg(&main)
+            .output()
+            .expect("spawn brass");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let first = run();
+    assert_eq!(first, "42\n");
+    assert!(main.with_extension("czcache").is_file());
+    assert_eq!(run(), first);
+    assert_eq!(run(), first);
+}
+
 #[test]
 fn czcache_is_entry_specific() {
     let main = setup(
@@ -1696,8 +1741,12 @@ fn czcache_is_entry_specific() {
         ],
     );
     let root = main.parent().unwrap().to_path_buf();
+    // `--eager`: a lazy run stops the checker when the program ends, so
+    // whether the FULL cache gets written races the (tiny) program. The
+    // cache-identity property under test is mode-independent.
     let run = |entry: &PathBuf| {
         let out = Command::new(env!("CARGO_BIN_EXE_brass"))
+            .arg("--eager")
             .arg(entry)
             .output()
             .expect("spawn brass");

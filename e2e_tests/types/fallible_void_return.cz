@@ -1,0 +1,29 @@
+// A fallible function that returns no value: `-> void!` accepts a body that
+// falls off its end (the Ok exit) and a bare `return` (the same thing),
+// while `error(..)!` remains its Err path.
+fun tick(n: int32) -> void! {
+    if n < 0 {
+        error("negative: {n}")!
+    }
+    if n == 0 {
+        return
+    }
+    println("positive {n}")
+}
+
+fun main() {
+    match tick(1) {
+        Ok { value } => println("ok pos"),
+        Err { error } => println("err pos"),
+    }
+    match tick(0) {
+        Ok { value } => println("ok zero"),
+        Err { error } => println("err zero"),
+    }
+    match tick(-1) {
+        Ok { value } => println("ok neg"),
+        Err { error } => println("err neg"),
+    }
+    tick(2)!
+    println("done")
+}

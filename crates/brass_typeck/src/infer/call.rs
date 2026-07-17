@@ -145,6 +145,25 @@ impl<'a> Checker<'a> {
                     self.invalidate_narrowed_after_call(scopes);
                     return fallback_ret;
                 }
+                // The lazy profile types a FULLY-ANNOTATED callee from its
+                // signature alone (see `Checker::lazy_profile`): the entry's
+                // gate then costs the entry's own body, not its call tree.
+                // Only for callees that GET a dedicated pass -- a seeded
+                // (context) body is never re-checked, so the call-site
+                // elaboration is the sole source of its channel entries and
+                // must stay.
+                if self.lazy_profile
+                    && !self.seeded_module(&module)
+                    && declared_ret.as_ref().is_some_and(brass_hir::is_fully_known)
+                    && signature_params.iter().all(|p| {
+                        p.resolved_ty
+                            .as_ref()
+                            .is_some_and(|t| brass_hir::is_fully_known(brass_hir::peel_modes(t)))
+                    })
+                {
+                    self.invalidate_narrowed_after_call(scopes);
+                    return fallback_ret;
+                }
                 let before = self.errors.len();
                 let ret = self.instantiate_function_call(
                     &symbol,

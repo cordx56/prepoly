@@ -18,7 +18,9 @@ type inference. It runs like a script — no build step — but every function i
 fully type-checked just before it runs. Source files use the `.cz` extension.
 Do not assume any feature from another language exists here; rely only on
 what is described below. After writing code, type-check it with
-`brass check file.cz`.
+`brass check file.cz` — a plain `brass file.cz` run checks LAZILY (only the
+code the run actually executes), so a successful run does not prove the
+whole file well-typed; `brass check` does.
 
 ## Mental model
 
@@ -699,9 +701,10 @@ connection close); chunked transfer coding is NOT decoded.
   `client.fetch(path)!` or `client.request(req)!`
 - `HttpRequest = { method, path, version, headers: Header[], body: uint8[] }`
   with `Header = { name: string, value: string }`;
-  `HttpRequest.parse(raw)!`; `req.serialize() -> uint8[]`
+  `HttpRequest.parse(raw: string)!` (a STRING, so a serialized `uint8[]`
+  round-trips through `to_text(bytes)!` first); `req.serialize() -> uint8[]`
 - `HttpResponse = { version, status: int32, reason, headers, body }`;
-  `resp.body_text() -> string!`; `HttpResponse.parse(raw)!`;
+  `resp.body_text() -> string!`; `HttpResponse.parse(raw: string)!`;
   `resp.serialize() -> uint8[]` (the bytes a server writes; nothing is added,
   so `Content-Length` is yours to set, as with the request)
 - `request(req) -> HttpResponse!` -- plain HTTP; the host comes from the
@@ -737,8 +740,9 @@ type JsonValue =
 The only primitives are `spawn(f)` (run a closure on a thread), `with(c, f)`
 (acquire a shared object to read/use it), and `sync()` (wait for spawned work
 before observing its results). The compiler infers ownership automatically; you
-never write move/freeze/cown. Spawned work is otherwise joined only at the end
-of `main`, so insert `sync()` before a read that may race ahead.
+never write move/freeze/cown. `spawn` is only legal inside a function (a
+top-level `spawn` is a compile error). Spawned work is otherwise joined only
+at the end of `main`, so insert `sync()` before a read that may race ahead.
 
 ## Common mistakes to avoid
 
@@ -760,6 +764,8 @@ of `main`, so insert `sync()` before a read that may race ahead.
 - The `!` error-propagation operator needs a fallible context, the top
   level, or `main` — a function explicitly annotated with a non-Result
   return type rejects `expr!` in its body.
+- A fallible function that returns no value may be annotated `-> void!`:
+  falling off the end of the body (or a bare `return`) is its Ok exit.
 
 ## Worked example
 

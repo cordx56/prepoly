@@ -63,6 +63,16 @@ impl<'a> Checker<'a> {
         if params.len() != arg_types.len() {
             return fallback_ret;
         }
+        // A previous elaboration of this callee at the same fully-resolved
+        // argument types already recorded the body's channel entries and
+        // settled its return; reuse it (see `Checker::elaboration_memo`).
+        let memo_key = self.elaboration_memo_key("fn", symbol, arg_types);
+        if let Some(memo_key) = &memo_key
+            && let Some(ret) = self.elaboration_memo.get(memo_key)
+        {
+            return ret.clone();
+        }
+        let errors_before = self.errors.len();
         let key = format!("fn:{symbol}");
         if !self.instantiating.insert(key.clone()) {
             // Recursive call: re-checking the body again would not terminate, so
@@ -111,7 +121,40 @@ impl<'a> Checker<'a> {
         };
         self.current_module = saved_module;
         self.instantiating.remove(&key);
+        if let Some(memo_key) = memo_key
+            && self.errors.len() == errors_before
+        {
+            let resolved = self.resolve(&ret);
+            if brass_hir::is_fully_known(&resolved) {
+                self.elaboration_memo.insert(memo_key, resolved);
+            }
+        }
         ret
+    }
+
+    /// The memo key for re-elaborating a callable at these argument types, or
+    /// `None` when any argument is not fully resolved (elaborating at an open
+    /// argument constrains the caller's variables, which a memo hit must not
+    /// skip). `Debug` rendering is used because it spells out the whole type
+    /// -- nominal ids and full substitutions included -- where `display`
+    /// hides `_`-prefixed members and would collide two instantiations of one
+    /// nominal.
+    fn elaboration_memo_key(
+        &self,
+        kind: &str,
+        callable: &str,
+        arg_types: &[Type],
+    ) -> Option<String> {
+        use std::fmt::Write;
+        let mut memo_key = format!("{kind}:{callable}");
+        for arg in arg_types {
+            let resolved = self.resolve(arg);
+            if !brass_hir::is_fully_known(&resolved) {
+                return None;
+            }
+            let _ = write!(memo_key, "\u{1}{resolved:?}");
+        }
+        Some(memo_key)
     }
 
     /// Choose an inferred-return body's return type: the full check's
@@ -303,7 +346,7 @@ impl<'a> Checker<'a> {
         ret
     }
 
-    fn signature_call_frame(
+    pub(super) fn signature_call_frame(
         &mut self,
         params: &[ParamInfo],
         arg_types: &[Type],

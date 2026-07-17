@@ -703,6 +703,11 @@ fn drive(mode: Mode, file: &str) -> Result<(), u8> {
 /// the two must never accept each other's caches.
 #[cfg(jit_backend)]
 const CACHE_FLAVOR: &str = "jit";
+/// The PARTIAL cache's flavor (a stopped lazy run's settled state): its own
+/// tag, so the full-cache loader can never mistake it for a complete
+/// analysis and vice versa.
+#[cfg(jit_backend)]
+const PARTIAL_CACHE_FLAVOR: &str = "jit-partial";
 #[cfg(not(jit_backend))]
 const CACHE_FLAVOR: &str = "repl";
 
@@ -868,6 +873,18 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
 struct ThreadScheduler {
     events: tokio::sync::mpsc::UnboundedSender<brass_typeck::stream::CheckEvent>,
     requests: tokio::sync::mpsc::UnboundedReceiver<brass_typeck::stream::BodyRequest>,
+    /// Set by the driver when the program ends: the checker stops at the
+    /// next body boundary instead of finishing code nothing will run.
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the stop actually interrupted the queue (an `Interrupted`
+    /// event passed through): a completed analysis stays cacheable as full
+    /// even when the stop arrived moments later.
+    interrupted: std::cell::Cell<bool>,
+    /// Set while the driver is settling its entry (gate + start-up demands):
+    /// the checker serves only requested bodies, so no demand ever waits for
+    /// a definitional pass the queue happened to start first. Cleared when
+    /// execution begins.
+    paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(jit_backend)]
@@ -881,9 +898,24 @@ impl brass_typeck::stream::Scheduler for ThreadScheduler {
     }
 
     fn emit(&mut self, event: brass_typeck::stream::CheckEvent) {
+        if matches!(event, brass_typeck::stream::CheckEvent::Interrupted(_)) {
+            self.interrupted.set(true);
+        }
         // A dropped receiver means the consumer stopped listening (it
         // aborted); checking still finishes for the thread's final result.
         let _ = self.events.send(event);
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn interrupted(&self) -> bool {
+        self.interrupted.get()
+    }
+
+    fn paused(&self) -> bool {
+        self.paused.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -918,6 +950,44 @@ impl MergedChannels {
             | CheckEvent::BodyChecked(_, d)
             | CheckEvent::Finished(d, _) => self.apply_delta(d),
             CheckEvent::Restarted => *self = Self::default(),
+            // The stop-snapshot is bookkeeping for the partial cache, not
+            // channel data (everything in it was already applied as deltas).
+            CheckEvent::Interrupted(_) => {}
+        }
+    }
+
+    /// The prior run's delivered state, verbatim: what its deltas had
+    /// built up by the time it stopped.
+    fn from_snapshot(snap: &brass_typeck::stream::StreamSnapshot) -> Self {
+        MergedChannels {
+            expr_types: snap
+                .expr_flushed
+                .iter()
+                .map(|(s, t)| (*s, t.clone()))
+                .collect(),
+            view_args: snap.view_args.iter().copied().collect(),
+            sum_views: snap
+                .sum_views
+                .iter()
+                .map(|(s, t)| (*s, t.clone()))
+                .collect(),
+            lift_errs: snap.lift_errs.iter().copied().collect(),
+            fields_loops: snap
+                .fields_loops
+                .iter()
+                .map(|(s, f)| (*s, f.clone()))
+                .collect(),
+            type_names: snap
+                .type_names
+                .iter()
+                .map(|(s, t)| (*s, t.clone()))
+                .collect(),
+            typeof_types: snap
+                .typeof_types
+                .iter()
+                .map(|(s, t)| (*s, t.clone()))
+                .collect(),
+            null_props: snap.null_props.iter().copied().collect(),
         }
     }
 
@@ -947,6 +1017,109 @@ fn print_diags(diags: Vec<String>) -> u8 {
     1
 }
 
+/// Every function and method body's span range, for attributing a
+/// diagnostic to the body containing it. Lazy checking HOLDS an error whose
+/// span lies inside a body execution never needs; an error inside a needed
+/// body -- or outside any body at all (top-level code, declarations,
+/// signatures) -- is fatal at the next gate. Methods use keys no demand ever
+/// names, so their errors surface through the mono-failure path instead.
+#[cfg(jit_backend)]
+struct BodySpans {
+    ranges: Vec<(String, usize, usize)>,
+}
+
+#[cfg(jit_backend)]
+impl BodySpans {
+    fn new(program: &Program) -> Self {
+        // The WHOLE declaration's range, not just the body block: a
+        // signature-level diagnostic (a return-path error points at the
+        // return annotation) about a function nothing runs is as ignorable
+        // as one inside its body.
+        let mut ranges = Vec::new();
+        for (symbol, f) in &program.functions {
+            let span = f.decl.span;
+            ranges.push((symbol.clone(), span.lo, span.hi));
+        }
+        for info in program.types.values() {
+            let mut methods: Vec<&brass_hir::MethodInfo> = Vec::new();
+            match &info.kind {
+                brass_hir::TypeKind::Record { methods: ms, .. } => methods.extend(ms.values()),
+                brass_hir::TypeKind::Sum { variants } => {
+                    for v in variants {
+                        methods.extend(v.methods.values());
+                    }
+                }
+            }
+            for m in methods {
+                if m.decl.body.is_some() {
+                    let span = m.decl.span;
+                    ranges.push((format!("{}.{}", info.name, m.decl.name), span.lo, span.hi));
+                }
+            }
+        }
+        BodySpans { ranges }
+    }
+
+    /// The body whose range contains `span`, if any.
+    fn owner(&self, span: Span) -> Option<&str> {
+        tracing::trace!(target: "brass::lazy", lo = span.lo, ranges = ?self.ranges, "owner probe");
+        self.ranges
+            .iter()
+            .find(|(_, lo, hi)| *lo <= span.lo && span.lo < *hi)
+            .map(|(symbol, _, _)| symbol.as_str())
+    }
+}
+
+/// What a gate should do about the held diagnostics.
+#[cfg(jit_backend)]
+enum FatalVerdict {
+    /// Nothing on the needed path: proceed.
+    Clean,
+    /// Fatal diagnostics were printed: abort with this code.
+    Fatal(u8),
+    /// The confirmation wait saw a keyed-specialization restart: the
+    /// diagnostics were the first pass's provisional artifacts, not a
+    /// verdict -- fall back to the whole-analysis path.
+    Restarted,
+}
+
+/// Judge the held diagnostics at a gate. A fatal candidate is CONFIRMED
+/// before it aborts anything: a keyed (`-> infer!`) program's first pass
+/// records provisional errors that its specialization re-pass may clear, so
+/// the gate waits for the checker's verdict (its terminal event, a restart,
+/// or hang-up) once -- and only once something looked fatal; clean programs
+/// never wait here. Confirmed diagnostics print sorted and deduplicated,
+/// rendered like the eager pipeline.
+#[cfg(jit_backend)]
+fn judge_fatal(
+    lazy: &mut LazyState,
+    bodies: &BodySpans,
+    sources: &brass_resolve::SourceMap,
+) -> FatalVerdict {
+    if lazy.fatal(bodies).is_empty() {
+        return FatalVerdict::Clean;
+    }
+    // Wait for the checker's hang-up (or a restart), NOT its terminal
+    // event: a keyed program's first pass emits `Finished` before the
+    // specialization re-pass announces itself with `Restarted`. The wait is
+    // on the checker's own progress, so its queue must be running.
+    lazy.resume_background();
+    while !lazy.closed && !lazy.restarted {
+        lazy.pump_blocking();
+    }
+    if lazy.restarted {
+        return FatalVerdict::Restarted;
+    }
+    let fatal = lazy.fatal(bodies);
+    if fatal.is_empty() {
+        return FatalVerdict::Clean;
+    }
+    for line in render_errors(&fatal, sources) {
+        eprintln!("{line}");
+    }
+    FatalVerdict::Fatal(1)
+}
+
 /// The execution side of the lazy pipeline: replays the checker thread's
 /// events into the merged channel state, tracks which bodies are settled,
 /// and sends the priority requests -- the demanded function's path plus the
@@ -959,19 +1132,32 @@ struct LazyState {
     merged: MergedChannels,
     checked_fns: HashSet<String>,
     inits_checked: usize,
-    /// Some diagnostic was reported. Fatal before execution starts: the run
-    /// falls back to the whole-analysis verdict, exactly as eager checking
-    /// would have refused to run the program.
-    errors: bool,
+    /// Every diagnostic reported so far, HELD: lazy checking ignores an
+    /// error unless execution needs the body it lives in (see
+    /// [`LazyState::fatal`] and [`BodySpans`]).
+    held: Vec<brass_typeck::TypeError>,
+    /// The bodies execution needs: `main`, plus every demanded function.
+    /// (Top-level code needs no entry here -- its spans lie outside every
+    /// body, which is always fatal.) Grows at each demand; held errors are
+    /// re-judged against it at every gate.
+    needed: HashSet<String>,
+    /// Tell the checker to stop at the next body boundary (the program
+    /// ended; what it never executed no longer needs checking).
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// While set, the checker serves only demanded bodies and holds its
+    /// background queue (see `Scheduler::paused`). Cleared when execution
+    /// begins -- and before any wait that needs the checker to make progress
+    /// of its own (a fatal confirmation, a transient-failure retry), which
+    /// would otherwise wait forever on a held queue.
+    paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The keyed-specialization re-pass restarted the analysis: spans moved,
     /// so everything merged is unusable and the run falls back likewise.
     restarted: bool,
     /// The event channel closed (the checker finished and hung up).
     closed: bool,
-    /// The complete, sorted diagnostic set the terminal event carried, for
-    /// failure paths that must report without joining the checker thread
-    /// (the runtime resolver aborts from inside JIT execution).
-    final_errors: Option<Vec<brass_typeck::TypeError>>,
+    /// The stop-snapshot a stopped checker handed back, for the partial
+    /// cache (everything it settled; resumes the next run).
+    snapshot: Option<brass_typeck::stream::StreamSnapshot>,
     /// A delta carried channel content since the last MIR (re)build. Bodies
     /// lowered before it may be missing entries the checker settled later
     /// (a cross-body pinning: an init's array literal fixed by a function's
@@ -981,10 +1167,17 @@ struct LazyState {
 
 #[cfg(jit_backend)]
 impl LazyState {
+    /// Release the checker's background queue (idempotent). Called when
+    /// execution begins, and before any wait on the checker's own progress.
+    fn resume_background(&self) {
+        self.paused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn take(&mut self, event: brass_typeck::stream::CheckEvent) {
         use brass_typeck::stream::{BodyId, CheckEvent};
         match &event {
-            CheckEvent::StaticChecked(errors) => self.errors |= !errors.is_empty(),
+            CheckEvent::StaticChecked(errors) => self.held.extend(errors.iter().cloned()),
             CheckEvent::ContextReady(d) => self.absorb_delta(d),
             CheckEvent::BodyChecked(id, d) => {
                 self.absorb_delta(d);
@@ -997,18 +1190,18 @@ impl LazyState {
             }
             CheckEvent::Finished(d, errors) => {
                 self.absorb_delta(d);
-                self.errors |= !errors.is_empty();
-                self.final_errors = Some(errors.clone());
+                self.held.extend(errors.iter().cloned());
             }
             CheckEvent::Restarted => self.restarted = true,
+            CheckEvent::Interrupted(snapshot) => self.snapshot = Some(snapshot.clone()),
         }
         self.merged.apply(event);
     }
 
-    /// Track a delta's verdicts: errors are fatal-before-execution, channel
+    /// Track a delta: errors are held for span-attributed judgement, channel
     /// content marks the current lowering stale.
     fn absorb_delta(&mut self, d: &brass_typeck::stream::ChannelDelta) {
-        self.errors |= !d.errors.is_empty();
+        self.held.extend(d.errors.iter().cloned());
         self.dirty |= !d.expr_types.is_empty()
             || !d.expr_types_removed.is_empty()
             || !d.view_args.is_empty()
@@ -1035,36 +1228,69 @@ impl LazyState {
         }
     }
 
-    fn ok(&self) -> bool {
-        !self.errors && !self.restarted
+    /// The held diagnostics execution cannot ignore: those inside a NEEDED
+    /// body and those inside no known body at all (top-level statements,
+    /// declarations, spanless internal reports). Sorted and deduplicated
+    /// like the eager report.
+    fn fatal(&self, bodies: &BodySpans) -> Vec<(String, Span)> {
+        let mut out: Vec<(String, Span)> = self
+            .held
+            .iter()
+            .filter(|e| match bodies.owner(e.span) {
+                Some(owner) => self.needed.contains(owner),
+                None => true,
+            })
+            .map(|e| (e.message.clone(), e.span))
+            .collect();
+        out.sort_by(|a, b| (a.1.lo, &a.0).cmp(&(b.1.lo, &b.0)));
+        out.dedup();
+        out
+    }
+
+    /// Every held diagnostic, needed or not: the report for a failure the
+    /// span attribution cannot explain (a mono rejection against the
+    /// checker's final state).
+    fn held_all(&self) -> Vec<(String, Span)> {
+        let mut out: Vec<(String, Span)> = self
+            .held
+            .iter()
+            .map(|e| (e.message.clone(), e.span))
+            .collect();
+        out.sort_by(|a, b| (a.1.lo, &a.0).cmp(&(b.1.lo, &b.0)));
+        out.dedup();
+        out
     }
 
     /// Block until the entry is settled: every module initializer and (when
-    /// the program has one) `main`. False means the run must fall back --
-    /// an error, a restart, or a checker that finished without settling them.
+    /// the program has one) `main`. False means the checker hung up (or
+    /// restarted) before settling them; held diagnostics are the caller's
+    /// judgement to make.
     fn wait_gate(&mut self, inits: usize, has_main: bool) -> bool {
         let settled =
             |s: &Self| s.inits_checked >= inits && (!has_main || s.checked_fns.contains("main"));
-        while self.ok() && !self.closed && !settled(self) {
+        while !self.restarted && !self.closed && !settled(self) {
             self.pump_blocking();
         }
-        self.ok() && settled(self)
+        !self.restarted && settled(self)
     }
 
     /// Ask the checker to settle `symbol` next -- the demanded function's
     /// path and the concrete argument types of the call that needs it --
-    /// and block until it is. False means the run must fall back.
+    /// and block until it is. The body joins the NEEDED set: its held
+    /// diagnostics become fatal, so callers judge [`LazyState::fatal`]
+    /// after every demand. False means the checker hung up or restarted.
     fn demand(&mut self, symbol: &str, type_args: Vec<brass_hir::Type>) -> bool {
+        self.needed.insert(symbol.to_string());
         if !self.checked_fns.contains(symbol) {
             let _ = self.requests.send(brass_typeck::stream::BodyRequest {
                 symbol: symbol.to_string(),
                 type_args,
             });
-            while self.ok() && !self.closed && !self.checked_fns.contains(symbol) {
+            while !self.restarted && !self.closed && !self.checked_fns.contains(symbol) {
                 self.pump_blocking();
             }
         }
-        self.ok() && self.checked_fns.contains(symbol)
+        !self.restarted && self.checked_fns.contains(symbol)
     }
 
     /// The merged channel state as the lowering bundle. Call locations are
@@ -1095,8 +1321,12 @@ impl LazyState {
 fn finish_eagerly(
     rt: &tokio::runtime::Runtime,
     checker: tokio::task::JoinHandle<Result<AnalyzedProgram, Vec<String>>>,
+    paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
     mut events: tokio::sync::mpsc::UnboundedReceiver<brass_typeck::stream::CheckEvent>,
 ) -> Result<(), u8> {
+    // The whole-analysis verdict needs the whole analysis: release the
+    // checker's held background queue so it can finish.
+    paused.store(false, std::sync::atomic::Ordering::Relaxed);
     while events.blocking_recv().is_some() {}
     let payload = rt
         .block_on(checker)
@@ -1134,7 +1364,9 @@ fn drain_targets_for_spawn(
     tables: &brass_mir::LowerTables,
     call_locations: &HashMap<Span, (String, u32, u32)>,
     sources: &brass_resolve::SourceMap,
+    bodies: &BodySpans,
     globals: &[(String, brass_hir::Type)],
+    resume: Option<&Path>,
     lowering: &mut brass_mir::SubsetLowering,
     lazy: &mut LazyState,
     targets: &mut HashMap<String, brass_engine::DeferredSig>,
@@ -1156,7 +1388,9 @@ fn drain_targets_for_spawn(
                 tables,
                 call_locations,
                 sources,
+                bodies,
                 globals,
+                resume,
                 lowering,
                 lazy,
                 targets,
@@ -1178,11 +1412,48 @@ fn drain_targets_for_spawn(
 /// callable address, or 0 after reporting -- the site then traps, keeping a
 /// resolver failure defined.
 ///
-/// A diagnostic discovered here means the program needed ill-typed code:
-/// the full report is printed (the checker is drained to its terminal event
-/// for the same sorted set eager printing shows) and the process exits 1,
-/// exactly as if the error had been found before execution -- output the
-/// program already produced stands, as documented for lazy checking.
+/// Exit the process if the needed path holds a CONFIRMED fatal diagnostic
+/// (see [`judge_fatal`]; reached from JIT code, which cannot unwind, hence
+/// `exit`). A keyed-specialization restart discovered mid-run cannot fall
+/// back -- the program is already executing on the first pass's spans -- so
+/// it exits with a pointer to the eager path instead.
+#[cfg(jit_backend)]
+fn exit_if_fatal(lazy: &mut LazyState, bodies: &BodySpans, sources: &brass_resolve::SourceMap) {
+    if lazy.fatal(bodies).is_empty() {
+        return;
+    }
+    // Wait for the checker's hang-up (or a restart), NOT its terminal
+    // event: a keyed program's first pass emits `Finished` before the
+    // specialization re-pass announces itself with `Restarted`. The wait is
+    // on the checker's own progress, so its queue must be running.
+    lazy.resume_background();
+    while !lazy.closed && !lazy.restarted {
+        lazy.pump_blocking();
+    }
+    use std::io::Write;
+    if lazy.restarted {
+        let _ = io::stdout().flush();
+        eprintln!(
+            "error: reflective specialization restarted the analysis mid-run; rerun with --eager"
+        );
+        std::process::exit(1);
+    }
+    let fatal = lazy.fatal(bodies);
+    if fatal.is_empty() {
+        return;
+    }
+    let _ = io::stdout().flush();
+    for line in render_errors(&fatal, sources) {
+        eprintln!("{line}");
+    }
+    std::process::exit(1);
+}
+
+/// A fatal diagnostic discovered here means the program needed ill-typed
+/// code: the needed-path report is printed and the process exits 1, exactly
+/// as if the error had been found before execution -- output the program
+/// already produced stands, as documented for lazy checking. Held
+/// diagnostics elsewhere stay ignored.
 #[cfg(jit_backend)]
 #[allow(clippy::too_many_arguments)] // the execution-side state is one bundle
 fn resolve_deferred(
@@ -1192,7 +1463,9 @@ fn resolve_deferred(
     tables: &brass_mir::LowerTables,
     call_locations: &HashMap<Span, (String, u32, u32)>,
     sources: &brass_resolve::SourceMap,
+    bodies: &BodySpans,
     globals: &[(String, brass_hir::Type)],
+    resume: Option<&Path>,
     lowering: &mut brass_mir::SubsetLowering,
     lazy: &mut LazyState,
     targets: &mut HashMap<String, brass_engine::DeferredSig>,
@@ -1206,48 +1479,36 @@ fn resolve_deferred(
         eprintln!("error: deferred call to unrecorded instance `{symbol}`");
         return 0;
     };
-    let fail = |lazy: &mut LazyState, fallback: &str| -> usize {
-        // Drain to the checker's terminal event so the report is the same
-        // complete, sorted set the eager pipeline prints.
-        while !lazy.closed {
-            lazy.pump_blocking();
+    // A diagnostic on the (just grown) needed path stops the run here,
+    // before the ill-typed code could execute.
+    let fatal_exit = |lazy: &mut LazyState, fallback: &str| -> usize {
+        exit_if_fatal(lazy, bodies, sources);
+        // A RESUMED run's failure here may only mean the prior run's
+        // snapshot withheld an entry this body needs. Rerunning mid-run
+        // would replay side effects, so: drop the stale partial cache
+        // (the next run starts clean) and fail with the pointer.
+        if let Some(entry) = resume {
+            let _ = std::fs::remove_file(brass_cache::cache_path(entry));
+            eprintln!(
+                "error: the partial analysis cache was insufficient at run time; \
+                 it was discarded -- rerun the program"
+            );
+            std::process::exit(1);
         }
-        match lazy.final_errors.take().filter(|e| !e.is_empty()) {
-            Some(errors) => {
-                let rendered: Vec<(String, Span)> =
-                    errors.into_iter().map(|e| (e.message, e.span)).collect();
-                use std::io::Write;
-                let _ = io::stdout().flush();
-                for line in render_errors(&rendered, sources) {
-                    eprintln!("{line}");
-                }
-                std::process::exit(1);
-            }
-            None => {
-                eprintln!("{fallback}");
-                0
-            }
-        }
+        eprintln!("{fallback}");
+        0
     };
     if !lowering.is_lowered(&sig.base) {
-        tracing::debug!(
-            target: "brass::perf",
-            base = %sig.base,
-            expr_types = lazy.merged.expr_types.len(),
-            slices = lazy
-                .merged
-                .expr_types
-                .values()
-                .filter(|t| matches!(t, brass_hir::Type::Slice(_)))
-                .count(),
-            "lazy: runtime lower"
-        );
+        tracing::debug!(target: "brass::perf", base = %sig.base, "lazy: runtime lower");
         if !lazy.demand(&sig.base, sig.type_args.clone()) {
-            return fail(
+            return fatal_exit(
                 lazy,
                 &format!("error: the check of `{}` did not complete", sig.base),
             );
         }
+        // The demanded body joined the needed set: a held diagnostic in it
+        // is now fatal, before its code could ever run.
+        exit_if_fatal(lazy, bodies, sources);
         let channels = lazy.channels(call_locations);
         lowering.add_function(program, tables, &sig.base, &channels);
     }
@@ -1292,7 +1553,9 @@ fn resolve_deferred(
                         tables,
                         call_locations,
                         sources,
+                        bodies,
                         globals,
+                        resume,
                         lowering,
                         lazy,
                         targets,
@@ -1311,11 +1574,12 @@ fn resolve_deferred(
                     return 0;
                 }
                 if !lazy.demand(&miss, type_args) {
-                    return fail(
+                    return fatal_exit(
                         lazy,
                         &format!("error: the check of `{miss}` did not complete"),
                     );
                 }
+                exit_if_fatal(lazy, bodies, sources);
                 let channels = lazy.channels(call_locations);
                 lowering.add_function(program, tables, &miss, &channels);
             }
@@ -1326,11 +1590,11 @@ fn resolve_deferred(
                 if !lazy.closed {
                     lazy.pump_blocking();
                     lazy.pump_pending();
-                    if lazy.ok() {
+                    if !lazy.restarted {
                         continue;
                     }
                 }
-                return fail(
+                return fatal_exit(
                     lazy,
                     &format!("error: runtime compilation of `{}` failed: {e}", sig.base),
                 );
@@ -1393,28 +1657,51 @@ fn run_lazy(label: String, src: String, root: PathBuf) -> Result<(), u8> {
     };
     let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
     let (requests_tx, requests_rx) = tokio::sync::mpsc::unbounded_channel();
+    // A prior stopped run's PARTIAL cache: the checker resumes from it
+    // (settled bodies skip their pass) and this side primes its merged
+    // channel state from the same snapshot. Stamp-validated like the full
+    // cache, so a changed source discards it wholesale.
+    let entry_path = PathBuf::from(&label);
+    let resume = if brass_cache::enabled() {
+        brass_cache::load_partial(&entry_path, PARTIAL_CACHE_FLAVOR, &search)
+    } else {
+        None
+    };
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // The checker starts PAUSED: until execution begins, it serves only the
+    // driver's demands, so no demand ever waits behind a definitional pass
+    // the background queue happened to start first (an unannotated body's
+    // open-frame pass can be arbitrarily slow; see `Scheduler::paused`).
+    let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let checker = rt.spawn_blocking({
         let (label, front) = (label.clone(), front.clone());
+        let stop = stop.clone();
+        let paused = paused.clone();
+        let resume = resume.clone();
         move || {
             let search = brass_resolve::SearchPaths::from_env();
             let mut sched = ThreadScheduler {
                 events: events_tx,
                 requests: requests_rx,
+                stop,
+                interrupted: std::cell::Cell::new(false),
+                paused,
             };
-            check_front(&label, front, &search, Some(&mut sched))
+            check_front(&label, front, &search, Some(&mut sched), resume)
         }
     });
 
     // Front-pass diagnostics (qualified uses, spawn ownership) are not
     // rendered here: the checker reports them with the rest, eager-identical.
     if !front.errors.is_empty() {
-        return finish_eagerly(&rt, checker, events_rx);
+        return finish_eagerly(&rt, checker, paused.clone(), events_rx);
     }
     let (program, lower_errors) = lower(&front.modules);
     if !lower_errors.is_empty() {
-        return finish_eagerly(&rt, checker, events_rx);
+        return finish_eagerly(&rt, checker, paused.clone(), events_rx);
     }
     let call_locations = call_site_locations(&front.modules, &front.sources);
+    let bodies = BodySpans::new(&program);
 
     let mut lazy = LazyState {
         events: events_rx,
@@ -1422,14 +1709,48 @@ fn run_lazy(label: String, src: String, root: PathBuf) -> Result<(), u8> {
         merged: MergedChannels::default(),
         checked_fns: HashSet::new(),
         inits_checked: 0,
-        errors: false,
+        held: Vec::new(),
+        needed: HashSet::from(["main".to_string()]),
+        stop,
+        paused,
         restarted: false,
         closed: false,
-        final_errors: None,
+        snapshot: None,
         dirty: false,
     };
-    if !lazy.wait_gate(program.inits.len(), program.functions.contains_key("main")) {
-        return finish_eagerly(&rt, checker, lazy.events);
+    if let Some(snap) = &resume {
+        // The snapshot's channel state stands in for the deltas the prior
+        // run received; the checker's resumed flushes emit only what is new.
+        // Settled-body COUNTERS are not primed: the checker announces every
+        // skipped body immediately, and counting those events keeps one
+        // bookkeeping path.
+        lazy.merged = MergedChannels::from_snapshot(snap);
+    }
+    let resumed = resume.is_some();
+    let resume_entry: Option<&Path> = resumed.then_some(entry_path.as_path());
+    let settled = lazy.wait_gate(program.inits.len(), program.functions.contains_key("main"));
+    if lazy.restarted {
+        return finish_eagerly(&rt, checker, lazy.paused.clone(), lazy.events);
+    }
+    match judge_fatal(&mut lazy, &bodies, &front.sources) {
+        FatalVerdict::Clean => {}
+        FatalVerdict::Fatal(code) => return Err(code),
+        FatalVerdict::Restarted => {
+            return finish_eagerly(&rt, checker, lazy.paused.clone(), lazy.events);
+        }
+    }
+    if !settled {
+        // The checker hung up cleanly without settling the entry: nothing
+        // fatal was held, so fall back to the whole-analysis verdict. A
+        // RESUMED checker skipped bodies, so its payload is incomplete --
+        // rerun eagerly instead.
+        if resumed {
+            // Reclaimability: the paused checker thread must exit before `rt`
+            // drops (it joins blocking tasks), and this path abandons it.
+            lazy.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            return run_fresh_eager(&label, &src, &root);
+        }
+        return finish_eagerly(&rt, checker, lazy.paused.clone(), lazy.events);
     }
 
     // Demand-driven compilation: methods and inits lower up front, function
@@ -1479,18 +1800,56 @@ fn run_lazy(label: String, src: String, root: PathBuf) -> Result<(), u8> {
                     drop(mono);
                     if main_skipped {
                         if !lazy.closed {
+                            // Waiting on the checker's own progress: run its
+                            // queue, or no event would ever come.
+                            lazy.resume_background();
                             lazy.pump_blocking();
                             lazy.pump_pending();
-                            if !lazy.ok() {
-                                return finish_eagerly(&rt, checker, lazy.events);
+                            if lazy.restarted {
+                                return finish_eagerly(
+                                    &rt,
+                                    checker,
+                                    lazy.paused.clone(),
+                                    lazy.events,
+                                );
+                            }
+                            match judge_fatal(&mut lazy, &bodies, &front.sources) {
+                                FatalVerdict::Clean => {}
+                                FatalVerdict::Fatal(code) => return Err(code),
+                                FatalVerdict::Restarted => {
+                                    return finish_eagerly(
+                                        &rt,
+                                        checker,
+                                        lazy.paused.clone(),
+                                        lazy.events,
+                                    );
+                                }
                             }
                             continue 'rebuild;
                         }
                         if lazy.dirty {
                             continue 'rebuild;
                         }
-                        if !lazy.ok() {
-                            return finish_eagerly(&rt, checker, lazy.events);
+                        match judge_fatal(&mut lazy, &bodies, &front.sources) {
+                            FatalVerdict::Clean => {}
+                            FatalVerdict::Fatal(code) => return Err(code),
+                            FatalVerdict::Restarted => {
+                                return finish_eagerly(
+                                    &rt,
+                                    checker,
+                                    lazy.paused.clone(),
+                                    lazy.events,
+                                );
+                            }
+                        }
+                        // A resumed snapshot may under-describe `main`
+                        // itself (its pass was skipped): rerun eagerly
+                        // rather than reject a fine program.
+                        if resumed {
+                            // Reclaimability: the paused checker thread must exit before `rt`
+                            // drops (it joins blocking tasks), and this path abandons it.
+                            lazy.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                            return run_fresh_eager(&label, &src, &root);
                         }
                     } else if lazy.dirty {
                         // Success over a stale (incrementally extended)
@@ -1506,11 +1865,43 @@ fn run_lazy(label: String, src: String, root: PathBuf) -> Result<(), u8> {
                         // the program, or supplied already yet reported
                         // missing again. A pipeline bug, not a user error --
                         // fail readably.
+                        if resumed {
+                            // Reclaimability: the paused checker thread must exit before `rt`
+                            // drops (it joins blocking tasks), and this path abandons it.
+                            lazy.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                            return run_fresh_eager(&label, &src, &root);
+                        }
                         eprintln!("error: lazy compilation cannot supply `{symbol}`");
                         return Err(1);
                     }
                     if !lazy.demand(&symbol, type_args) {
-                        return finish_eagerly(&rt, checker, lazy.events);
+                        if lazy.restarted {
+                            return finish_eagerly(&rt, checker, lazy.paused.clone(), lazy.events);
+                        }
+                        match judge_fatal(&mut lazy, &bodies, &front.sources) {
+                            FatalVerdict::Clean => {}
+                            FatalVerdict::Fatal(code) => return Err(code),
+                            FatalVerdict::Restarted => {
+                                return finish_eagerly(
+                                    &rt,
+                                    checker,
+                                    lazy.paused.clone(),
+                                    lazy.events,
+                                );
+                            }
+                        }
+                        eprintln!("error: lazy compilation cannot supply `{symbol}`");
+                        return Err(1);
+                    }
+                    // The demanded body joined the needed set: its held
+                    // diagnostics, if any, are now fatal -- before its code
+                    // could ever run.
+                    match judge_fatal(&mut lazy, &bodies, &front.sources) {
+                        FatalVerdict::Clean => {}
+                        FatalVerdict::Fatal(code) => return Err(code),
+                        FatalVerdict::Restarted => {
+                            return finish_eagerly(&rt, checker, lazy.paused.clone(), lazy.events);
+                        }
                     }
                     let channels = lazy.channels(&call_locations);
                     built.add_function(&program, &tables, &symbol, &channels);
@@ -1527,18 +1918,55 @@ fn run_lazy(label: String, src: String, root: PathBuf) -> Result<(), u8> {
                     // explain the program better than the mono error does;
                     // prefer them.
                     if !lazy.closed {
+                        // Waiting on the checker's own progress: run its
+                        // queue, or no event would ever come.
+                        lazy.resume_background();
                         lazy.pump_blocking();
                         lazy.pump_pending();
-                        if !lazy.ok() {
-                            return finish_eagerly(&rt, checker, lazy.events);
+                        if lazy.restarted {
+                            return finish_eagerly(&rt, checker, lazy.paused.clone(), lazy.events);
+                        }
+                        match judge_fatal(&mut lazy, &bodies, &front.sources) {
+                            FatalVerdict::Clean => {}
+                            FatalVerdict::Fatal(code) => return Err(code),
+                            FatalVerdict::Restarted => {
+                                return finish_eagerly(
+                                    &rt,
+                                    checker,
+                                    lazy.paused.clone(),
+                                    lazy.events,
+                                );
+                            }
                         }
                         continue 'rebuild;
                     }
                     if lazy.dirty {
                         continue 'rebuild;
                     }
-                    if !lazy.ok() {
-                        return finish_eagerly(&rt, checker, lazy.events);
+                    match judge_fatal(&mut lazy, &bodies, &front.sources) {
+                        FatalVerdict::Clean => {}
+                        FatalVerdict::Fatal(code) => return Err(code),
+                        FatalVerdict::Restarted => {
+                            return finish_eagerly(&rt, checker, lazy.paused.clone(), lazy.events);
+                        }
+                    }
+                    // A resumed snapshot may simply lack an entry the prior
+                    // run withheld: rerun eagerly rather than misreport.
+                    if resumed {
+                        // Reclaimability: the paused checker thread must exit before `rt`
+                        // drops (it joins blocking tasks), and this path abandons it.
+                        lazy.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                        return run_fresh_eager(&label, &src, &root);
+                    }
+                    // A rejection against the checker's final state: held
+                    // diagnostics elsewhere (a broken method the entry
+                    // needs) usually explain it better than the mono error.
+                    let held = lazy.held_all();
+                    if !held.is_empty() {
+                        for line in render_errors(&held, &front.sources) {
+                            eprintln!("{line}");
+                        }
+                        return Err(1);
                     }
                     report_runtime_error(&format!("typed lowering failed: {e}"));
                     return Err(1);
@@ -1552,13 +1980,21 @@ fn run_lazy(label: String, src: String, root: PathBuf) -> Result<(), u8> {
         return Err(1);
     };
 
-    // Everything execution can reach is settled. Any diagnostic that arrived
-    // meanwhile aborts before the program runs, exactly as eager checking
-    // refuses to run an ill-typed program.
+    // Everything execution can reach is settled. A diagnostic on the needed
+    // path that arrived meanwhile aborts before the program runs; held
+    // diagnostics elsewhere stay held -- lazy checking ignores code the run
+    // never executes.
     lazy.pump_pending();
-    if !lazy.ok() {
+    if lazy.restarted {
         drop(mono);
-        return finish_eagerly(&rt, checker, lazy.events);
+        return finish_eagerly(&rt, checker, lazy.paused.clone(), lazy.events);
+    }
+    match judge_fatal(&mut lazy, &bodies, &front.sources) {
+        FatalVerdict::Clean => {}
+        FatalVerdict::Fatal(code) => return Err(code),
+        FatalVerdict::Restarted => {
+            return finish_eagerly(&rt, checker, lazy.paused.clone(), lazy.events);
+        }
     }
     install_jit_panic_guard();
     // The deferred runtime: reject an untypeable `main` exactly as `run_mono`
@@ -1599,12 +2035,17 @@ fn run_lazy(label: String, src: String, root: PathBuf) -> Result<(), u8> {
                     &tables,
                     &call_locations,
                     &front.sources,
+                    &bodies,
                     &globals,
+                    resume_entry,
                     &mut lowering,
                     &mut lazy,
                     &mut targets,
                 );
             if drained {
+                // Execution begins: from here the background queue fills the
+                // wait on the running program (and grows the partial cache).
+                lazy.resume_background();
                 let mut resolve = |backend: &mut brass_jit_llvm::LlvmCodegen, symbol: &str| {
                     resolve_deferred(
                         backend,
@@ -1613,7 +2054,9 @@ fn run_lazy(label: String, src: String, root: PathBuf) -> Result<(), u8> {
                         &tables,
                         &call_locations,
                         &front.sources,
+                        &bodies,
                         &globals,
+                        resume_entry,
                         &mut lowering,
                         &mut lazy,
                         &mut targets,
@@ -1626,26 +2069,138 @@ fn run_lazy(label: String, src: String, root: PathBuf) -> Result<(), u8> {
         }
         Err(e) => Err(e),
     };
+    // The program finished (or failed at runtime); the checker may still be
+    // working through code this run never executed, and lazy checking
+    // ignores whatever it would find there -- the complete verdict is
+    // `brass check`'s job. Stop it at the next body boundary, persist what
+    // it settled as the partial cache (the next run resumes from it), and
+    // reclaim the thread; held diagnostics are discarded by policy.
+    stop_checker(&rt, checker, &mut lazy);
+    save_partial_cache(&entry_path, &front.sources, &search, &bodies, &mut lazy);
     match result {
-        Ok(()) => {
-            // The program finished; the checker may still be working through
-            // the parts execution never needed. Drain it and fail the run on
-            // anything it found -- lazy checking defers WHEN errors surface,
-            // never WHETHER.
-            while lazy.events.blocking_recv().is_some() {}
-            match rt
-                .block_on(checker)
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic.into_panic()))
-            {
-                Ok(_payload) => Ok(()),
-                Err(diags) => Err(print_diags(diags)),
-            }
-        }
+        Ok(()) => Ok(()),
         Err(e) => {
             report_runtime_error(&e);
             Err(1)
         }
     }
+}
+
+/// The last-resort fallback for a RESUMED run whose snapshot proves
+/// insufficient (an entry the prior run withheld as still-open never made
+/// it into the cache, and the skipped body will not re-emit it): rerun the
+/// whole pipeline eagerly, in process. `finish_eagerly` cannot serve here --
+/// a resumed checker skipped bodies, so its final payload is incomplete.
+/// The eager rerun also REPLACES the failing partial cache with a full one,
+/// self-healing the next run.
+#[cfg(jit_backend)]
+fn run_fresh_eager(label: &str, src: &str, root: &Path) -> Result<(), u8> {
+    tracing::debug!(target: "brass::perf", "lazy: resume fell short, rerunning eagerly");
+    let checked = match analyze(label, src, root) {
+        Ok(c) => c,
+        Err(diags) => return Err(print_diags(diags)),
+    };
+    execute(
+        &checked.program,
+        &checked.expr_types,
+        &checked.view_args,
+        &checked.sum_views,
+        &checked.call_locations,
+        &checked.lift_errs,
+        &checked.fields_loops,
+        &checked.type_names,
+        &checked.typeof_types,
+        &checked.null_props,
+    )
+    .map_err(|e| {
+        report_runtime_error(&e);
+        1
+    })
+}
+
+/// Stamp every loaded source for a cache payload's validity guard, exactly
+/// as the full-cache save does: `.cz` sources from the parsed text (a
+/// re-read would race an editor), native plugin libraries from the file.
+/// `None` when anything cannot be stamped -- the build is then uncacheable.
+#[cfg(jit_backend)]
+fn stamp_sources(
+    entry: &Path,
+    sources: &brass_resolve::SourceMap,
+    search: &brass_resolve::SearchPaths,
+) -> Option<Vec<brass_cache::FileStamp>> {
+    let roots = brass_cache::StampRoots::new(entry, search);
+    let mut deps = Vec::new();
+    for (path, text) in sources.sourced() {
+        let native = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("so" | "dylib" | "dll")
+        );
+        let stamp = if native {
+            brass_cache::FileStamp::of(path, &roots)
+        } else {
+            Some(brass_cache::FileStamp::of_text(path, text, &roots))
+        };
+        deps.push(stamp?);
+    }
+    Some(deps)
+}
+
+/// Persist a stopped run's settled state as the PARTIAL cache, so the next
+/// lazy run resumes checking where this one left off. Bodies owning a held
+/// diagnostic are dropped from the settled set (per body, the cache implies
+/// clean); a keyed restart leaves nothing coherent to save.
+#[cfg(jit_backend)]
+fn save_partial_cache(
+    entry: &Path,
+    sources: &brass_resolve::SourceMap,
+    search: &brass_resolve::SearchPaths,
+    bodies: &BodySpans,
+    lazy: &mut LazyState,
+) {
+    if !brass_cache::enabled() || lazy.restarted {
+        return;
+    }
+    let Some(mut snapshot) = lazy.snapshot.take() else {
+        return;
+    };
+    let errored: HashSet<&str> = lazy
+        .held
+        .iter()
+        .filter_map(|e| bodies.owner(e.span))
+        .collect();
+    snapshot
+        .checked
+        .retain(|symbol| !errored.contains(symbol.as_str()));
+    let Some(deps) = stamp_sources(entry, sources, search) else {
+        return;
+    };
+    brass_cache::save_partial(
+        entry,
+        PARTIAL_CACHE_FLAVOR,
+        &brass_cache::PartialPayload {
+            deps,
+            packages: brass_cache::package_names(search),
+            snapshot,
+        },
+    );
+}
+
+/// Stop the checker and reclaim its thread. The stop flag is polled at body
+/// boundaries, so the join is bounded by the body in flight; the drain runs
+/// the event channel to close so the join never waits on a full buffer.
+#[cfg(jit_backend)]
+fn stop_checker(
+    rt: &tokio::runtime::Runtime,
+    checker: tokio::task::JoinHandle<Result<AnalyzedProgram, Vec<String>>>,
+    lazy: &mut LazyState,
+) {
+    lazy.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    while !lazy.closed {
+        lazy.pump_blocking();
+    }
+    let _ = rt
+        .block_on(checker)
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic.into_panic()));
 }
 
 /// Interpreter-only builds never take the lazy path (`drive` gates it on
@@ -1693,7 +2248,7 @@ fn analyze_fresh(
 ) -> Result<AnalyzedProgram, Vec<String>> {
     let search = brass_resolve::SearchPaths::from_env();
     let front = front_load(main_label, main_src, root, &search)?;
-    check_front(main_label, front, &search, sched)
+    check_front(main_label, front, &search, sched, None)
 }
 
 /// The assembled front end, ready to check: the final module graph
@@ -1788,6 +2343,7 @@ fn check_front(
     front: FrontEnd,
     search: &brass_resolve::SearchPaths,
     mut sched: Option<&mut dyn brass_typeck::stream::Scheduler>,
+    resume: Option<brass_typeck::stream::StreamSnapshot>,
 ) -> Result<AnalyzedProgram, Vec<String>> {
     let phase = |name: &'static str, at: std::time::Instant| {
         brass_utils::perf_phase(name, at.elapsed());
@@ -1839,9 +2395,26 @@ fn check_front(
         types = program.types.len(),
         "running type analysis"
     );
+    // A lazy consumer must learn the module-level verdicts (lowering,
+    // qualified uses, import checks) as events too: their spans lie outside
+    // every body, which the lazy gate treats as always fatal -- an import
+    // collision stops the run before anything executes, deterministically.
+    if let Some(s) = sched.as_deref_mut()
+        && !errors.is_empty()
+    {
+        s.emit(brass_typeck::stream::CheckEvent::StaticChecked(
+            errors
+                .iter()
+                .map(|(message, span)| brass_typeck::TypeError {
+                    message: message.clone(),
+                    span: *span,
+                })
+                .collect(),
+        ));
+    }
     let t = std::time::Instant::now();
     let mut analysis = match sched.as_deref_mut() {
-        Some(s) => brass_typeck::analyze_streaming(&program, ctx_seed.as_ref(), s),
+        Some(s) => brass_typeck::analyze_streaming(&program, ctx_seed.as_ref(), s, resume.as_ref()),
         None => brass_typeck::analyze_with(&program, ctx_seed.as_ref()),
     };
     phase("front/typecheck", t);
@@ -1889,10 +2462,12 @@ fn check_front(
                 program = program2;
                 // The injected specializations and rewritten call sites moved
                 // spans: a streaming consumer starts over on the re-pass.
-                analysis = match sched {
+                analysis = match sched.as_deref_mut() {
                     Some(s) => {
                         s.emit(brass_typeck::stream::CheckEvent::Restarted);
-                        brass_typeck::analyze_streaming(&program, repass_seed.as_ref(), s)
+                        // No resume: the rewrite moved spans, the snapshot
+                        // describes a program that no longer exists.
+                        brass_typeck::analyze_streaming(&program, repass_seed.as_ref(), s, None)
                     }
                     None => brass_typeck::analyze_with(&program, repass_seed.as_ref()),
                 };
@@ -1923,6 +2498,11 @@ fn check_front(
         typeof_types: analysis.typeof_types.into_iter().collect(),
         null_props: analysis.null_props.into_iter().collect(),
     };
+    // A stopped (lazy-exit) analysis is INCOMPLETE: bodies past the stop
+    // point were never checked, so caching it as a full verdict would replay
+    // missing channels into future runs. Only a run the checker finished may
+    // persist.
+    let stopped = sched.as_deref().is_some_and(|s| s.interrupted());
     // Persist the clean analysis for the next run. Every on-disk source in
     // the map is stamped (the embedded stdlib has no path and is covered by
     // the compiler tag in the header): `.cz` sources from the very text that
@@ -1932,7 +2512,7 @@ fn check_front(
     // first path-bearing source (the stdlib precedes it pathless), which is
     // the load-time entry-identity contract. A file that cannot be stamped
     // anymore makes the build uncacheable rather than wrongly cacheable.
-    if brass_cache::enabled() {
+    if brass_cache::enabled() && !stopped {
         let t = std::time::Instant::now();
         let roots = brass_cache::StampRoots::new(&entry_path, search);
         let mut deps = Vec::new();

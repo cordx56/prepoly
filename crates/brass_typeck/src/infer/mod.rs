@@ -465,6 +465,7 @@ pub(crate) fn analyze_inner(
     let seeded = seed_schemes(program, remapped.as_ref());
     phase("typeck/seed-schemes", t);
     let mut checker = Checker::new(program);
+    checker.lazy_profile = ctl.is_some();
     if let Some((tables, next)) = &remapped {
         checker.apply_seed(tables.clone(), *next);
     }
@@ -537,13 +538,47 @@ pub(crate) fn analyze_inner(
         // so the reorder changes when a body's entries become available,
         // not what they end up being.
         Some(ctl) => {
+            // Method bodies were checked in the shared phase above; their
+            // matches get the same early exhaustiveness verdict bodies get
+            // below, so a broken method on the execution path reports
+            // deterministically (the terminal whole-program pass may never
+            // run under a stopped lazy run).
+            for info in program.types.values() {
+                let mut method_bodies: Vec<&Block> = Vec::new();
+                match &info.kind {
+                    TypeKind::Record { methods, .. } => {
+                        method_bodies.extend(methods.values().filter_map(|m| m.decl.body.as_ref()));
+                    }
+                    TypeKind::Sum { variants } => {
+                        for v in variants {
+                            method_bodies
+                                .extend(v.methods.values().filter_map(|m| m.decl.body.as_ref()));
+                        }
+                    }
+                }
+                for body in method_bodies {
+                    let errs = crate::exhaustive::check_block(program, &checker.typed, body);
+                    checker.errors.extend(errs);
+                }
+            }
             // Execution runs every module initializer before `main`, so the
             // inits are the entry code the lazy driver needs first, in
             // execution (module-load) order.
             let t = std::time::Instant::now();
             checker.const_scopes = vec![HashSet::new()];
             for (i, init) in program.inits.iter().enumerate() {
+                // A resumed run's snapshot settled the leading inits: their
+                // delivered state was seeded, so announce and move on.
+                if i < ctl.skip_inits {
+                    ctl.sched.emit(stream::CheckEvent::BodyChecked(
+                        stream::BodyId::Init(i),
+                        stream::ChannelDelta::default(),
+                    ));
+                    continue;
+                }
                 check_init_body(&mut checker, init);
+                let errs = crate::exhaustive::check_stmts(program, &checker.typed, &init.stmts);
+                checker.errors.extend(errs);
                 let delta = flush_delta(&checker, &mut ctl.state, false);
                 ctl.sched.emit(stream::CheckEvent::BodyChecked(
                     stream::BodyId::Init(i),
@@ -570,16 +605,51 @@ pub(crate) fn analyze_inner(
                 symbols.into()
             };
             let mut done: HashSet<String> = HashSet::new();
+            // The concrete argument types each priority request carried: the
+            // demanded body is checked at ITS INSTANCE (see
+            // `check_function_body_at`) rather than the open signature frame.
+            // A queue body without a request keeps the definitional pass.
+            let mut demanded_at: HashMap<String, Vec<Type>> = HashMap::new();
+            // Bodies the consumer explicitly asked for. These are the only
+            // ones checked while the scheduler is paused; `main` counts as
+            // requested (the gate waits on it without sending a request).
+            let mut priority: HashSet<String> = HashSet::new();
+            priority.insert("main".to_string());
             let mut perf = brass_utils::PerfLog::start("typeck/fn-bodies");
             loop {
+                // The consumer no longer needs anything (its program ended):
+                // stop at the body boundary. What was checked stays reported;
+                // the complete verdict is the eager pipeline's job.
+                if ctl.sched.stopped() {
+                    break;
+                }
                 // Priority requests land at the front in request order; a
                 // request for an unknown or already-checked symbol is spent.
                 for request in ctl.sched.drain_requests().into_iter().rev() {
-                    if !done.contains(&request.symbol)
-                        && program.functions.contains_key(&request.symbol)
-                    {
+                    let fresh = !done.contains(&request.symbol)
+                        && program.functions.contains_key(&request.symbol);
+                    // A request naming a snapshot-settled body means the
+                    // consumer found its cached state insufficient, so the
+                    // real pass runs after all.
+                    let revived = !fresh && ctl.skip_fns.remove(&request.symbol);
+                    if revived {
+                        done.remove(&request.symbol);
+                    }
+                    if fresh || revived {
+                        if !request.type_args.is_empty() {
+                            demanded_at.insert(request.symbol.clone(), request.type_args);
+                        }
+                        priority.insert(request.symbol.clone());
                         queue.push_front(request.symbol);
                     }
+                }
+                // While the consumer is settling its entry, hold the
+                // background queue and wait for its next request (see
+                // `Scheduler::paused`); the wait is a poll because requests
+                // arrive on the consumer's own cadence.
+                if ctl.sched.paused() && queue.front().is_some_and(|s| !priority.contains(s)) {
+                    std::thread::sleep(std::time::Duration::from_micros(300));
+                    continue;
                 }
                 let Some(symbol) = queue.pop_front() else {
                     break;
@@ -588,11 +658,13 @@ pub(crate) fn analyze_inner(
                     continue;
                 }
                 let f = &program.functions[&symbol];
-                if checker.seeded_module(&f.module) {
+                if checker.seeded_module(&f.module) || ctl.skip_fns.contains(&symbol) {
                     // A seeded (context) body is settled without a check of
                     // its own -- callers re-elaborate it at their call sites
                     // -- but the event must still go out: a consumer waiting
                     // on a context function would otherwise wait forever.
+                    // A resume-snapshot body is settled the same way: its
+                    // delivered state was seeded from the prior run.
                     ctl.sched.emit(stream::CheckEvent::BodyChecked(
                         stream::BodyId::Function(symbol),
                         stream::ChannelDelta::default(),
@@ -600,7 +672,26 @@ pub(crate) fn analyze_inner(
                     continue;
                 }
                 let fn_started = std::time::Instant::now();
-                check_function_body(&mut checker, &symbol, f);
+                // A demanded body checks at the instance the demand named
+                // when its types align with the signature; anything else
+                // (stale request, mismatched arity, an open type) falls back
+                // to the definitional pass. So does a STRUCTURAL argument:
+                // an anonymous record that does not fit the body degrades to
+                // the call's fallback by design -- the row check at the
+                // value's span is its error source -- and a dedicated pass
+                // at such an instance would hard-error where the call site
+                // deliberately does not.
+                let instance_args = demanded_at.remove(&symbol).filter(|args| {
+                    args.len() == f.signature.params.len()
+                        && args.iter().all(brass_hir::is_fully_known)
+                        && !args.iter().any(contains_structural_record)
+                });
+                match &instance_args {
+                    Some(args) => check_function_body_at(&mut checker, &symbol, f, args),
+                    None => check_function_body(&mut checker, &symbol, f),
+                }
+                let errs = crate::exhaustive::check_block(program, &checker.typed, &f.decl.body);
+                checker.errors.extend(errs);
                 perf.item(symbol.clone(), fn_started.elapsed());
                 let delta = flush_delta(&checker, &mut ctl.state, false);
                 ctl.sched.emit(stream::CheckEvent::BodyChecked(
@@ -610,6 +701,16 @@ pub(crate) fn analyze_inner(
             }
             perf.report();
             checker.in_entry_main = false;
+            // A stopped run hands its settled state back for the partial
+            // cache: what this run checked resumes the next one.
+            if ctl.sched.stopped() {
+                let snapshot = ctl.state.snapshot(
+                    done.into_iter().collect(),
+                    program.inits.len(),
+                    &checker.fields_loops,
+                );
+                ctl.sched.emit(stream::CheckEvent::Interrupted(snapshot));
+            }
         }
     }
     let t = std::time::Instant::now();
@@ -761,6 +862,51 @@ fn check_function_body(checker: &mut Checker, symbol: &str, f: &FunInfo) {
     // requirement for its own body.
     checker.in_entry_main = symbol == "main";
     checker.check_block_root(&f.decl.body, &mut scopes, ret.as_ref());
+}
+
+/// A demanded body's dedicated pass, run at the concrete argument types the
+/// demand carried -- the instance the program is about to execute -- instead
+/// of the open signature frame. Checking at the instance's types is what the
+/// lazy run needs (its verdict is per executed instance, and the recorded
+/// channel entries are the instance's), and it makes the pass cheap: the
+/// call tree was already elaborated at these same types by the caller's own
+/// pass, so the nested calls hit the elaboration memo instead of re-checking
+/// an open frame, where nothing memoizes and a call chain re-expands
+/// exponentially. Annotated parameters keep their annotations (the frame
+/// instantiates them against the arguments, annotation winning), so a fully
+/// annotated body checks exactly as its definitional pass would.
+/// Whether a type mentions an anonymous structural record anywhere: such an
+/// argument is served by the call-site row machinery (fit-or-degrade), so a
+/// demanded instance carrying one keeps the definitional pass instead of
+/// `check_function_body_at`.
+fn contains_structural_record(ty: &Type) -> bool {
+    match ty {
+        Type::Record(n) if n.id == brass_hir::STRUCTURAL_RECORD_ID => true,
+        Type::Record(n) | Type::Sum(n) => n
+            .substitution
+            .iter()
+            .any(|(_, t)| contains_structural_record(t)),
+        Type::Array(inner, _)
+        | Type::Slice(inner)
+        | Type::Nullable(inner)
+        | Type::ConstOf(inner)
+        | Type::Mut(inner)
+        | Type::Ref(inner) => contains_structural_record(inner),
+        Type::Fun(params, ret) => {
+            params.iter().any(contains_structural_record) || contains_structural_record(ret)
+        }
+        Type::Tuple(elems) => elems.iter().any(contains_structural_record),
+        _ => false,
+    }
+}
+
+fn check_function_body_at(checker: &mut Checker, symbol: &str, f: &FunInfo, arg_types: &[Type]) {
+    tracing::debug!(function = %f.signature.name, "inferring function body at demanded types");
+    checker.current_module = f.module.clone();
+    let frame = checker.signature_call_frame(&f.signature.params, arg_types, &[], None);
+    let mut scopes = vec![frame];
+    checker.in_entry_main = symbol == "main";
+    checker.check_block_root(&f.decl.body, &mut scopes, f.signature.ret_ty.as_ref());
 }
 
 /// One module initializer's dedicated pass -- the per-init core both body
@@ -1025,6 +1171,27 @@ struct Checker<'a> {
     /// was already reported, so every `T!`/`error(..)` in the module does not
     /// repeat the same diagnostic (`i32::MIN` marks the alias-shadow report).
     reported_result_shadow: HashSet<i32>,
+    /// The lazy (run) profile: calls to FULLY-ANNOTATED free functions --
+    /// concrete declared return, every parameter's type declared and fully
+    /// known -- are typed from the signature alone, skipping the callee-body
+    /// re-elaboration. That is exactly the class the JIT compiles as
+    /// runtime-deferred sites: such a body is instantiation-independent (its
+    /// own dedicated pass records its channels), so per-call re-checking
+    /// only re-derives what the signature already states. The complete
+    /// diagnostic verdict stays `check`'s (eager's) job, where this is off.
+    lazy_profile: bool,
+    /// Memoized returns of call-site body re-elaborations, keyed by callee
+    /// symbol and the fully-resolved argument types. The same callee at the
+    /// same argument types re-derives the same span-keyed channel entries and
+    /// the same return, so the first elaboration's answer is reused -- without
+    /// this the repeated subtrees of an unannotated call chain are re-checked
+    /// once per call site, which grows exponentially with chain depth. Only
+    /// clean (error-free) elaborations with fully-known keys and returns land
+    /// here: an open argument means the elaboration would constrain the
+    /// caller's own variables, an open return must stay the shared table entry
+    /// so later pinning reaches every reader, and an erroring body keeps
+    /// reporting at every call site.
+    elaboration_memo: HashMap<String, Type>,
     /// Callables (`fn:<symbol>` / `m:<qualifier>.<name>`) whose inferred Err
     /// payload is one of their own parameter variables: a generic error type
     /// named per call site, exempt from the uninferable-error report.
@@ -1176,6 +1343,8 @@ impl<'a> Checker<'a> {
             },
             current_module: Vec::new(),
             reported_result_shadow: HashSet::new(),
+            lazy_profile: false,
+            elaboration_memo: HashMap::new(),
             generic_error_returns: HashSet::new(),
             schemes: HashMap::new(),
             fixed_array_binding: false,
@@ -1436,7 +1605,19 @@ impl<'a> Checker<'a> {
                     }
                 }
                 None => {
-                    self.expect_assignable(&Type::Void, &want, span);
+                    // A fallible return wraps a bare `return` exactly like a
+                    // bare value: no value is a void payload, so `-> void!`
+                    // accepts it as the Ok exit (and `-> int32!` reports the
+                    // payload mismatch, not a mismatch against the whole
+                    // `Result`). Mirrors the HM checker, which skips the
+                    // void-return unification in a fallible body.
+                    let resolved = self.resolve(&want);
+                    if let Some((ok, _err)) = resolved.result_payloads() {
+                        let ok = ok.clone();
+                        self.expect_assignable(&Type::Void, &ok, span);
+                    } else {
+                        self.expect_assignable(&Type::Void, &want, span);
+                    }
                     Type::Void
                 }
             },
