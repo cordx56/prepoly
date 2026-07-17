@@ -364,10 +364,25 @@ fn decode_file<'a>(bytes: &'a [u8], tag: &str) -> Option<&'a [u8]> {
 /// two concurrent writers publish whole files instead of interleaving into one
 /// shared temp name.
 fn write_atomic(path: &Path, bytes: &[u8]) {
+    static NEXT_TMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(format!(".tmp{}", std::process::id()));
+    tmp.push(format!(
+        ".tmp{}-{}",
+        std::process::id(),
+        NEXT_TMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let tmp = PathBuf::from(tmp);
-    if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, path).is_err() {
+    if std::fs::write(&tmp, bytes).is_err() {
+        return;
+    }
+    // Windows does not replace an existing destination with `rename`. A brief
+    // missing-file window is safe for this best-effort cache: readers fall back
+    // to analysis, while every published file remains whole.
+    #[cfg(windows)]
+    if path.is_file() {
+        let _ = std::fs::remove_file(path);
+    }
+    if std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
 }

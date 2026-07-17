@@ -1,0 +1,32 @@
+// Package dependencies have exactly one source. Git revisions default to HEAD,
+// while explicit revisions and path dependencies retain their values.
+import package_manager.manifest.{ Manifest, Dependency }
+
+const valid = Manifest.parse(
+    "[package]\nname = \"app\"\nauthor = \"\"\nlicense = \"MIT\"\n\n[dependencies]\nremote = \{ git = \"repo\" \}\npinned = \{ git = \"repo\", rev = \"abc\" \}\nlocal = \{ path = \"../local\" \}\n",
+)!
+
+match valid.dependencies.get("remote")! {
+    Git { git, rev } => println("remote: {git} at {rev}"),
+    _ => println("wrong remote source"),
+}
+match valid.dependencies.get("pinned")! {
+    Git { git, rev } => println("pinned: {git} at {rev}"),
+    _ => println("wrong pinned source"),
+}
+match valid.dependencies.get("local")! {
+    Path { path } => println("local: {path.to_string()}"),
+    _ => println("wrong local source"),
+}
+
+const mixed = "[package]\nname = \"app\"\nauthor = \"\"\nlicense = \"MIT\"\n\n[dependencies]\nbad = \{ git = \"repo\", path = \"../local\" \}\n"
+match Manifest.parse(mixed) {
+    Ok { value } => println("mixed source accepted"),
+    Err { error } => println("mixed source rejected"),
+}
+
+const unsupported = "[package]\nname = \"app\"\nauthor = \"\"\nlicense = \"MIT\"\n\n[dependencies]\nbad = \{ version = \"1.0\" \}\n"
+match Manifest.parse(unsupported) {
+    Ok { value } => println("registry source accepted"),
+    Err { error } => println("registry source rejected"),
+}

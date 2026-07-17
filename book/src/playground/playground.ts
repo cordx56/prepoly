@@ -70,17 +70,16 @@ println(
 // built/published the editor still runs, just without diagnostics, hover,
 // go-to-definition, and semantic highlighting.
 let lspPromise: Promise<WebAssembly.Module | null> | undefined;
+let languageRegistered = false;
+let languageFeaturesRegistered = false;
 
 const loadLsp = () =>
-  (lspPromise ??= WebAssembly.compileStreaming(
-    fetch("/czls.wasm"),
-  ).catch((err) => {
-    console.warn(
-      "czls.wasm unavailable; language features disabled",
-      err,
-    );
-    return null;
-  }));
+  (lspPromise ??= WebAssembly.compileStreaming(fetch("/czls.wasm")).catch(
+    (err) => {
+      console.warn("czls.wasm unavailable; language features disabled", err);
+      return null;
+    },
+  ));
 
 /// Attach a playground to `root`. Returns once the editor is created and the
 /// Execute button is wired.
@@ -88,14 +87,17 @@ export const mountPlayground = async (root: HTMLElement) => {
   if (root.dataset.mounted) return;
   root.dataset.mounted = "true";
 
-  const container = root.querySelector<HTMLElement>("[data-editor]")!;
-  const execButton = root.querySelector<HTMLElement>("[data-exec]")!;
-  const stdout = root.querySelector<HTMLElement>("[data-stdout]")!;
-  const stderr = root.querySelector<HTMLElement>("[data-stderr]")!;
+  const container = requireElement<HTMLElement>(root, "[data-editor]");
+  const execButton = requireElement<HTMLButtonElement>(root, "[data-exec]");
+  const stdout = requireElement<HTMLElement>(root, "[data-stdout]");
+  const stderr = requireElement<HTMLElement>(root, "[data-stderr]");
 
   const lsp = await loadLsp();
 
-  monaco.languages.register({ id: "brass" });
+  if (!languageRegistered) {
+    monaco.languages.register({ id: "brass" });
+    languageRegistered = true;
+  }
 
   const url = new URL(location.href);
   const program = url.searchParams.get("code") || SAMPLE_PROGRAM;
@@ -114,25 +116,46 @@ export const mountPlayground = async (root: HTMLElement) => {
   }
 
   const execute = async () => {
-    stdout.innerHTML = "";
-    stderr.innerHTML = "";
+    if (execButton.disabled) return;
+    execButton.disabled = true;
+    stdout.replaceChildren();
+    stderr.replaceChildren();
 
-    await runProgram(
-      editor.getValue(),
-      (line) => {
-        stdout.innerHTML += `<pre><code>${escapeHtml(line)}</code></pre>`;
-      },
-      (line) => {
-        stderr.innerHTML += `<pre><code>${escapeHtml(line)}</code></pre>`;
-      },
-    );
+    try {
+      await runProgram(
+        editor.getValue(),
+        (line) => appendOutput(stdout, line),
+        (line) => appendOutput(stderr, line),
+      );
+    } catch (error) {
+      appendOutput(
+        stderr,
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      execButton.disabled = false;
+    }
   };
 
   execButton.addEventListener("click", execute);
 };
 
-const escapeHtml = (text: string) =>
-  text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const requireElement = <T extends Element>(
+  root: Element,
+  selector: string,
+): T => {
+  const element = root.querySelector<T>(selector);
+  if (!element) throw new Error(`playground is missing ${selector}`);
+  return element;
+};
+
+const appendOutput = (target: HTMLElement, text: string) => {
+  const pre = document.createElement("pre");
+  const code = document.createElement("code");
+  code.textContent = text;
+  pre.append(code);
+  target.append(pre);
+};
 
 /// Drive Monaco's diagnostics, hover, go-to-definition, and semantic-token
 /// surfaces from the wasm LSP server. Each provider hands the current document
@@ -148,21 +171,37 @@ const wireLanguageFeatures = (
   // edit (debounced) and on load, publishing them as model markers.
   const refreshCode = debounce(async () => {
     const program = model.getValue();
-    if (program != SAMPLE_PROGRAM) {
-      const url = new URL(location.href);
+    const version = model.getVersionId();
+    const url = new URL(location.href);
+    if (program === SAMPLE_PROGRAM) {
+      url.searchParams.delete("code");
+    } else {
       url.searchParams.set("code", program);
+    }
+    if (url.toString() !== location.href) {
       window.history.replaceState(null, "", url.toString());
     }
 
     const diagnostics = await lsp.diagnostics(program);
+    if (version !== model.getVersionId()) return;
     monaco.editor.setModelMarkers(model, "brass", diagnostics.map(toMarker));
   }, 300);
   model.onDidChangeContent(refreshCode);
   refreshCode();
 
+  // Providers are registered per language, not per editor model. One shared
+  // set serves every playground on the page; registering for each mount would
+  // duplicate completions and run the wasm server once per editor instance.
+  if (languageFeaturesRegistered) return;
+  languageFeaturesRegistered = true;
+
   monaco.languages.registerHoverProvider("brass", {
-    provideHover: async (model, position) => {
+    provideHover: async (model, position, token) => {
+      const version = model.getVersionId();
       const hover = await lsp.hover(model.getValue(), toLspPosition(position));
+      if (token.isCancellationRequested || version !== model.getVersionId()) {
+        return null;
+      }
       if (!hover) return null;
       return {
         contents: [{ value: hoverText(hover.contents) }],
@@ -172,11 +211,15 @@ const wireLanguageFeatures = (
   });
 
   monaco.languages.registerDefinitionProvider("brass", {
-    provideDefinition: async (model, position) => {
+    provideDefinition: async (model, position, token) => {
+      const version = model.getVersionId();
       const location = await lsp.definition(
         model.getValue(),
         toLspPosition(position),
       );
+      if (token.isCancellationRequested || version !== model.getVersionId()) {
+        return null;
+      }
       if (!location) return null;
       // Single-file playground: every location resolves into this one model.
       return { uri: model.uri, range: toRange(location.range) };
@@ -187,11 +230,15 @@ const wireLanguageFeatures = (
     // `.` / `{` continue member access and import paths; identifier typing
     // triggers completion on its own. Mirrors the server's trigger characters.
     triggerCharacters: [".", "{"],
-    provideCompletionItems: async (model, position) => {
+    provideCompletionItems: async (model, position, _context, token) => {
+      const version = model.getVersionId();
       const items = await lsp.completion(
         model.getValue(),
         toLspPosition(position),
       );
+      if (token.isCancellationRequested || version !== model.getVersionId()) {
+        return { suggestions: [] };
+      }
       // Replace the word under the cursor, so an accepted item overwrites the
       // already-typed prefix instead of appending to it.
       const word = model.getWordUntilPosition(position);
@@ -207,8 +254,16 @@ const wireLanguageFeatures = (
 
   monaco.languages.registerDocumentSemanticTokensProvider("brass", {
     getLegend: () => SEMANTIC_LEGEND,
-    provideDocumentSemanticTokens: async (model: monaco.editor.ITextModel) => {
+    provideDocumentSemanticTokens: async (
+      model: monaco.editor.ITextModel,
+      _lastResultId,
+      token,
+    ) => {
+      const version = model.getVersionId();
       const data = await lsp.semanticTokens(model.getValue());
+      if (token.isCancellationRequested || version !== model.getVersionId()) {
+        return null;
+      }
       return { data: new Uint32Array(data) };
     },
     releaseDocumentSemanticTokens: () => {},

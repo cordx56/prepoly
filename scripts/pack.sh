@@ -1,8 +1,16 @@
 #!/bin/bash -e
 
+set -euo pipefail
+
 cd "$(dirname "$0")/../"
 cwd="$(pwd)"
 tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' 0
+artifact="$cwd/brass-$(rustc --print=host-tuple).tar.gz"
+if [[ -e "$artifact" ]]; then
+    echo "refusing to overwrite existing artifact: $artifact" >&2
+    exit 1
+fi
 
 ./x cargo install --path crates/brass_driver --root "$tmp"
 ./x cargo install --path crates/brass_language_server --root "$tmp"
@@ -27,7 +35,7 @@ chmod +x "$czpm_path"
 
 ./libraries/build.sh release
 
-for path in $(find libraries -type f | grep -e '\.cz$' -e '\.so$'); do
+for path in $(find libraries -type f | grep -E '\.(cz|so|dylib|dll)$'); do
     mkdir -p "$tmp/$(dirname "$path")"
     cp "$path" "$tmp/$path"
 done
@@ -40,7 +48,6 @@ env -u BRASS_INCLUDE -u BRASS_PACKAGES "$tmp/bin/brass" check "$tmp/bin/czpm"
 #
 
 cd "$tmp"
-find bin libraries -type f | xargs tar czf "$cwd/brass-$(rustc --print=host-tuple).tar.gz"
+tar czf "$artifact" bin libraries
 
 cd "$cwd"
-rm -rf "$tmp"

@@ -1,0 +1,6 @@
+// Insertion clamps before the first element and after the last one. This must
+// agree between the interpreter and the typed runtime.
+let values = [2, 3]
+values.insert(-10, 1)
+values.insert(10, 4)
+println(values)

@@ -1,35 +1,46 @@
-import std.collections.HashMap
 import env
 import fs.{ create_dir, read_file, write_file }
 import path.Path
 import process.{ Command, exit }
 
-import manifest.Manifest
-import resolve.{ PACKAGE_FILE_NAME, resolve_deps }
+import manifest.{ Manifest, valid_package_name }
+import resolve.{ PACKAGE_FILE_NAME, ResolvedDependencies, resolve_deps }
 
 fun main() {
-    const stderr = File.stderr()
     const current = env.current_dir()!
 
     const args = env.args()
     if args.len() < 2 {
-        help()
+        help(1)
     }
     const cmd = args[1]
+    if cmd == "help" || cmd == "--help" || cmd == "-h" {
+        help(0)
+    }
     if cmd == "new" {
         if args.len() < 3 {
-            help()
+            help(1)
         }
 
         const name = args[2]
+        if !valid_package_name(name) {
+            return error("package name `{name}` is not a legal identifier")
+        }
         const path = current.join(name)
+        if path.exists() {
+            return error(
+                "cannot create package: {path.to_string()} already exists",
+            )
+        }
         create_dir(path)!
         init_dir(path, name)!
     } else if cmd == "init" {
         if args.len() < 3 {
-            help()
+            help(1)
         }
         init_dir(current, args[2])!
+    } else if cmd != "run" && cmd != "check" && cmd != "fmt" && cmd != "lsp" {
+        help(1)
     }
 
     const manifest = if let Ok { value } = read_file(
@@ -98,18 +109,18 @@ fun main() {
         const code = run_czls(deps)!
         exit(code)
     }
-    help()
+    help(1)
 }
 
-fun join_deps(deps: HashMap) {
-    let env = []
+fun join_deps(deps: ResolvedDependencies) {
+    let entries = []
     for [key, val] in deps.pairs() {
-        env.push("{key}={val}")
+        entries.push("{key}={val}")
     }
-    return env.join(":")
+    return entries.join(env.path_separator())
 }
 
-fun help() {
+fun help(code: int64) {
     println(
         "czpm - brass Package Manager
 
@@ -122,17 +133,36 @@ Usage:
     czpm lsp         -> Start the Language Server (czls)
 ",
     )
-    exit(1)
+    exit(code)
 }
 
 fun init_dir(path: Path, name: string) {
+    if !valid_package_name(name) {
+        return error("package name `{name}` is not a legal identifier")
+    }
     if !path.is_dir() {
         create_dir(path)!
     }
 
-    // write package.toml
+    const manifest_path = path.join("package.toml")
+    const source_path = path.join("{name}.cz")
+    const module_path = path.join(name)
+    if manifest_path.exists() || source_path.exists() {
+        return error(
+            "cannot initialize package: package.toml or {name}.cz already exists",
+        )
+    }
+    if module_path.exists() && !module_path.is_dir() {
+        return error(
+            "cannot initialize package: {module_path.to_string()} is not a directory",
+        )
+    }
+    create_dir(module_path)!
+
+    // Write the manifest and entry source only after both destinations have
+    // been checked, so a failed initialization never overwrites either one.
     write_file(
-        path.join("package.toml"),
+        manifest_path,
         "[package]
 name = \"{name}\"
 author = \"\"
@@ -143,12 +173,9 @@ license = \"MIT\"
 # mylib = \{ path = \"../mylib\" \}",
     )!
 
-    // write [name].cz
-    write_file(path.join("{name}.cz"), "println(\"Hello, {name}!\")")!
+    write_file(source_path, "println(\"Hello, {name}!\")")!
 
-    // create [name] dir but replaced
-    create_dir(path.join(name.replace("-", "_")))!
-
+    // Sub-modules live under the package's identifier-shaped directory.
     println("Package {name} created at {path.to_string()}!")
     exit(0)
 }
@@ -156,6 +183,11 @@ license = \"MIT\"
 fun list_files(dir: Path) {
     let result = []
     for entry in dir.entries()! {
+        // Do not recurse through links: a link can escape the project or form a
+        // directory cycle, and formatting should touch only owned source files.
+        if entry.is_sym_link() {
+            continue
+        }
         const components = entry
             .components()
             .filter((v) -> v != "." && v != "..")

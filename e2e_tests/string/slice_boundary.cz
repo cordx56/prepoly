@@ -16,6 +16,8 @@ fun main() {
     println(b.len())
     let c = _string_slice(s, 1, 2)
     println(c.len())
+    // A start beyond the end clamps to the end and yields an empty slice.
+    println(_string_slice(s, 99, 100).len())
     let f = _string_find(b, "z")
     if f {
         println("found")

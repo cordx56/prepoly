@@ -1,49 +1,77 @@
 import std.collections.HashMap
 import process.{ Command }
 import path.Path
-import env.var
-import fs.{ read_file, create_dir }
+import fs.{ read_file, create_dir, remove_dir }
+import hash.{ sha256, hex }
 
 import manifest.{ Manifest, Dependency, Dependencies }
 
 const PACKAGE_FILE_NAME = "package.toml"
 
+/** Resolved package names mapped to their package-root directories. */
+type ResolvedDependencies = HashMap { key: string, value: string }
+
 fun resolve_deps(deps: Dependencies) {
-    let result = HashMap.new()
-    for [key, val] in deps.pairs() {
+    let result: ResolvedDependencies = HashMap.new()
+    _resolve_deps(deps, Path.current_dir()!, result)!
+    return result
+}
+
+// Resolve every path against the manifest that declared it. The shared result
+// is populated before recursion, which also terminates dependency cycles.
+fun _resolve_deps(
+    deps: Dependencies,
+    base: Path,
+    result: ResolvedDependencies,
+) {
+    for [declared_name, val] in deps.pairs() {
         const path = match val {
             Git { git, rev } => {
                 git_clone(git, rev)!
             },
             Path { path } => {
-                path
+                base.join(path).canonicalize()!
             },
             _ => {
-                return error("not supported deps yet!")
+                return error("unsupported dependency source")
             },
         }
         const manifest = Manifest.parse(
             read_file(path.join(PACKAGE_FILE_NAME).to_string())!,
         )!
         const name = manifest.package.name
-        result.set(name, path.to_string())
-        for [key, val] in resolve_deps(manifest.dependencies)!.pairs() {
-            result.set(key, val)
+        if name != declared_name {
+            return error(
+                "dependency `{declared_name}` contains package `{name}` at {path.to_string()}",
+            )
         }
+        const path_text = path.to_string()
+        if let previous = result.get(name) {
+            if previous != path_text {
+                return error(
+                    "dependency `{name}` resolves to both {previous} and {path_text}",
+                )
+            }
+            continue
+        }
+        result.set(name, path_text)
+        _resolve_deps(manifest.dependencies, path, result)!
     }
-    return result
+    return
 }
 
+/** Clone `repo` at `rev` into the package cache and return its directory. */
 fun git_clone(repo: string, rev: string) {
-    const pkgs = Path
-        .parse(var("HOME")!)
-        .join(".brass")
-        .join("packages")
-        .join("git")
-    const repo = repo.replace("/", "-").replace(":", "-")
-    const path = pkgs.join(repo).join(rev)
+    const pkgs = Path.home()!.join(".brass").join("packages").join("git")
+    // A digest keeps arbitrary repository URLs and revision names out of path
+    // components, while making the same source/revision reuse one checkout.
+    const key = hex(sha256(to_bytes("{repo}\n{rev}")))
+    const path = pkgs.join(key)
     if path.is_dir() {
-        return path
+        if path.join(".git").is_dir() {
+            return path
+        }
+        remove_dir(path)!
     }
     if !pkgs.is_dir() {
         create_dir(pkgs)!
@@ -54,14 +82,20 @@ fun git_clone(repo: string, rev: string) {
     const child = cmd.spawn()!
     const code = child.wait()!
     if code != 0 {
-        return error("failed to clone: exit code {code}")
+        if path.is_dir() {
+            remove_dir(path)!
+        }
+        return error("failed to clone `{repo}`: exit code {code}")
     }
     let cmd = Command.new("git")
-    cmd.args(["checkout", rev])
+    cmd.args(["-C", path.to_string(), "checkout", "--detach", rev])
     const child = cmd.spawn()!
     const code = child.wait()!
     if code != 0 {
-        return error("failed to clone: exit code {code}")
+        remove_dir(path)!
+        return error(
+            "failed to check out `{rev}` from `{repo}`: exit code {code}",
+        )
     }
     return path
 }

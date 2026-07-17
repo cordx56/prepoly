@@ -7,9 +7,7 @@ Brass is new enough that an LLM has not seen it during training, so an agent
 will otherwise write code in the dialect of whatever language the syntax most
 resembles. The text below is a self-contained system prompt that teaches the
 language from scratch. Drop it into your agent's project instructions (for
-example `AGENTS.md` or `CLAUDE.md`) so the agent writes valid Brass —
-projects created with [`czpm new`/`czpm init`](/guides/packages/) already
-contain it as `AGENTS.md`, with `CLAUDE.md` symlinked to it.
+example `AGENTS.md` or `CLAUDE.md`) so the agent writes valid Brass.
 
 ````markdown
 # Writing Brass
@@ -477,7 +475,7 @@ plugin halves once with `libraries/build.sh` and set
 `BRASS_INCLUDE=<repo>/libraries`. Every library below runs on BOTH back
 ends (the JIT and `brass repl`) -- only `spawn` concurrency is JIT-only.
 
-### env -- `import env.{ args, var, vars, current_dir }`
+### env -- `import env.{ args, var, vars, path_separator, current_dir }`
 
 - `args() -> string[]` -- the program's argument vector: the program file as
   written on the command line, then everything after it, verbatim
@@ -485,6 +483,8 @@ ends (the JIT and `brass repl`) -- only `spawn` concurrency is JIT-only.
   driver consumes nothing after the file). Empty in an interactive REPL.
 - `var(name) -> string!` -- the variable's value; UNSET is an error, not `""`
 - `vars()` -- every environment variable, as a `string -> string` HashMap
+- `path_separator() -> string` -- the OS separator for path-list environment
+  variables (`:` on Unix, `;` on Windows)
 - `current_dir() -> Path!` -- the working directory, as a `path` `Path`
 
 ### path -- `import path.{ Path }`
@@ -581,13 +581,13 @@ its UTF-8 bytes and render with `hex`:
 - `md5`, `sha1`, `sha224`, `sha256`, `sha384`, `sha512` -- all
   `(uint8[]) -> uint8[]`, INFALLIBLE (16/20/28/32/48/64 bytes)
 - `hmac_sha1`, `hmac_sha256`, `hmac_sha512` -- `(key: uint8[], data: uint8[])
-  -> uint8[]`; any key length works
+-> uint8[]`; any key length works
 - `hex(bytes) -> string` (lowercase); `unhex(text) -> uint8[]!` (the inverse;
   accepts upper case, fails on an odd length or a non-hex character)
 - `equal(a, b) -> bool` -- CONSTANT-TIME digest/MAC comparison
 - `Hasher` -- the incremental form when the input is not in memory at once:
   `let h = Hasher.sha256()!` (also `.md5()/.sha1()/.sha224()/.sha384()/
-  .sha512()`), then `h.update(bytes)!` repeatedly, then `h.finalize()!`.
+.sha512()`), then `h.update(bytes)!` repeatedly, then `h.finalize()!`.
   `finalize` CONSUMES the hasher: a second call is an error.
 
 SECURITY: `md5`/`sha1` are broken against collisions -- interop only, never a
@@ -643,7 +643,7 @@ Semantic Versioning 2.0.0, parsed with the official semver.org pattern (so
 - `v.to_string() -> string`; `v.is_prerelease() -> bool`;
   `v.prerelease_ids() -> string[]` (`"rc.1"` -> `["rc", "1"]`)
 - `v.compare(other) -> int64` (-1/0/1); `v.equals/less_than/greater_than(other)
-  -> bool`; `sort(versions: Version[]) -> Version[]` (a new array, ascending)
+-> bool`; `sort(versions: Version[]) -> Version[]` (a new array, ascending)
 
 PRECEDENCE: a pre-release PRECEDES its release (`1.0.0-rc.1 < 1.0.0`); numeric
 pre-release identifiers compare numerically (`beta.2 < beta.11`) and precede
@@ -664,7 +664,7 @@ frame messages. Bytes convert with the prelude `to_bytes` / `to_text`.
   forever; an exceeded deadline is an error Result)
 - `Udp.bind(host, port) -> Udp!`; `sock.send_to(data, host, port) -> int64!`;
   `sock.recv_from(max) -> Datagram!` with `Datagram = { data: uint8[],
-  addr: string }` (a longer datagram truncates); plus `local_addr`,
+addr: string }` (a longer datagram truncates); plus `local_addr`,
   `set_timeout`, `close`
 - `TlsStream.connect(host, port) -> TlsStream!` -- TLS with certificate
   verification against `host` (bundled Mozilla roots, no configuration
@@ -685,7 +685,7 @@ back lowercased.
 - `uri.to_string()` reassembles; `uri.authority_string() -> string?`
 - Decoded views: `uri.path_segments() -> string[]!` and
   `uri.query_pairs() -> QueryPair[]!` (`QueryPair = { key: string,
-  value: string }`, from `import url.query.{ QueryPair }`)
+value: string }`, from `import url.query.{ QueryPair }`)
 - Percent-coding: `import url.percent`, then `percent.decode(s) -> string!`
   and `percent.encode_component(s) -> string`
 

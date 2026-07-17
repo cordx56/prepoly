@@ -1,25 +1,35 @@
 pub mod http;
 mod llvm;
 
-use std::env;
+use anyhow::{Context as _, bail};
 use std::os::unix::process::CommandExt;
 use std::process;
+use std::{env, ffi::OsString};
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
-    let llvm_path = llvm::setup_llvm_path().await;
+async fn main() -> anyhow::Result<()> {
+    let mut args = env::args_os().skip(1);
+    let Some(program) = args.next() else {
+        bail!("usage: ./x <command> [arguments...]");
+    };
+    let llvm_path = llvm::setup_llvm_path().await?;
 
-    let path = env::var("PATH").unwrap();
-    let split = env::split_paths(&path);
+    let inherited_path = env::var_os("PATH").unwrap_or_default();
+    let split = env::split_paths(&inherited_path);
     let path: Vec<_> = [llvm_path.clone().join("bin")]
         .into_iter()
         .chain(split)
         .collect();
+    let path = env::join_paths(path).context("cannot construct PATH for the requested command")?;
 
-    let args: Vec<_> = env::args().skip(1).collect();
-    let mut cmd = process::Command::new(&args[0]);
-    cmd.args(&args[1..])
+    let mut cmd = process::Command::new(&program);
+    cmd.args(args)
         .env(llvm::LLVM_SYS_ENV, &llvm_path)
-        .env("PATH", env::join_paths(path).unwrap());
-    Err(cmd.exec())
+        .env("PATH", path);
+    let error = cmd.exec();
+    Err(error).with_context(|| format!("failed to execute `{}`", display_arg(program)))
+}
+
+fn display_arg(arg: OsString) -> String {
+    arg.to_string_lossy().into_owned()
 }

@@ -17,13 +17,11 @@ czpm new myapp
 
 This creates a new directory with the following layout:
 
-| Path                | Purpose                                                                      |
-| ------------------- | ---------------------------------------------------------------------------- |
-| `myapp/myapp/`      | Source directory for sub-modules                                             |
-| `myapp/myapp.cz`    | Package root file (your program's entry point)                               |
-| `myapp/package.toml`| Package manifest                                                             |
-| `myapp/AGENTS.md`   | Instructions teaching LLM agents Brass (see [LLM agents](/guides/llm/))    |
-| `myapp/CLAUDE.md`   | Symlink to `AGENTS.md`, so Claude Code reads the same instructions           |
+| Path                 | Purpose                                        |
+| -------------------- | ---------------------------------------------- |
+| `myapp/myapp/`       | Source directory for sub-modules               |
+| `myapp/myapp.cz`     | Package root file (your program's entry point) |
+| `myapp/package.toml` | Package manifest                               |
 
 To initialize a project in the current directory instead, use `czpm init`:
 
@@ -31,6 +29,11 @@ To initialize a project in the current directory instead, use `czpm init`:
 mkdir myapp && cd myapp
 czpm init myapp
 ```
+
+Package and dependency names must be ASCII identifiers: they begin with a
+letter or `_` and continue with letters, digits, or `_`. `new` refuses an
+existing destination directory, while `init` refuses to overwrite an existing
+`package.toml` or package root file.
 
 The generated `package.toml` looks like this:
 
@@ -41,7 +44,7 @@ author = ""
 license = "MIT"
 
 [dependencies]
-# mylib = { git = "https://github.com/user/mylib", hash = "<commit hash>" }
+# mylib = { git = "https://github.com/user/mylib", rev = "<rev>" }
 # mylib = { path = "../mylib" }
 ```
 
@@ -54,6 +57,7 @@ Inside a project directory (where `package.toml` lives), use:
 ```bash
 czpm run      # compile and run
 czpm check    # type-check only
+czpm fmt      # format every owned .cz file below the project directory
 ```
 
 Both commands read `package.toml`, fetch any missing dependencies, set the
@@ -71,29 +75,30 @@ configuration works for projects and loose `.cz` files alike.
 
 ## Adding dependencies
 
-A dependency is either a Git repository pinned to a commit hash, or a local
-directory given by path. Add them to the `[dependencies]` section of
-`package.toml`:
+A dependency is either a Git repository at a revision, or a local directory
+given by path. Add them to the `[dependencies]` section of `package.toml`:
 
 ```toml
 [dependencies]
-"geometry" = { git = "https://github.com/user/geometry-pp", hash = "a1b2c3d4e5f6" }
-"utils"    = { git = "https://github.com/user/utils-pp",    hash = "deadbeef1234" }
-"mylib"    = { path = "../mylib" }
+geometry = { git = "https://github.com/user/geometry-pp", rev = "a1b2c3d4e5f6" }
+utils    = { git = "https://github.com/user/utils-pp",    rev = "deadbeef1234" }
+mylib    = { path = "../mylib" }
 ```
 
 When you run `czpm run` or `czpm check`, each Git dependency is cloned to
-`~/.brass/packages/<name>-git-<hash>` if it is not already present, and
-then checked out at the pinned commit.
+`~/.brass/packages/git/<digest>` if it is not already present, and then checked
+out at `rev`. The digest identifies the repository URL and revision without
+putting either one directly in a path. `rev` may name any revision Git accepts;
+when omitted it defaults to `HEAD`, though an immutable commit is recommended
+for repeatable builds.
 
 A `path` dependency is used in place — nothing is copied or fetched. The
-path is resolved relative to the project root (the directory holding
-`package.toml`) and must point at the dependency project's root directory:
-the one containing its `<package-name>.cz` root file. Edits to the
-dependency are picked up on the next `czpm run`/`czpm check` with no extra
-step, which makes `path` the form to use while developing a library
-alongside its consumer; a dependency cannot combine `path` with
-`git`/`hash`.
+path is resolved relative to the `package.toml` that declares it, including for
+transitive dependencies, and must point at the dependency project's root
+directory. Edits to the dependency are picked up on the next `czpm run`/`czpm
+check` with no extra step, which makes `path` the form to use while developing a
+library alongside its consumer; a dependency cannot combine `path` with `git`
+or `rev`.
 
 ## Importing from a dependency
 
@@ -133,26 +138,28 @@ mylib/
 
 ## How it works
 
-`czpm` sets the environment variable `BRASS_PACKAGES` before invoking
-`brass`. The format is a colon-separated list of `name=path` entries:
+`czpm` sets the environment variable `BRASS_PACKAGES` before invoking `brass`.
+It is an OS path list of `name=path` entries: entries are separated by `:` on
+Unix and `;` on Windows. For example, on Unix:
 
 ```
-BRASS_PACKAGES=geometry=/home/user/.brass/packages/geometry-git-a1b2c3d4:utils=/home/user/.brass/packages/utils-git-deadbeef
+BRASS_PACKAGES=geometry=/home/user/.brass/packages/git/0123abcd:utils=/home/user/.brass/packages/git/4567cdef
 ```
 
 An import whose first segment is a declared name resolves under that entry's
 directory — and only there. The manifest therefore scopes exactly which
-external modules the project sees, and a declared name cannot be shadowed by
-a same-named local file. `czpm` warns when a dependency directory contains no
-module of the declared name (the misnamed entry would otherwise only fail at
-its first import). Both the compiler and the language server read the
-variable at startup, so editor diagnostics and completions work for
-dependencies too.
+external modules the project sees, and a declared name cannot be shadowed by a
+same-named local file. Resolution rejects a dependency whose manifest package
+name differs from its dependency-table key, as well as two transitive
+dependencies that give the same name different locations. Both the compiler
+and the language server read the variable at startup, so editor diagnostics and
+completions work for dependencies too.
 
 ## Include paths
 
 Outside of `czpm` projects — or alongside them — the compiler also honors
-`BRASS_INCLUDE`, a colon-separated list of plain directories:
+`BRASS_INCLUDE`, an OS path list of plain directories. This Unix example uses
+`:`; use `;` on Windows:
 
 ```
 BRASS_INCLUDE=/opt/brass/libraries:/home/user/brass-modules

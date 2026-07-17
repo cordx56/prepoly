@@ -30,7 +30,8 @@ use brass_parser::{Span, line_col};
 ///
 /// The program file is a bare positional argument (`brass file.cz`) rather than
 /// a `run` subcommand. A leading `check`/`repl` parses as the subcommand; any
-/// other first argument is taken as the file.
+/// other first argument is taken as the file, and everything after the file
+/// is the program's, untouched (see [`parse_cli`]).
 #[derive(Parser)]
 #[command(
     name = "brass",
@@ -44,13 +45,16 @@ struct Cli {
     /// interactive REPL starts instead.
     file: Option<String>,
     /// Everything after the program file, passed through to the program
-    /// verbatim (flags included): the env library's `args()` returns the
-    /// program file followed by these.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    /// VERBATIM -- driver-flag lookalikes (`--eager`, `--help`), subcommand
+    /// words, and `--` included: the env library's `args()` returns the
+    /// program file followed by these. Filled by [`parse_cli`], which splits
+    /// the command line at the file before clap parses it; clap alone would
+    /// intercept its own flags anywhere on the line.
     args: Vec<String>,
     /// Type-check the whole program before running it (what `brass check`
     /// does), instead of the default lazy check that runs type inference on a
-    /// separate thread.
+    /// separate thread. Must precede the program file: everything after the
+    /// file belongs to the program.
     #[arg(long)]
     eager: bool,
     #[command(subcommand)]
@@ -65,8 +69,7 @@ enum Command {
     Repl {
         file: Option<String>,
         /// Everything after the program file, passed through to the program
-        /// verbatim (see the env library's `args()`).
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        /// verbatim (see the env library's `args()` and [`parse_cli`]).
         args: Vec<String>,
     },
 }
@@ -115,7 +118,7 @@ fn main() -> ExitCode {
 }
 
 fn run_cli() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = parse_cli();
     match cli.command {
         // A bare file argument is type-checked and run; with neither a file nor a
         // subcommand, start an interactive REPL session.
@@ -142,6 +145,75 @@ fn run_cli() -> ExitCode {
             exit_code(drive(Mode::Repl, &file))
         }
     }
+}
+
+/// Parse the command line with the program-argument boundary applied BEFORE
+/// clap sees it: everything after the program file belongs to the program,
+/// verbatim -- tokens that look like driver flags (`--eager`), the driver's
+/// own `--help`/`--version`, subcommand words, and `--` included. Clap alone
+/// cannot express that (its defined flags and subcommands match anywhere on
+/// the line), so the argv is split at the file and only the head is parsed.
+///
+/// The file is the first token that does not start with `-` -- directly for
+/// the bare-file form, after `repl` for the interpreter form. `check` and
+/// `help` take no program arguments, so their lines stay fully clap's.
+fn parse_cli() -> Cli {
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let file_at = program_file_index(&argv);
+    let split = file_at.map_or(argv.len(), |i| i + 1);
+    let mut cli = Cli::parse_from(argv[..split].iter().cloned());
+    let rest: Vec<String> = argv[split..]
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    if !rest.is_empty() {
+        match &mut cli.command {
+            Some(Command::Repl { args, .. }) => *args = rest,
+            _ => cli.args = rest,
+        }
+    }
+    cli
+}
+
+/// Locate the positional program file before splitting its trailing arguments
+/// away from clap. Root flags may precede a subcommand; `--` ends flag and
+/// subcommand recognition, so a following `check` or `repl` is a file name.
+fn program_file_index(argv: &[std::ffi::OsString]) -> Option<usize> {
+    let mut index = 1;
+    let mut positional_only = false;
+    while index < argv.len() {
+        let token = argv[index].to_string_lossy();
+        if !positional_only && token == "--" {
+            positional_only = true;
+            index += 1;
+            continue;
+        }
+        if !positional_only && token.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if !positional_only && (token == "check" || token == "help") {
+            return None;
+        }
+        if !positional_only && token == "repl" {
+            index += 1;
+            while index < argv.len() {
+                let token = argv[index].to_string_lossy();
+                if token == "--" {
+                    positional_only = true;
+                    index += 1;
+                    continue;
+                }
+                if positional_only || !token.starts_with('-') {
+                    return Some(index);
+                }
+                index += 1;
+            }
+            return None;
+        }
+        return Some(index);
+    }
+    None
 }
 
 /// Publish the program's argument vector -- the program file as written on
@@ -2242,13 +2314,13 @@ fn collect_call_spans_expr(e: &brass_parser::ast::Expr, out: &mut Vec<Span>) {
 
 /// Print a runtime failure. A message that is already a rendered error trace
 /// (the prelude's unhandled-`!` rendering, whose lines carry their own
-/// `[file:line:col] unhandled error:` framing) prints verbatim; anything else
-/// keeps the `error:` prefix.
+/// `[file:line:col] unhandled error:` framing) prints verbatim; every other
+/// failure uses the same `runtime error:` prefix as the native runtime.
 fn report_runtime_error(e: &str) {
     if e.starts_with('[') && e.contains("unhandled error:") {
         eprintln!("{e}");
     } else {
-        eprintln!("error: {e}");
+        eprintln!("runtime error: {e}");
     }
 }
 
@@ -2460,4 +2532,38 @@ fn brace_balanced(s: &str) -> bool {
         }
     }
     depth <= 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::program_file_index;
+    use std::ffi::OsString;
+
+    fn argv(args: &[&str]) -> Vec<OsString> {
+        std::iter::once("brass")
+            .chain(args.iter().copied())
+            .map(OsString::from)
+            .collect()
+    }
+
+    #[test]
+    fn root_flags_may_precede_repl_and_check() {
+        // Root flags are parsed by clap, but they must not hide the subcommand
+        // that decides whether a following positional value is a program file.
+        assert_eq!(
+            program_file_index(&argv(&["--eager", "repl", "main.cz", "--program-flag"])),
+            Some(3)
+        );
+        assert_eq!(
+            program_file_index(&argv(&["--eager", "check", "main.cz"])),
+            None
+        );
+    }
+
+    #[test]
+    fn option_terminator_makes_subcommand_words_file_names() {
+        // After `--`, clap treats every token positionally. The manual split
+        // must make the same choice or a file literally named `repl` is lost.
+        assert_eq!(program_file_index(&argv(&["--", "repl", "arg"])), Some(2));
+    }
 }

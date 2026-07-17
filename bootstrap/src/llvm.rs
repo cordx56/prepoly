@@ -42,24 +42,38 @@ pub async fn download_llvm(dest: impl AsRef<Path>) -> anyhow::Result<()> {
     extract(&data, dest)
 }
 
-pub async fn setup_llvm_path() -> PathBuf {
+/// Resolve a usable LLVM prefix from Homebrew or the repository-local install,
+/// downloading the pinned archive when the local prefix does not exist yet.
+pub async fn setup_llvm_path() -> anyhow::Result<PathBuf> {
     if cfg!(target_os = "macos")
-        && let Ok(brew) = process::Command::new("brew")
+        && let Ok(output) = process::Command::new("brew")
             .args(["--prefix", "llvm@22"])
-            .stdout(process::Stdio::piped())
-            .spawn()
-        && let Ok(output) = brew.wait_with_output()
+            .output()
+        && output.status.success()
+        && let Ok(path) = brew_prefix(&output.stdout)
+        && path.is_dir()
     {
-        PathBuf::from(String::from_utf8(output.stdout).expect("non UTF-8 chars in path"))
+        Ok(path)
     } else {
-        let llvm_path = env::current_dir().unwrap().join("llvm");
+        let llvm_path = env::current_dir()
+            .context("cannot determine the working directory")?
+            .join("llvm");
         if !llvm_path.is_dir() {
-            download_llvm(&llvm_path)
-                .await
-                .expect("failed to download LLVM");
+            download_llvm(&llvm_path).await?;
         }
-        llvm_path
+        Ok(llvm_path)
     }
+}
+
+/// Decode and trim Homebrew's line-oriented `--prefix` output.
+fn brew_prefix(stdout: &[u8]) -> anyhow::Result<PathBuf> {
+    let prefix = std::str::from_utf8(stdout)
+        .context("Homebrew returned a non-UTF-8 LLVM prefix")?
+        .trim();
+    if prefix.is_empty() {
+        bail!("Homebrew returned an empty LLVM prefix");
+    }
+    Ok(PathBuf::from(prefix))
 }
 
 /// The release archive file name for the host OS/architecture.
@@ -101,22 +115,35 @@ fn hex(bytes: &[u8]) -> String {
 /// path by hand and called the unchecked `Entry::unpack`, which a crafted `../` or
 /// symlink entry could use to write outside `dest` (a tar-slip).
 fn extract(data: &[u8], dest: &Path) -> anyhow::Result<()> {
-    let staging = dest.with_extension("download.tmp");
+    static NEXT_STAGING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let staging = dest.with_extension(format!(
+        "download.tmp.{}-{}",
+        std::process::id(),
+        NEXT_STAGING.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     if staging.exists() {
         fs::remove_dir_all(&staging).context("clearing the LLVM staging dir")?;
     }
-    Archive::new(XzDecoder::new(data))
-        .unpack(&staging)
-        .context("failed to unpack LLVM")?;
-    let top = fs::read_dir(&staging)
-        .context("reading the LLVM staging dir")?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .find(|p| p.is_dir())
-        .context("LLVM archive had no top-level directory")?;
-    fs::rename(&top, dest).context("installing LLVM")?;
+    let result = (|| {
+        Archive::new(XzDecoder::new(data))
+            .unpack(&staging)
+            .context("failed to unpack LLVM")?;
+        let top = fs::read_dir(&staging)
+            .context("reading the LLVM staging dir")?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.is_dir())
+            .context("LLVM archive had no top-level directory")?;
+        match fs::rename(&top, dest) {
+            Ok(()) => Ok(()),
+            // Another bootstrap may have installed the same pinned archive
+            // while this one was unpacking. Its completed directory is usable.
+            Err(_) if dest.is_dir() => Ok(()),
+            Err(e) => Err(e).context("installing LLVM"),
+        }
+    })();
     let _ = fs::remove_dir_all(&staging);
-    Ok(())
+    result
 }
 
 fn get_os_repr() -> anyhow::Result<&'static str> {
@@ -164,5 +191,15 @@ mod tests {
     #[test]
     fn a_tampered_archive_is_rejected() {
         assert!(verify_digest("LLVM-22.1.0-Linux-ARM64.tar.xz", b"not the real bytes").is_err());
+    }
+
+    #[test]
+    fn homebrew_prefix_drops_its_line_ending() {
+        // `brew --prefix` writes one newline-terminated path. Keeping that
+        // newline makes both the LLVM prefix and its `bin` directory invalid.
+        assert_eq!(
+            brew_prefix(b"/opt/homebrew/opt/llvm@22\n").expect("valid prefix"),
+            PathBuf::from("/opt/homebrew/opt/llvm@22")
+        );
     }
 }

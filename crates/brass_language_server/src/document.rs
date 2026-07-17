@@ -39,13 +39,14 @@ impl Document {
     /// Byte offset -> LSP position. The column is the number of UTF-16 code
     /// units between the line start and `offset`.
     pub fn position_at(&self, offset: usize) -> Position {
-        let offset = offset.min(self.text.len());
+        let offset = char_boundary_at_or_before(&self.text, offset.min(self.text.len()));
         let line = match self.line_starts.binary_search(&offset) {
             Ok(line) => line,
             Err(next) => next - 1,
         };
         let line_start = self.line_starts[line];
-        let character = self.text[line_start..offset]
+        let column_end = line_content_end(&self.text, line_start, offset);
+        let character = self.text[line_start..column_end]
             .chars()
             .map(|c| c.len_utf16() as u32)
             .sum();
@@ -67,6 +68,7 @@ impl Document {
             .get(line + 1)
             .copied()
             .unwrap_or(self.text.len());
+        let line_end = line_content_end(&self.text, line_start, line_end);
         let mut remaining = pos.character;
         let mut offset = line_start;
         for c in self.text[line_start..line_end].chars() {
@@ -105,13 +107,14 @@ impl LineIndex {
     }
 
     pub fn position_at(&self, text: &str, offset: usize) -> Position {
-        let offset = offset.min(self.len);
+        let offset = char_boundary_at_or_before(text, offset.min(self.len).min(text.len()));
         let line = match self.line_starts.binary_search(&offset) {
             Ok(line) => line,
             Err(next) => next - 1,
         };
         let line_start = self.line_starts[line];
-        let character = text[line_start..offset]
+        let column_end = line_content_end(text, line_start, offset);
+        let character = text[line_start..column_end]
             .chars()
             .map(|c| c.len_utf16() as u32)
             .sum();
@@ -137,4 +140,49 @@ fn line_starts(text: &str) -> Vec<usize> {
         }
     }
     starts
+}
+
+fn char_boundary_at_or_before(text: &str, mut offset: usize) -> usize {
+    while !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+/// Exclude a line's `\n` or `\r\n` terminator from its LSP column space.
+fn line_content_end(text: &str, line_start: usize, offset: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut end = offset;
+    if end > line_start && bytes.get(end - 1) == Some(&b'\n') {
+        end -= 1;
+        if end > line_start && bytes.get(end - 1) == Some(&b'\r') {
+            end -= 1;
+        }
+    } else if end > line_start && bytes.get(end - 1) == Some(&b'\r') {
+        end -= 1;
+    }
+    end
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Document;
+    use tower_lsp_server::ls_types::Position;
+
+    /// Out-of-range columns stop before the line terminator, and UTF-16 counts
+    /// a supplementary character as two code units.
+    #[test]
+    fn positions_clamp_to_crlf_line_content() {
+        let doc = Document::new("a😀b\r\nnext".to_string(), 1);
+        assert_eq!(doc.offset_at(Position::new(0, u32::MAX)), "a😀b".len());
+        assert_eq!(doc.position_at("a😀b\r".len()), Position::new(0, 4));
+    }
+
+    /// A defensive conversion of an interior UTF-8 byte offset rounds down to
+    /// the preceding character boundary instead of slicing invalid text.
+    #[test]
+    fn interior_utf8_offsets_round_down() {
+        let doc = Document::new("a😀b".to_string(), 1);
+        assert_eq!(doc.position_at(2), Position::new(0, 1));
+    }
 }

@@ -26,7 +26,7 @@ REPL and WebAssembly.
 Quick start:
 
 ```bash
-curl -L https://raw.githubusercontent.com/brass-cz/brass/refs/heads/main/scripts/install.sh | sh
+curl -fSL https://raw.githubusercontent.com/brass-cz/brass/refs/heads/main/scripts/install.sh | sh
 ```
 
 ## Features
@@ -100,7 +100,13 @@ brass                           # no arguments: same interactive session
 A bare file argument is type-checked and then run on the JIT when it is built in,
 otherwise on the interpreter. Each module's top-level statements run in dependency
 order, then `main` is called if defined. The standard library is an implicit
-prelude.
+prelude. Everything after the program file is passed through verbatim and is
+available from `env.args()`; driver flags such as `--eager` must come before the
+file:
+
+```sh
+brass --eager path/to/file.cz input.txt --verbose
+```
 
 ## Status
 

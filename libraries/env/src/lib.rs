@@ -31,6 +31,12 @@ export! {
         }
         flat
     }
+
+    /// The separator between entries in an environment path list: `:` on
+    /// Unix-family platforms and `;` on Windows.
+    fn env_path_separator() -> String {
+        if cfg!(windows) { ";" } else { ":" }.to_string()
+    }
 }
 
 struct EnvLib;
@@ -39,6 +45,7 @@ impl BrassLib for EnvLib {
     fn entry(reg: &mut Registry) {
         reg.export(decl!(env_var));
         reg.export(decl!(env_vars));
+        reg.export(decl!(env_path_separator));
     }
 }
 

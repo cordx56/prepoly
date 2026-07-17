@@ -8,11 +8,15 @@ import tailwindcss from "@tailwindcss/vite";
 // Shiki has no built-in Brass support; register the local TextMate grammar
 // so ```brass fences highlight.
 const brassGrammar = JSON.parse(
-  fs.readFileSync(new URL("./src/grammars/brass.tmLanguage.json", import.meta.url), "utf8"),
+  fs.readFileSync(
+    new URL("./src/grammars/brass.tmLanguage.json", import.meta.url),
+    "utf8",
+  ),
 );
 
 // https://astro.build/config
 export default defineConfig({
+  site: "https://brass-lang.cz",
   integrations: [
     starlight({
       title: "Brass book",

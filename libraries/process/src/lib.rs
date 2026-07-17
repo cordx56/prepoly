@@ -218,13 +218,14 @@ export! {
     fn process_wait_captured(child: i64) -> Result<i64, String> {
         let entry = entry(child)?;
         let mut e = lock(&entry)?;
-        if e.status.is_some() {
-            return wait_locked(&mut e);
-        }
         // `wait_with_output` consumes the child, so drain by hand: a reader
-        // thread per still-piped stream, then wait, then join.
+        // thread per still-piped stream, then wait, then join. This also runs
+        // after an earlier `process_wait`: the cached status says the process
+        // ended, but its pipes still hold unread output.
         let (out, err) = {
-            let child = e.child.as_mut().ok_or(SPENT)?;
+            let Some(child) = e.child.as_mut() else {
+                return wait_locked(&mut e);
+            };
             // A piped stdin the caller never took would keep the child waiting
             // on input it will not get; close it before blocking on exit.
             child.stdin.take();

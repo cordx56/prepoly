@@ -57,7 +57,7 @@ fun Tcp.connect(host: string, port: int64) -> Tcp! {
     return Tcp._adopt(tcp_connect(host, port)!)
 }
 
-/** Block for incoming data and read up to `max` bytes (fewer on a short read; empty at end-of-stream). */
+/** Block for incoming data and read up to non-negative `max` bytes (fewer on a short read; empty at end-of-stream). */
 fun Tcp.read(self, max: int64) -> uint8[]! {
     return self._sock.read(max)!
 }
@@ -154,7 +154,7 @@ type Datagram = {
 }
 
 /**
- * Block until a datagram of up to `max` bytes arrives. A datagram longer
+ * Block until a datagram of up to non-negative `max` bytes arrives. A datagram longer
  * than `max` is truncated (UDP semantics).
  */
 fun Udp.recv_from(self, max: int64) -> Datagram! {
@@ -204,7 +204,7 @@ fun TlsStream.connect(host: string, port: int64) -> TlsStream! {
     return Self { _handle: tls_connect(host, port)! }
 }
 
-/** Block for incoming data and read up to `max` decrypted bytes (fewer on a short read; empty at end-of-stream). */
+/** Block for incoming data and read up to non-negative `max` decrypted bytes (fewer on a short read; empty at end-of-stream). */
 fun TlsStream.read(self, max: int64) -> uint8[]! {
     return tls_read(self._handle, max)!
 }

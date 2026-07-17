@@ -104,13 +104,27 @@ pub fn parse_sig(sig: &str) -> Result<(Vec<ValueType>, ValueType, bool), String>
     while chars.clone().next().is_some() {
         let ty = ValueType::parse(&mut chars)
             .ok_or_else(|| format!("malformed parameter type in `{sig}`"))?;
+        if contains_void(&ty) {
+            return Err(format!("void is not a valid parameter type in `{sig}`"));
+        }
         param_types.push(ty);
     }
     let fallible = ret.ends_with('!');
     let ret = ret.strip_suffix('!').unwrap_or(ret);
     let ret =
         ValueType::from_code(ret).ok_or_else(|| format!("malformed return type in `{sig}`"))?;
+    if matches!(&ret, ValueType::Array(_)) && contains_void(&ret) {
+        return Err(format!("void is not a valid array element type in `{sig}`"));
+    }
     Ok((param_types, ret, fallible))
+}
+
+fn contains_void(ty: &ValueType) -> bool {
+    match ty {
+        ValueType::Void => true,
+        ValueType::Array(elem) => contains_void(elem),
+        _ => false,
+    }
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -357,15 +371,41 @@ mod imp {
             let (types, ret, fallible) = crate::parse_sig(sig)
                 .map_err(|e| format!("plugin `{}`, function `{name}`: {e}", path.display()))?;
             let names = unsafe { f.param_names.as_str() };
-            let mut names = names.split(',').filter(|s| !s.is_empty());
-            let params: Vec<(String, ValueType)> = types
-                .into_iter()
-                .enumerate()
-                .map(|(i, t)| {
-                    let n = names.next().map(str::to_string);
-                    (n.unwrap_or_else(|| format!("a{i}")), t)
-                })
-                .collect();
+            let names: Vec<&str> = if names.is_empty() {
+                Vec::new()
+            } else {
+                names.split(',').collect()
+            };
+            if names.len() > types.len() {
+                return Err(format!(
+                    "plugin `{}`, function `{name}`: {} parameter names for {} parameters",
+                    path.display(),
+                    names.len(),
+                    types.len()
+                ));
+            }
+            let mut params: Vec<(String, ValueType)> = Vec::with_capacity(types.len());
+            for (i, ty) in types.into_iter().enumerate() {
+                let param_name = names
+                    .get(i)
+                    .filter(|name| !name.is_empty())
+                    .map(|name| (*name).to_string())
+                    .unwrap_or_else(|| format!("a{i}"));
+                if !is_ascii_identifier(&param_name) {
+                    return Err(format!(
+                        "plugin `{}`, function `{name}`, parameter {i}: `{param_name}` is not a \
+                         legal identifier",
+                        path.display()
+                    ));
+                }
+                if params.iter().any(|(existing, _)| existing == &param_name) {
+                    return Err(format!(
+                        "plugin `{}`, function `{name}`: parameter `{param_name}` is declared twice",
+                        path.display()
+                    ));
+                }
+                params.push((param_name, ty));
+            }
             let doc = unsafe { f.doc.as_str() };
             functions.push(PluginFunction {
                 name,
@@ -490,14 +530,23 @@ mod imp {
             }
         }
 
-        fn function(name: &'static str, index: u32) -> RawFunction {
+        fn function_with(
+            name: &'static str,
+            index: u32,
+            sig: &'static str,
+            param_names: &'static str,
+        ) -> RawFunction {
             RawFunction {
                 name: raw_str(name),
                 doc: raw_str(""),
-                sig: raw_str(":v"),
-                param_names: raw_str(""),
+                sig: raw_str(sig),
+                param_names: raw_str(param_names),
                 index,
             }
+        }
+
+        fn function(name: &'static str, index: u32) -> RawFunction {
+            function_with(name, index, ":v", "")
         }
 
         fn decode(fns: &[RawFunction]) -> Result<Vec<String>, String> {
@@ -528,6 +577,37 @@ mod imp {
 
             let err = decode(&[function("dup", 0), function("dup", 1)]).expect_err("rejected");
             assert!(err.contains("exported twice"), "{err}");
+        }
+
+        /// Parameter names become identifiers in synthesized source. Invalid,
+        /// duplicate, and surplus names are rejected while omitted slots keep
+        /// their stable generated names.
+        #[test]
+        fn manifest_parameter_names_must_match_source_identifiers() {
+            let raw = [function_with("ok", 0, "ii:i", "left,")];
+            let manifest = unsafe {
+                decode_manifest(
+                    &RawManifest {
+                        abi: brass_plugin::raw::ABI_VERSION,
+                        fn_count: raw.len(),
+                        fns: raw.as_ptr(),
+                    },
+                    std::path::Path::new("lib.so"),
+                )
+            }
+            .unwrap();
+            assert_eq!(manifest.functions[0].params[0].0, "left");
+            assert_eq!(manifest.functions[0].params[1].0, "a1");
+
+            for names in ["has-dash,right", "same,same", "one,two,three"] {
+                let err = decode(&[function_with("bad", 0, "ii:i", names)]).expect_err("rejected");
+                assert!(
+                    err.contains("legal identifier")
+                        || err.contains("declared twice")
+                        || err.contains("parameter names"),
+                    "{names}: {err}"
+                );
+            }
         }
     }
 }
@@ -697,6 +777,9 @@ mod tests {
         assert!(parse_sig("i").is_err());
         assert!(parse_sig("q:i").is_err());
         assert!(parse_sig("i:").is_err());
+        assert!(parse_sig("v:i").is_err());
+        assert!(parse_sig("av:i").is_err());
+        assert!(parse_sig(":av").is_err());
     }
 
     /// Array codes are self-delimiting (`a` per level), so an unseparated

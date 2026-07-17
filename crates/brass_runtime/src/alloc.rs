@@ -692,24 +692,29 @@ mod tests {
             // [10, 20, 30] -> insert 15 at index 1 -> [10, 15, 20, 30]
             let x: i64 = 15;
             pp_arr_insert(arr, 1, &x as *const i64 as *const u8, 8);
+            // The public operation clamps both sides of its index range.
+            let first: i64 = 5;
+            pp_arr_insert(arr, -1, &first as *const i64 as *const u8, 8);
+            let last: i64 = 35;
+            pp_arr_insert(arr, 99, &last as *const i64 as *const u8, 8);
             let len = *((arr as *mut u8).offset(16) as *mut i64);
             let data = *((arr as *mut u8).offset(32) as *mut *mut u8);
-            assert_eq!(len, 4);
-            let view: Vec<i64> = (0..4).map(|i| *(data as *const i64).offset(i)).collect();
-            assert_eq!(view, vec![10, 15, 20, 30]);
+            assert_eq!(len, 6);
+            let view: Vec<i64> = (0..6).map(|i| *(data as *const i64).offset(i)).collect();
+            assert_eq!(view, vec![5, 10, 15, 20, 30, 35]);
 
-            // remove index 0 -> returns 10, leaves [15, 20, 30]
+            // Remove index 0, closing the gap left by the first element.
             let removed = pp_arr_remove(arr, 0, 8);
-            assert_eq!(removed, 10);
+            assert_eq!(removed, 5);
             let len = *((arr as *mut u8).offset(16) as *mut i64);
             let view: Vec<i64> = (0..len)
                 .map(|i| *(data as *const i64).offset(i as isize))
                 .collect();
-            assert_eq!(view, vec![15, 20, 30]);
+            assert_eq!(view, vec![10, 15, 20, 30, 35]);
 
             // out-of-range remove is a no-op returning 0
             assert_eq!(pp_arr_remove(arr, 99, 8), 0);
-            assert_eq!(*((arr as *mut u8).offset(16) as *mut i64), 3);
+            assert_eq!(*((arr as *mut u8).offset(16) as *mut i64), 5);
         }
     }
 

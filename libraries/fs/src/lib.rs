@@ -18,20 +18,26 @@ use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 
 use brass_plugin::{BrassLib, Bytes, Registry, brass_lib, decl, export};
 
-/// Reject a negative descriptor (a closed `File` stores -1) before it can
-/// hit `from_raw_fd`'s assertion; the caller sees an ordinary error Result.
-fn live(fd: i64) -> Result<(), String> {
+/// Validate a live descriptor before narrowing the ABI's `i64` to the host's
+/// raw descriptor type. A closed `File` stores -1.
+fn live(fd: i64) -> Result<RawFd, String> {
     if fd < 0 {
         return Err("file is closed".to_string());
     }
-    Ok(())
+    RawFd::try_from(fd).map_err(|_| format!("file descriptor {fd} is out of range"))
 }
 
 /// Run `op` on the `File` for `fd` without taking ownership, so the borrow
 /// ending does not close the descriptor.
-fn borrow_fd<R>(fd: i64, op: impl FnOnce(&mut File) -> R) -> R {
-    let mut file = ManuallyDrop::new(unsafe { File::from_raw_fd(fd as RawFd) });
+fn borrow_fd<R>(fd: RawFd, op: impl FnOnce(&mut File) -> R) -> R {
+    let mut file = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
     op(&mut file)
+}
+
+/// Convert a byte count from the plugin ABI without turning a negative value
+/// into an empty read.
+fn byte_count(value: i64) -> Result<usize, String> {
+    usize::try_from(value).map_err(|_| format!("byte count {value} must be non-negative"))
 }
 
 /// Copy the tree rooted at `source` into `target`, which the caller has checked
@@ -56,6 +62,24 @@ fn copy_tree(source: &std::path::Path, target: &std::path::Path) -> std::io::Res
         }
     }
     Ok(())
+}
+
+/// Copy a tree and remove the newly-created target when any entry fails. The
+/// source remains untouched, so a failed copy can be retried immediately.
+fn copy_tree_clean(source: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    if let Err(copy_error) = copy_tree(source, target) {
+        match std::fs::remove_dir_all(target) {
+            Ok(()) => Err(copy_error),
+            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {
+                Err(copy_error)
+            }
+            Err(cleanup_error) => Err(std::io::Error::other(format!(
+                "{copy_error}; also failed to remove the partial target: {cleanup_error}"
+            ))),
+        }
+    } else {
+        Ok(())
+    }
 }
 
 /// Check the invariants both directory operations share, and answer the pair of
@@ -106,8 +130,8 @@ export! {
 
     /// Up to `n` bytes from descriptor `fd` (fewer at end-of-file).
     fn fd_read(fd: i64, n: i64) -> Result<Bytes, String> {
-        live(fd)?;
-        let mut buf = vec![0u8; n.max(0) as usize];
+        let fd = live(fd)?;
+        let mut buf = vec![0u8; byte_count(n)?];
         match borrow_fd(fd, |f| f.read(&mut buf)) {
             Ok(got) => {
                 buf.truncate(got);
@@ -119,7 +143,7 @@ export! {
 
     /// Write all of `data` to descriptor `fd`, returning its length.
     fn fd_write(fd: i64, data: Bytes) -> Result<i64, String> {
-        live(fd)?;
+        let fd = live(fd)?;
         match borrow_fd(fd, |f| f.write_all(&data.0)) {
             Ok(()) => Ok(data.0.len() as i64),
             Err(e) => Err(e.to_string()),
@@ -129,8 +153,9 @@ export! {
     /// Move descriptor `fd`'s read/write cursor to absolute byte offset `pos`
     /// from the start of the file.
     fn fd_seek(fd: i64, pos: i64) -> Result<(), String> {
-        live(fd)?;
-        borrow_fd(fd, |f| f.seek(SeekFrom::Start(pos.max(0) as u64)))
+        let fd = live(fd)?;
+        let pos = u64::try_from(pos).map_err(|_| format!("seek position {pos} must be non-negative"))?;
+        borrow_fd(fd, |f| f.seek(SeekFrom::Start(pos)))
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
@@ -139,10 +164,25 @@ export! {
     /// backstop under `File.close`'s own guard), as closing them would break
     /// the process.
     fn fd_close(fd: i64) -> Result<(), String> {
+        let fd = live(fd)?;
         if fd > 2 {
-            drop(unsafe { File::from_raw_fd(fd as RawFd) });
+            drop(unsafe { File::from_raw_fd(fd) });
         }
         Ok(())
+    }
+
+    /// Read a whole file while Rust owns the handle, so every success and
+    /// error path closes it before returning.
+    fn fs_read_all(path: String) -> Result<Bytes, String> {
+        std::fs::read(&path)
+            .map(Bytes)
+            .map_err(|e| format!("{path}: {e}"))
+    }
+
+    /// Replace a file with `data` while Rust owns the handle, closing it on
+    /// both success and failure. Parent directories are not created.
+    fn fs_write_all(path: String, data: Bytes) -> Result<(), String> {
+        std::fs::write(&path, data.0).map_err(|e| format!("{path}: {e}"))
     }
 
     /// Delete the file at `path`. A symbolic link is removed as the LINK (what
@@ -199,7 +239,7 @@ export! {
     /// A symbolic link inside the tree is recreated as a link, not followed.
     fn dir_copy(source: String, target: String) -> Result<(), String> {
         checked_dirs(&source, &target)?;
-        copy_tree(std::path::Path::new(&source), std::path::Path::new(&target))
+        copy_tree_clean(std::path::Path::new(&source), std::path::Path::new(&target))
             .map_err(|e| format!("{source} -> {target}: {e}"))
     }
 
@@ -214,7 +254,7 @@ export! {
         match std::fs::rename(&source, &target) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
-                copy_tree(std::path::Path::new(&source), std::path::Path::new(&target))
+                copy_tree_clean(std::path::Path::new(&source), std::path::Path::new(&target))
                     .map_err(|e| format!("{source} -> {target}: {e}"))?;
                 std::fs::remove_dir_all(&source).map_err(|e| {
                     format!("{source} was copied to {target} but could not be removed: {e}")
@@ -251,6 +291,8 @@ impl BrassLib for FsLib {
         reg.export(decl!(fd_write));
         reg.export(decl!(fd_seek));
         reg.export(decl!(fd_close));
+        reg.export(decl!(fs_read_all));
+        reg.export(decl!(fs_write_all));
         reg.export(decl!(file_remove));
         reg.export(decl!(file_copy));
         reg.export(decl!(file_move));
@@ -262,3 +304,29 @@ impl BrassLib for FsLib {
 }
 
 brass_lib!(FsLib);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_and_byte_count_ranges_are_checked() {
+        // The ABI uses i64 even where Unix uses i32. Truncation could turn a
+        // bogus handle into a different live descriptor, including stdout.
+        assert!(live(i64::from(i32::MAX) + 1).is_err());
+        assert!(byte_count(-1).is_err());
+    }
+
+    #[test]
+    fn failed_tree_copy_removes_its_partial_target() {
+        // A regular file is not a readable tree: copy_tree creates the target
+        // before read_dir fails, exercising the cleanup path deterministically.
+        let root = std::env::temp_dir().join(format!("brass-fs-copy-{}", std::process::id()));
+        let source = root.with_extension("source");
+        let target = root.with_extension("target");
+        std::fs::write(&source, b"not a directory").expect("create source file");
+        assert!(copy_tree_clean(&source, &target).is_err());
+        assert!(!target.exists(), "partial target survived a failed copy");
+        std::fs::remove_file(source).expect("remove source file");
+    }
+}

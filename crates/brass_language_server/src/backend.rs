@@ -54,6 +54,10 @@ impl DocState {
 pub struct Backend {
     client: Client,
     docs: DashMap<Uri, DocState>,
+    /// Serializes diagnostic notifications. Document analysis remains
+    /// concurrent; only publication is ordered so an older check cannot arrive
+    /// after a newer version or after the document was closed.
+    diagnostic_publish: tokio::sync::Mutex<()>,
 }
 
 impl Backend {
@@ -61,6 +65,7 @@ impl Backend {
         Backend {
             client,
             docs: DashMap::new(),
+            diagnostic_publish: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -82,7 +87,7 @@ impl Backend {
                 }
             }
         };
-        self.publish(uri, diags, version).await;
+        self.publish_current(uri, diags, version).await;
     }
 
     /// Re-publish the current document's full diagnostics, without a new text.
@@ -94,7 +99,7 @@ impl Backend {
         }) else {
             return;
         };
-        self.publish(uri, diags.0, diags.1).await;
+        self.publish_current(uri, diags.0, diags.1).await;
     }
 
     /// Diagnostics for an already-open document, for the pull
@@ -106,10 +111,28 @@ impl Backend {
         }
     }
 
-    async fn publish(&self, uri: Uri, diags: Vec<Diagnostic>, version: i32) {
+    async fn publish_current(&self, uri: Uri, diags: Vec<Diagnostic>, version: i32) {
+        let _publish = self.diagnostic_publish.lock().await;
+        if self
+            .docs
+            .get(&uri)
+            .is_none_or(|entry| entry.document.version != version)
+        {
+            return;
+        }
         self.client
             .publish_diagnostics(uri, diags, Some(version))
             .await;
+    }
+
+    async fn clear_closed(&self, uri: Uri) {
+        let _publish = self.diagnostic_publish.lock().await;
+        // A rapid close/reopen may have installed a new document while the
+        // close notification waited. Its diagnostics must not be cleared.
+        if self.docs.contains_key(&uri) {
+            return;
+        }
+        self.client.publish_diagnostics(uri, Vec::new(), None).await;
     }
 }
 
@@ -213,8 +236,7 @@ impl LanguageServer for Backend {
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         self.docs.remove(&params.text_document.uri);
         // Clear diagnostics for the closed file.
-        self.publish(params.text_document.uri.clone(), Vec::new(), 0)
-            .await;
+        self.clear_closed(params.text_document.uri.clone()).await;
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {

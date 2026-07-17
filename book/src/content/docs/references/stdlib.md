@@ -21,9 +21,9 @@ Reserved builtin names that cannot be redefined: `len`, `spawn`, `with`,
 
 ## Builtins
 
-| Function                           | Signature                    | Notes                                                    |
-| ---------------------------------- | ---------------------------- | -------------------------------------------------------- |
-| `len(x)`                           | `(array or string) -> int64` | element count / byte length; also callable as `x.len()`  |
+| Function                           | Signature                    | Notes                                                     |
+| ---------------------------------- | ---------------------------- | --------------------------------------------------------- |
+| `len(x)`                           | `(array or string) -> int64` | element count / byte length; also callable as `x.len()`   |
 | `error(x)`                         | `Err` wrapping an `Error`    | a prelude function; see [Errors](#errors-stdpreludeerror) |
 | `fields(x)`, `typeof(x)`           | compile-time                 | see [Reflection](/references/reflection/)                 |
 | `spawn(f)`, `with(c, f)`, `sync()` | concurrency                  | see [Concurrency](/references/concurrency/)               |
@@ -46,13 +46,13 @@ Indexing is bounds-checked at runtime on both array kinds.
 The error value model behind `error(..)` and `!` (normatively specified in
 [Error traces](/references/syntax-sugar/#error-traces)):
 
-| Name                     | Shape / signature                              | Behavior                                                            |
-| ------------------------ | ---------------------------------------------- | ------------------------------------------------------------------- |
-| `Location`               | `{ file: string, line: int32, col: int32 }`    | a source position; `display()` renders `file:line:col`              |
-| `Frame`                  | `{ message, location: Location }`              | one `context` annotation                                            |
-| `Error`                  | `{ value, location: Location, frames: Frame[] }` | the payload `error(..)` raises; `display()` renders the nested trace |
-| `error(value)`           | `-> infer!`                                    | an `Err` wrapping `value` into an `Error` stamped with the call site |
-| `r.context(msg)`         | `(string) -> Result`                           | appends a `Frame` to a failed result; leaves a success untouched    |
+| Name             | Shape / signature                                | Behavior                                                             |
+| ---------------- | ------------------------------------------------ | -------------------------------------------------------------------- |
+| `Location`       | `{ file: string, line: int32, col: int32 }`      | a source position; `display()` renders `file:line:col`               |
+| `Frame`          | `{ message, location: Location }`                | one `context` annotation                                             |
+| `Error`          | `{ value, location: Location, frames: Frame[] }` | the payload `error(..)` raises; `display()` renders the nested trace |
+| `error(value)`   | `-> infer!`                                      | an `Err` wrapping `value` into an `Error` stamped with the call site |
+| `r.context(msg)` | `(string) -> Result`                             | appends a `Frame` to a failed result; leaves a success untouched     |
 
 `error` and `context` declare a trailing `loc: Location` parameter the
 compiler fills with the call site (the
@@ -174,18 +174,18 @@ calls chain — and `spawn` starts the process. A standard stream configured as
 (`read`/`write`/`close`); `Inherit` (the default) shares this process's stream
 and `Null` discards it.
 
-| Method / function              | Signature                     | Behavior                                     |
-| ------------------------------ | ----------------------------- | -------------------------------------------- |
-| `Command.new(program)`         | `(string) -> Command`         | `program` is looked up on `PATH`             |
-| `cmd.arg(value)`               | `(string) -> Command`         | append one argument                          |
-| `cmd.args(values)`             | `(string[]) -> Command`       | append several arguments                     |
-| `cmd.env(name, value)`         | `(string, string) -> Command` | set a variable in the child                  |
-| `cmd.stdin/stdout/stderr(mode)`| `(Stdio) -> Command`          | connect a stream (`Inherit`/`Pipe`/`Null`)   |
-| `cmd.spawn()`                  | `() -> Child!`                | start the process                            |
-| `child.stdin/stdout/stderr()`  | `() -> File!`                 | a piped stream (requires `Stdio.Pipe`)       |
-| `child.wait()`                 | `() -> int32!`                | block for exit; returns the exit code        |
-| `child.output()`               | `() -> Output!`               | drain the piped streams, then wait           |
-| `exit(code)`                   | `(int64) -> void`             | end THIS process; never returns              |
+| Method / function               | Signature                     | Behavior                                   |
+| ------------------------------- | ----------------------------- | ------------------------------------------ |
+| `Command.new(program)`          | `(string) -> Command`         | `program` is looked up on `PATH`           |
+| `cmd.arg(value)`                | `(string) -> Command`         | append one argument                        |
+| `cmd.args(values)`              | `(string[]) -> Command`       | append several arguments                   |
+| `cmd.env(name, value)`          | `(string, string) -> Command` | set a variable in the child                |
+| `cmd.stdin/stdout/stderr(mode)` | `(Stdio) -> Command`          | connect a stream (`Inherit`/`Pipe`/`Null`) |
+| `cmd.spawn()`                   | `() -> Child!`                | start the process                          |
+| `child.stdin/stdout/stderr()`   | `() -> File!`                 | a piped stream (requires `Stdio.Pipe`)     |
+| `child.wait()`                  | `() -> int32!`                | block for exit; returns the exit code      |
+| `child.output()`                | `() -> Output!`               | drain the piped streams, then wait         |
+| `exit(code)`                    | `(int64) -> void`             | end THIS process; never returns            |
 
 `Stdio` is `| Inherit | Pipe | Null`. Piped streams are `File`s, so the
 prelude byte helpers `to_bytes`/`to_text` convert their contents. The
@@ -258,29 +258,29 @@ is the root `/`. Empty and repeated separators are dropped when a path is
 parsed, so `/usr//lib/` and `/usr/lib` are the same path. Every method that
 answers with a path builds a new one, so a `Path` may be shared freely.
 
-| Method / function            | Signature                  | Behavior                                        |
-| ---------------------------- | -------------------------- | ----------------------------------------------- |
-| `Path.parse(s)`              | `(string) -> Path`         | absolute when `s` starts with `/`               |
-| `Path.current_dir()`         | `() -> Path!`              | the working directory                           |
-| `Path.home()` / `temp_dir()` | `() -> Path!`              | the home / temporary directory                  |
-| `p.to_string()`              | `() -> string`             | `.` for the empty path                          |
-| `p.components()`             | `() -> string[]`           | a copy, the root included as `/`                |
-| `p.depth()`                  | `() -> int64`              | component count (`len` is a reserved builtin)   |
-| `p.is_absolute()` / `is_root()` | `() -> bool`            | shape of the path, not what is on disk          |
-| `p.parent()` / `basename()`  | `() -> Path`               | the root is its own parent                      |
-| `p.join(s)`                  | `(string \| string[] \| Path) -> Path` | absolute `s` replaces `p`           |
-| `p.stem()` / `extension()`   | `() -> string` / `string?` | `.gitignore` is all stem                        |
-| `p.with_extension(ext)`      | `(string) -> Path`         | empty `ext` removes it                          |
-| `p.normalize()`              | `() -> Path`               | drops `.`, resolves `..`, no filesystem access  |
-| `p.to_absolute()`            | `() -> Path!`              | against the working directory; links unresolved |
-| `p.to_relative(base)`        | `(Path) -> Path!`          | so that `base.join(result)` is `p` again        |
-| `p.starts_with(base)` / `equals(other)` | `(Path) -> bool` | component-wise                                  |
-| `p.exists()` / `is_dir()` / `is_file()` | `() -> bool`    | false for a path that is not there              |
-| `p.is_sym_link()`            | `() -> bool`               | about the link itself, not its target           |
-| `p.canonicalize()`           | `() -> Path!`              | resolves links; the path must exist             |
-| `p.read_link()`              | `() -> Path!`              | where a symbolic link points                    |
-| `p.entries()`                | `() -> Path[]!`            | a directory's entries                           |
-| `p.file_size()`              | `() -> int64!`             | size in bytes                                   |
+| Method / function                       | Signature                              | Behavior                                        |
+| --------------------------------------- | -------------------------------------- | ----------------------------------------------- |
+| `Path.parse(s)`                         | `(string) -> Path`                     | absolute when `s` starts with `/`               |
+| `Path.current_dir()`                    | `() -> Path!`                          | the working directory                           |
+| `Path.home()` / `temp_dir()`            | `() -> Path!`                          | the home / temporary directory                  |
+| `p.to_string()`                         | `() -> string`                         | `.` for the empty path                          |
+| `p.components()`                        | `() -> string[]`                       | a copy, the root included as `/`                |
+| `p.depth()`                             | `() -> int64`                          | component count (`len` is a reserved builtin)   |
+| `p.is_absolute()` / `is_root()`         | `() -> bool`                           | shape of the path, not what is on disk          |
+| `p.parent()` / `basename()`             | `() -> Path`                           | the root is its own parent                      |
+| `p.join(s)`                             | `(string \| string[] \| Path) -> Path` | absolute `s` replaces `p`                       |
+| `p.stem()` / `extension()`              | `() -> string` / `string?`             | `.gitignore` is all stem                        |
+| `p.with_extension(ext)`                 | `(string) -> Path`                     | empty `ext` removes it                          |
+| `p.normalize()`                         | `() -> Path`                           | drops `.`, resolves `..`, no filesystem access  |
+| `p.to_absolute()`                       | `() -> Path!`                          | against the working directory; links unresolved |
+| `p.to_relative(base)`                   | `(Path) -> Path!`                      | so that `base.join(result)` is `p` again        |
+| `p.starts_with(base)` / `equals(other)` | `(Path) -> bool`                       | component-wise                                  |
+| `p.exists()` / `is_dir()` / `is_file()` | `() -> bool`                           | false for a path that is not there              |
+| `p.is_sym_link()`                       | `() -> bool`                           | about the link itself, not its target           |
+| `p.canonicalize()`                      | `() -> Path!`                          | resolves links; the path must exist             |
+| `p.read_link()`                         | `() -> Path!`                          | where a symbolic link points                    |
+| `p.entries()`                           | `() -> Path[]!`                        | a directory's entries                           |
+| `p.file_size()`                         | `() -> int64!`                         | size in bytes                                   |
 
 `join` takes a string, an array of components, or another `Path` through one
 parameter. It is not overloading: the argument's members decide which arm of
@@ -316,27 +316,27 @@ File handles, byte I/O, and directories. Like the other libraries this is a
 plugin under `libraries/`, with the same setup — automatic for a distributed
 toolchain, `libraries/build.sh` + `BRASS_INCLUDE` from a repo checkout.
 
-| Function / method           | Signature                   | Behavior                                          |
-| --------------------------- | --------------------------- | -------------------------------------------------- |
-| `File.open(path, mode)`     | `(string or Path, string) -> File!` | `"r"` read, `"w"` truncate+create, `"a"` append |
-| `read_file(path)`           | `(string or Path) -> string!` | whole file as text                               |
-| `write_file(path, content)` | `(string or Path, string) -> void!` | write text, truncating                     |
-| `copy_file(source, target)` | `(string or Path, string or Path) -> void!` | replaces an existing target        |
-| `move_file(source, target)` | `(string or Path, string or Path) -> void!` | rename, or copy+delete across filesystems |
-| `remove_file(path)`         | `(string or Path) -> void!` | a missing file is an error                         |
-| `copy_dir(source, target)`  | `(string or Path, string or Path) -> void!` | the whole tree; target must not exist |
-| `move_dir(source, target)`  | `(string or Path, string or Path) -> void!` | the whole tree; target must not exist |
-| `copy(source, target)`      | `(string or Path, string or Path) -> void!` | file or directory, by what `source` is |
-| `move(source, target)`      | `(string or Path, string or Path) -> void!` | file or directory, by what `source` is |
-| `create_dir(path)`          | `(string or Path) -> void!` | recursive, like `mkdir -p`                         |
-| `remove_dir(path)`          | `(string or Path) -> void!` | recursive, like `rm -r`                            |
-| `f.read(n)`                 | `(int64) -> uint8[]!`       | up to `n` bytes; fewer at end-of-file              |
-| `f.write(bytes)`            | `(uint8[]) -> int64!`       | write all of `bytes`                               |
-| `f.seek(pos)`               | `(int64) -> void!`          | absolute reposition                                |
-| `f.size()`                  | `() -> int64!`              | by path (see below)                                |
-| `f.close()`                 | `() -> void!`               | idempotent; standard streams are never closed      |
-| `File.from_fd(fd)`          | `(int64) -> File`           | adopt an open descriptor (a pipe, a socket)        |
-| `File.stdin/stdout/stderr()`| `() -> File`                | the standard streams                               |
+| Function / method            | Signature                                   | Behavior                                        |
+| ---------------------------- | ------------------------------------------- | ----------------------------------------------- |
+| `File.open(path, mode)`      | `(string or Path, string) -> File!`         | `"r"` read, `"w"` truncate+create, `"a"` append |
+| `read_file(path)`            | `(string or Path) -> string!`               | whole file as text                              |
+| `write_file(path, content)`  | `(string or Path, string) -> void!`         | write text, truncating                          |
+| `copy_file(source, target)`  | `(string or Path, string or Path) -> void!` | replaces an existing target                     |
+| `move_file(source, target)`  | `(string or Path, string or Path) -> void!` | rename, or copy+delete across filesystems       |
+| `remove_file(path)`          | `(string or Path) -> void!`                 | a missing file is an error                      |
+| `copy_dir(source, target)`   | `(string or Path, string or Path) -> void!` | the whole tree; target must not exist           |
+| `move_dir(source, target)`   | `(string or Path, string or Path) -> void!` | the whole tree; target must not exist           |
+| `copy(source, target)`       | `(string or Path, string or Path) -> void!` | file or directory, by what `source` is          |
+| `move(source, target)`       | `(string or Path, string or Path) -> void!` | file or directory, by what `source` is          |
+| `create_dir(path)`           | `(string or Path) -> void!`                 | recursive, like `mkdir -p`                      |
+| `remove_dir(path)`           | `(string or Path) -> void!`                 | recursive, like `rm -r`                         |
+| `f.read(n)`                  | `(int64) -> uint8[]!`                       | up to `n` bytes; fewer at end-of-file           |
+| `f.write(bytes)`             | `(uint8[]) -> int64!`                       | write all of `bytes`                            |
+| `f.seek(pos)`                | `(int64) -> void!`                          | absolute reposition                             |
+| `f.size()`                   | `() -> int64!`                              | by path (see below)                             |
+| `f.close()`                  | `() -> void!`                               | idempotent; standard streams are never closed   |
+| `File.from_fd(fd)`           | `(int64) -> File`                           | adopt an open descriptor (a pipe, a socket)     |
+| `File.stdin/stdout/stderr()` | `() -> File`                                | the standard streams                            |
 
 `size()` is answered by the `path` library — a stat by name needs no open
 descriptor — so it works exactly for files opened by path; an adopted
@@ -388,7 +388,7 @@ filesystem, so the examples here are not runnable in it.
 ## `env` (a library, not `std`)
 
 ```brass norun
-import env.{ args, var, vars, current_dir }
+import env.{ args, var, vars, path_separator, current_dir }
 ```
 
 The process environment: command-line arguments, environment variables, and
@@ -396,12 +396,13 @@ the working directory. A plugin under `libraries/`, with the same setup as
 the others — automatic for a distributed toolchain, `libraries/build.sh` +
 `BRASS_INCLUDE` from a repo checkout. Not runnable in the playground.
 
-| Function        | Signature          | Behavior                                          |
-| --------------- | ------------------ | ------------------------------------------------- |
-| `args()`        | `() -> string[]`   | the program file, then everything written after it |
-| `var(name)`     | `(string) -> string!` | an unset variable is an error, not `""`        |
-| `vars()`        | `() -> HashMap`    | every variable, as a `string -> string` map       |
-| `current_dir()` | `() -> Path!`      | the working directory, as a `path` `Path`         |
+| Function           | Signature             | Behavior                                           |
+| ------------------ | --------------------- | -------------------------------------------------- |
+| `args()`           | `() -> string[]`      | the program file, then everything written after it |
+| `var(name)`        | `(string) -> string!` | an unset variable is an error, not `""`            |
+| `vars()`           | `() -> HashMap`       | every variable, as a `string -> string` map        |
+| `path_separator()` | `() -> string`        | path-list separator (`:` on Unix, `;` on Windows)  |
+| `current_dir()`    | `() -> Path!`         | the working directory, as a `path` `Path`          |
 
 Everything after the program file on the command line belongs to the
 program, verbatim — flags included, no separator needed:
@@ -435,16 +436,16 @@ println(hex(sha256(to_bytes("abc"))))
 // ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
 ```
 
-| Function                       | Signature                            | Digest size |
-| ------------------------------ | ------------------------------------ | ----------- |
-| `md5(data)`                    | `(uint8[]) -> uint8[]`               | 16 bytes    |
-| `sha1(data)`                   | `(uint8[]) -> uint8[]`               | 20 bytes    |
-| `sha224` / `sha256`            | `(uint8[]) -> uint8[]`               | 28 / 32     |
-| `sha384` / `sha512`            | `(uint8[]) -> uint8[]`               | 48 / 64     |
-| `hmac_sha1/sha256/sha512(k,d)` | `(uint8[], uint8[]) -> uint8[]`      | 20 / 32 / 64 |
-| `hex(bytes)`                   | `(uint8[]) -> string`                | lowercase   |
-| `unhex(text)`                  | `(string) -> uint8[]!`               | inverse of `hex` |
-| `equal(a, b)`                  | `(uint8[], uint8[]) -> bool`         | constant-time |
+| Function                       | Signature                       | Digest size      |
+| ------------------------------ | ------------------------------- | ---------------- |
+| `md5(data)`                    | `(uint8[]) -> uint8[]`          | 16 bytes         |
+| `sha1(data)`                   | `(uint8[]) -> uint8[]`          | 20 bytes         |
+| `sha224` / `sha256`            | `(uint8[]) -> uint8[]`          | 28 / 32          |
+| `sha384` / `sha512`            | `(uint8[]) -> uint8[]`          | 48 / 64          |
+| `hmac_sha1/sha256/sha512(k,d)` | `(uint8[], uint8[]) -> uint8[]` | 20 / 32 / 64     |
+| `hex(bytes)`                   | `(uint8[]) -> string`           | lowercase        |
+| `unhex(text)`                  | `(string) -> uint8[]!`          | inverse of `hex` |
+| `equal(a, b)`                  | `(uint8[], uint8[]) -> bool`    | constant-time    |
 
 For input that is not in memory at once (a file read in chunks, a socket
 stream), `Hasher` is the incremental form. `finalize` **consumes** the hasher
@@ -516,17 +517,17 @@ println(date.replace_all("2026-07-13", "$year/$2"))   // 2026/07
 `Regex.new(pattern) -> Regex!` is where a bad pattern is reported; every method
 below is infallible.
 
-| Method                            | Signature                        | Behavior                                    |
-| --------------------------------- | -------------------------------- | ------------------------------------------- |
-| `re.is_match(text)`               | `(string) -> bool`               | cheapest — no groups recorded               |
-| `re.find(text)`                   | `(string) -> Match?`             | leftmost match, `null` when none            |
-| `re.find_from(text, from)`        | `(string, int64) -> Match?`      | search starts at a byte offset              |
-| `re.find_all(text)`               | `(string) -> Match[]`            | every non-overlapping match                 |
-| `re.replace(text, rep)`           | `(string, string) -> string`     | first match only                            |
-| `re.replace_all(text, rep)`       | `(string, string) -> string`     | `$1` / `$name` / `$$` expand in `rep`       |
-| `re.split(text)`                  | `(string) -> string[]`           | one more field than there were matches      |
-| `re.group_count()`                | `() -> int64`                    | counts group 0, so no groups answers 1      |
-| `escape(text)`                    | `(string) -> string`             | a pattern matching `text` literally         |
+| Method                      | Signature                    | Behavior                               |
+| --------------------------- | ---------------------------- | -------------------------------------- |
+| `re.is_match(text)`         | `(string) -> bool`           | cheapest — no groups recorded          |
+| `re.find(text)`             | `(string) -> Match?`         | leftmost match, `null` when none       |
+| `re.find_from(text, from)`  | `(string, int64) -> Match?`  | search starts at a byte offset         |
+| `re.find_all(text)`         | `(string) -> Match[]`        | every non-overlapping match            |
+| `re.replace(text, rep)`     | `(string, string) -> string` | first match only                       |
+| `re.replace_all(text, rep)` | `(string, string) -> string` | `$1` / `$name` / `$$` expand in `rep`  |
+| `re.split(text)`            | `(string) -> string[]`       | one more field than there were matches |
+| `re.group_count()`          | `() -> int64`                | counts group 0, so no groups answers 1 |
+| `escape(text)`              | `(string) -> string`         | a pattern matching `text` literally    |
 
 A `Match` carries `text`, `start`, `end` (byte offsets into the subject) and
 `groups: Group?[]`, where `groups[0]` is the whole match. Reach a group by
@@ -563,19 +564,19 @@ println(v.compare(Version.parse("1.4.2")!))     // -1: a pre-release is LOWER
 the optional components are `null` when absent, which the grammar keeps
 distinct from empty.
 
-| Method / function                | Signature                     | Behavior                                       |
-| -------------------------------- | ----------------------------- | ---------------------------------------------- |
-| `Version.parse(text)`            | `(string) -> Version!`        | the whole string must be a version             |
-| `Version.new(major, minor, patch)` | `(int64, int64, int64) -> Version` | no pre-release, no build             |
-| `v.to_string()`                  | `() -> string`                | parsing the result yields an equal version     |
-| `v.compare(other)`               | `(Version) -> int64`          | `-1` / `0` / `1` by precedence                 |
-| `v.equals` / `less_than` / `greater_than` | `(Version) -> bool`  | in terms of `compare`                          |
-| `v.is_prerelease()`              | `() -> bool`                  |                                                |
-| `v.prerelease_ids()`             | `() -> string[]`              | `"rc.1"` → `["rc", "1"]`                       |
-| `sort(versions)`                 | `(Version[]) -> Version[]`    | a new array, ascending                         |
+| Method / function                         | Signature                          | Behavior                                   |
+| ----------------------------------------- | ---------------------------------- | ------------------------------------------ |
+| `Version.parse(text)`                     | `(string) -> Version!`             | the whole string must be a version         |
+| `Version.new(major, minor, patch)`        | `(int64, int64, int64) -> Version` | no pre-release, no build                   |
+| `v.to_string()`                           | `() -> string`                     | parsing the result yields an equal version |
+| `v.compare(other)`                        | `(Version) -> int64`               | `-1` / `0` / `1` by precedence             |
+| `v.equals` / `less_than` / `greater_than` | `(Version) -> bool`                | in terms of `compare`                      |
+| `v.is_prerelease()`                       | `() -> bool`                       |                                            |
+| `v.prerelease_ids()`                      | `() -> string[]`                   | `"rc.1"` → `["rc", "1"]`                   |
+| `sort(versions)`                          | `(Version[]) -> Version[]`         | a new array, ascending                     |
 
 **Precedence** follows §11: major/minor/patch numerically, then a version with
-a pre-release *precedes* the same version without one (`1.0.0-rc.1 < 1.0.0`).
+a pre-release _precedes_ the same version without one (`1.0.0-rc.1 < 1.0.0`).
 Pre-release identifiers compare left to right — numeric ones numerically (so
 `beta.2 < beta.11`, not lexically) and before alphanumeric ones, which compare
 in ASCII order; if all shared identifiers are equal, the shorter list precedes.
@@ -601,34 +602,34 @@ cannot `read`.
 
 **`Tcp`** — a bidirectional byte-stream connection:
 
-| Method                     | Signature                  | Behavior                                             |
-| -------------------------- | -------------------------- | ----------------------------------------------------- |
-| `Tcp.connect(host, port)`  | `(string, int64) -> Tcp!`  | open a connection; `host` is an IP or a DNS name     |
-| `conn.read(max)`           | `(int64) -> uint8[]!`      | up to `max` bytes; fewer on a short read              |
-| `conn.write(data)`         | `(uint8[]) -> int64!`      | write all of `data`                                   |
-| `conn.local_addr()` / `conn.peer_addr()` | `() -> string!` | the `"ip:port"` of each end                          |
-| `conn.set_timeout(ms)`     | `(int64) -> void!`         | read/write timeout; 0 clears it                       |
-| `conn.close()`             | `() -> void!`              |                                                       |
+| Method                                   | Signature                 | Behavior                                         |
+| ---------------------------------------- | ------------------------- | ------------------------------------------------ |
+| `Tcp.connect(host, port)`                | `(string, int64) -> Tcp!` | open a connection; `host` is an IP or a DNS name |
+| `conn.read(max)`                         | `(int64) -> uint8[]!`     | up to `max` bytes; fewer on a short read         |
+| `conn.write(data)`                       | `(uint8[]) -> int64!`     | write all of `data`                              |
+| `conn.local_addr()` / `conn.peer_addr()` | `() -> string!`           | the `"ip:port"` of each end                      |
+| `conn.set_timeout(ms)`                   | `(int64) -> void!`        | read/write timeout; 0 clears it                  |
+| `conn.close()`                           | `() -> void!`             |                                                  |
 
 **`TcpListener`** — produces `Tcp` connections:
 
-| Method                          | Signature                          | Behavior                                        |
-| ------------------------------- | ---------------------------------- | ------------------------------------------------ |
-| `TcpListener.bind(host, port)`  | `(string, int64) -> TcpListener!`  | bind and listen; port 0 picks an ephemeral port |
-| `listener.accept()`             | `() -> Tcp!`                       | block until a connection arrives                 |
-| `listener.local_addr()`         | `() -> string!`                    | reads back an OS-picked port                     |
-| `listener.close()`              | `() -> void!`                      |                                                  |
+| Method                         | Signature                         | Behavior                                        |
+| ------------------------------ | --------------------------------- | ----------------------------------------------- |
+| `TcpListener.bind(host, port)` | `(string, int64) -> TcpListener!` | bind and listen; port 0 picks an ephemeral port |
+| `listener.accept()`            | `() -> Tcp!`                      | block until a connection arrives                |
+| `listener.local_addr()`        | `() -> string!`                   | reads back an OS-picked port                    |
+| `listener.close()`             | `() -> void!`                     |                                                 |
 
 **`Udp`** — a datagram socket:
 
-| Method                              | Signature                              | Behavior                                    |
-| ----------------------------------- | -------------------------------------- | -------------------------------------------- |
-| `Udp.bind(host, port)`              | `(string, int64) -> Udp!`              | port 0 picks an ephemeral port              |
-| `sock.send_to(data, host, port)`    | `(uint8[], string, int64) -> int64!`   | send one datagram                            |
-| `sock.recv_from(max)`               | `(int64) -> Datagram!`                 | block for one datagram of up to `max` bytes |
-| `sock.local_addr()`                 | `() -> string!`                        |                                              |
-| `sock.set_timeout(ms)`              | `(int64) -> void!`                     |                                              |
-| `sock.close()`                      | `() -> void!`                          |                                              |
+| Method                           | Signature                            | Behavior                                    |
+| -------------------------------- | ------------------------------------ | ------------------------------------------- |
+| `Udp.bind(host, port)`           | `(string, int64) -> Udp!`            | port 0 picks an ephemeral port              |
+| `sock.send_to(data, host, port)` | `(uint8[], string, int64) -> int64!` | send one datagram                           |
+| `sock.recv_from(max)`            | `(int64) -> Datagram!`               | block for one datagram of up to `max` bytes |
+| `sock.local_addr()`              | `() -> string!`                      |                                             |
+| `sock.set_timeout(ms)`           | `(int64) -> void!`                   |                                             |
+| `sock.close()`                   | `() -> void!`                        |                                             |
 
 `Datagram` is `{ data: uint8[], addr: string }` — one received datagram with
 its sender's address. The prelude helpers `to_bytes(s) -> uint8[]` and
@@ -658,12 +659,12 @@ server name taken from `host`; there are no configuration knobs (no custom
 CAs, no server side yet). `TlsStream` mirrors `Tcp`, so code written against
 `read`/`write` structurally accepts either:
 
-| Method                          | Signature                        | Behavior                                              |
-| ------------------------------- | -------------------------------- | ------------------------------------------------------ |
-| `TlsStream.connect(host, port)` | `(string, int64) -> TlsStream!`  | TCP connect + full handshake; certificate errors fail here |
-| `conn.read(max)`                | `(int64) -> uint8[]!`            | up to `max` decrypted bytes; empty at end-of-stream    |
-| `conn.write(data)`              | `(uint8[]) -> int64!`            | encrypt and send all of `data`                         |
-| `conn.close()`                  | `() -> void!`                    | sends the TLS close notification                       |
+| Method                          | Signature                       | Behavior                                                   |
+| ------------------------------- | ------------------------------- | ---------------------------------------------------------- |
+| `TlsStream.connect(host, port)` | `(string, int64) -> TlsStream!` | TCP connect + full handshake; certificate errors fail here |
+| `conn.read(max)`                | `(int64) -> uint8[]!`           | up to `max` decrypted bytes; empty at end-of-stream        |
+| `conn.write(data)`              | `(uint8[]) -> int64!`           | encrypt and send all of `data`                             |
+| `conn.close()`                  | `() -> void!`                   | sends the TLS close notification                           |
 
 ```brass norun
 import net.{ TlsStream }

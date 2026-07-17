@@ -16,7 +16,7 @@ of the call to the checker, which settles that body next.
 
 Compilation is as lazy as checking: only the entry (the initializers and
 `main`) compiles before execution starts. A call to a function whose
-signature is annotation-determined compiles into a *deferred site*; the
+signature is annotation-determined compiles into a _deferred site_; the
 first time execution actually reaches it, the function is monomorphized and
 compiled on the spot — waiting for the checker first if its body is still
 being inferred. A `spawn` pre-compiles everything the spawned task could
@@ -56,13 +56,13 @@ per function instance.
 
 ## Two back ends
 
-|                        | JIT (default)          | Interpreter                                                     |
-| ---------------------- | ---------------------- | --------------------------------------------------------------- |
-| Engine                 | LLVM-based native code | tree-walking, pure Rust                                         |
-| Used by                | `brass file.cz`      | `brass repl`, wasm/playground, `--no-default-features` builds |
-| Library plugins (fs, process, net, path) | yes  | yes (the plugins execute natively either way)                   |
-| Concurrency            | yes                    | refused at runtime                                              |
-| Runtime specialization | yes                    | refused at runtime                                              |
+|                                          | JIT (default)          | Interpreter                                                   |
+| ---------------------------------------- | ---------------------- | ------------------------------------------------------------- |
+| Engine                                   | LLVM-based native code | tree-walking, pure Rust                                       |
+| Used by                                  | `brass file.cz`        | `brass repl`, wasm/playground, `--no-default-features` builds |
+| Library plugins (fs, process, net, path) | yes                    | yes (the plugins execute natively either way)                 |
+| Concurrency                              | yes                    | refused at runtime                                            |
+| Runtime specialization                   | yes                    | refused at runtime                                            |
 
 Both back ends implement the same semantics for the sequential language
 surface and are tested against each other. The driver is built with the `jit`
@@ -111,6 +111,14 @@ brass check program.cz   # check only (always whole-program)
 brass repl [program.cz]  # interpreter / interactive REPL
 czls                       # LSP server (hover, diagnostics, completion,
                            # go-to-definition, semantic tokens)
+```
+
+Driver options such as `--eager` are parsed before the program file. Everything
+after that file is passed to the program verbatim, including flag-shaped values,
+and can be read with `env.args()`:
+
+```bash
+brass --eager program.cz input.txt --verbose
 ```
 
 The LSP server builds without LLVM, checks incrementally, and also targets

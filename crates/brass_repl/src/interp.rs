@@ -555,7 +555,7 @@ impl<'p, 'm> Interp<'p, 'm> {
                 let v = self.eval_operand(f, frame, &args[2], &elem)?;
                 if let Value::Array(a) = arr {
                     let mut b = a.borrow_mut();
-                    let i = (idx as usize).min(b.len());
+                    let i = idx.clamp(0, b.len() as i64) as usize;
                     b.insert(i, v);
                 }
                 return Ok(Value::Void);
@@ -1094,7 +1094,7 @@ fn int_bin(op: BinOp, a: i64, b: i64, k: IntKind) -> Result<Value, String> {
         BinOp::Mul => a.wrapping_mul(b),
         BinOp::Div => {
             if b == 0 {
-                return Err("integer division by zero".into());
+                return Err("division by zero".into());
             }
             if signed {
                 a.wrapping_div(b)
@@ -1104,7 +1104,7 @@ fn int_bin(op: BinOp, a: i64, b: i64, k: IntKind) -> Result<Value, String> {
         }
         BinOp::Rem => {
             if b == 0 {
-                return Err("integer remainder by zero".into());
+                return Err("division by zero".into());
             }
             if signed {
                 a.wrapping_rem(b)
@@ -1394,7 +1394,7 @@ fn from_plugin_value(v: brass_plugin_host::Value) -> Value {
 fn string_slice(s: &str, start: i64, end: i64) -> String {
     let len = s.len() as i64;
     let lo = start.clamp(0, len) as usize;
-    let hi = end.clamp(start.max(0), len) as usize;
+    let hi = end.clamp(lo as i64, len) as usize;
     let bytes = s.as_bytes();
     let lo = snap_boundary(bytes, lo);
     let hi = snap_boundary(bytes, hi);

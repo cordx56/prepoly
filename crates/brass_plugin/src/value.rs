@@ -149,7 +149,9 @@ impl Value {
             raw::TAG_FLOAT => Value::Float(raw.float),
             raw::TAG_STRING => {
                 let bytes = unsafe { core::slice::from_raw_parts(raw.ptr, raw.len) };
-                Value::Str(String::from_utf8_lossy(bytes).into_owned())
+                let text = core::str::from_utf8(bytes)
+                    .map_err(|e| format!("plugin returned invalid UTF-8 text: {e}"))?;
+                Value::Str(text.to_owned())
             }
             raw::TAG_BYTES => {
                 let bytes = unsafe { core::slice::from_raw_parts(raw.ptr, raw.len) };
@@ -448,5 +450,21 @@ mod tests {
         let raw = v.clone().into_raw();
         assert_eq!(unsafe { Value::from_raw(&raw) }.unwrap(), v);
         unsafe { release_raw(raw) };
+    }
+
+    /// Text is required to be UTF-8 at the ABI boundary. Invalid bytes must
+    /// remain distinguishable from valid text instead of being rewritten.
+    #[test]
+    fn invalid_utf8_is_rejected() {
+        let bytes = [0xff];
+        let raw = RawValue {
+            tag: raw::TAG_STRING,
+            int: 0,
+            float: 0.0,
+            ptr: bytes.as_ptr(),
+            len: bytes.len(),
+        };
+        let err = unsafe { Value::from_raw(&raw) }.expect_err("invalid UTF-8");
+        assert!(err.contains("invalid UTF-8"), "{err}");
     }
 }

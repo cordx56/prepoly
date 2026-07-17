@@ -20,6 +20,8 @@ import libfs.{
     fd_write,
     fd_seek,
     fd_close,
+    fs_read_all,
+    fs_write_all,
     file_remove,
     file_copy,
     file_move,
@@ -76,7 +78,7 @@ fun File.stderr() -> File {
     return File { _fd: 2, _path: "" }
 }
 
-/** Block for data and read up to `max` bytes (fewer on a short read; empty at end-of-file). */
+/** Block for data and read up to non-negative `max` bytes (fewer on a short read; empty at end-of-file). */
 fun File.read(self, max: int64) -> uint8[]! {
     return fd_read(self._fd, max)!
 }
@@ -86,7 +88,7 @@ fun File.write(self, data: uint8[]) -> int64! {
     return fd_write(self._fd, data)!
 }
 
-/** Move the read/write cursor to absolute byte offset `pos` from the start. Fallible. */
+/** Move the read/write cursor to non-negative absolute byte offset `pos` from the start. Fallible. */
 fun File.seek(self, pos: int64) {
     fd_seek(self._fd, pos)!
 }
@@ -121,11 +123,7 @@ fun File.close(self) {
  * file cannot be opened or does not hold valid UTF-8.
  */
 fun read_file(path) {
-    let f = File.open(path, "r")!
-    let size = f.size()!
-    let bytes = f.read(size)!
-    f.close()!
-    return to_text(bytes)!
+    return to_text(fs_read_all(_as_text(path)!)!)!
 }
 
 /**
@@ -134,9 +132,7 @@ fun read_file(path) {
  * (`create_dir` does that). Fallible: returns a `Result`.
  */
 fun write_file(path, content: string) {
-    let f = File.open(path, "w")!
-    f.write(to_bytes(content))!
-    f.close()!
+    fs_write_all(_as_text(path)!, to_bytes(content))!
 }
 
 /**

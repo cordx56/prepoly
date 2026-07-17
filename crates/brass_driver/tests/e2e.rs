@@ -68,6 +68,7 @@ fn libraries_root() -> PathBuf {
 
 /// The libraries whose native halves the suite builds: the cargo package
 /// building each plugin, and the module/library name it is imported under.
+#[cfg(feature = "jit")]
 const NATIVE_LIBRARIES: &[(&str, &str)] = &[
     ("brass_lib_process", "process"),
     ("brass_lib_path", "path"),

@@ -237,11 +237,12 @@ pub struct LoadError {
 /// Module roots beyond the project directory, from two environment variables
 /// that may be set together:
 ///
-/// - `BRASS_PACKAGES` (`name=/dir:name2=/dir2:...`), set by the package
-///   manager: a name-keyed map. An import whose FIRST segment is a declared
-///   name resolves under that entry's directory and nowhere else, so a
-///   manifest scopes exactly which external modules a project sees.
-/// - `BRASS_INCLUDE` (`/dir:/dir2:...`), set by the user or a distribution:
+/// - `BRASS_PACKAGES`, set by the package manager: an OS path list of
+///   `name=/dir` entries (`:`-separated on Unix, `;`-separated on Windows).
+///   It is a name-keyed map. An import whose FIRST segment is a declared name
+///   resolves under that entry's directory and nowhere else, so a manifest
+///   scopes exactly which external modules a project sees.
+/// - `BRASS_INCLUDE`, set by the user or a distribution: an OS path list of
 ///   ordered open roots. Any module under an include path is importable as if
 ///   it sat next to the entry file; the project root is searched first, then
 ///   each include path in list order, so a local file shadows an include
@@ -265,23 +266,33 @@ impl SearchPaths {
     /// nothing. The implicit entry comes last, so explicit include paths and
     /// package declarations always win.
     pub fn from_env() -> Self {
-        let packages = std::env::var("BRASS_PACKAGES")
-            .unwrap_or_default()
-            .split(':')
-            .filter_map(|entry| {
-                let (name, path) = entry.split_once('=')?;
-                Some((name.to_string(), PathBuf::from(path)))
-            })
-            .collect();
-        let mut includes: Vec<PathBuf> = std::env::var("BRASS_INCLUDE")
-            .unwrap_or_default()
-            .split(':')
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .collect();
+        let packages = package_paths(std::env::var_os("BRASS_PACKAGES"));
+        let mut includes = include_paths(std::env::var_os("BRASS_INCLUDE"));
         includes.extend(distribution_libraries_dir());
         SearchPaths { packages, includes }
     }
+}
+
+fn package_paths(value: Option<std::ffi::OsString>) -> HashMap<String, PathBuf> {
+    let Some(value) = value else {
+        return HashMap::new();
+    };
+    std::env::split_paths(&value)
+        .filter_map(|entry| {
+            let entry = entry.to_str()?;
+            let (name, path) = entry.split_once('=')?;
+            (!name.is_empty() && !path.is_empty()).then(|| (name.to_string(), PathBuf::from(path)))
+        })
+        .collect()
+}
+
+fn include_paths(value: Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    std::env::split_paths(&value)
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect()
 }
 
 /// The `libraries/` directory a distributed toolchain ships beside its
@@ -708,5 +719,37 @@ fn load_synthesized(
             ),
             span: trigger_span,
         }),
+    }
+}
+
+#[cfg(test)]
+mod search_path_tests {
+    use super::{include_paths, package_paths};
+
+    /// Search-path parsing follows the platform's own list separator and drops
+    /// malformed or empty package entries without losing valid neighbors.
+    #[test]
+    fn environment_path_lists_use_platform_rules() {
+        let packages = std::env::join_paths([
+            "first=one",
+            "malformed",
+            "=empty-name",
+            "empty-path=",
+            "second=two",
+        ])
+        .expect("join package entries");
+        let packages = package_paths(Some(packages));
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages["first"], std::path::Path::new("one"));
+        assert_eq!(packages["second"], std::path::Path::new("two"));
+
+        let includes = std::env::join_paths(["one", "two"]).expect("join include entries");
+        assert_eq!(
+            include_paths(Some(includes)),
+            [
+                std::path::PathBuf::from("one"),
+                std::path::PathBuf::from("two")
+            ]
+        );
     }
 }

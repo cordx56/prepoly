@@ -57,9 +57,21 @@ fn trailing_arguments_reach_args() {
     .expect("write the program");
 
     // Everything after the file is the program's, verbatim: flag-shaped
-    // arguments, spaces, and words that name driver subcommands must not be
-    // consumed by the driver's own CLI.
-    let args = ["alpha", "--beta", "with space", "check", "repl"];
+    // arguments, spaces, words that name driver subcommands, and even the
+    // driver's OWN flags (`--eager`, `--help`, `--version`) and the `--`
+    // separator must not be consumed by the driver's CLI -- the command line
+    // is split at the program file before clap parses it (see `parse_cli`).
+    let args = [
+        "alpha",
+        "--beta",
+        "with space",
+        "check",
+        "repl",
+        "--eager",
+        "--help",
+        "--version",
+        "--",
+    ];
     let mut expected = format!("{}\n", program.display());
     for a in args {
         expected.push_str(a);

@@ -1,14 +1,13 @@
-#!/bin/bash
+#!/bin/sh
 
-if [ -z "$BRASS_VERSION" ]; then
-    # release version
-    BRASS_VERSION="v0.1.0"
-fi
+set -eu
+
+BRASS_VERSION="${BRASS_VERSION:-latest}"
 BRASS_REPO_BASE_URL="https://github.com/brass-cz/brass"
 
 # print host-tuple
 print_host_tuple() {
-    if [ -z "$TOOLCHAIN_OS" ]; then
+    if [ -z "${TOOLCHAIN_OS:-}" ]; then
         # Get OS
         case "$(uname -s)" in
             Linux)
@@ -27,7 +26,7 @@ print_host_tuple() {
         esac
     fi
 
-    if [ -z "$TOOLCHAIN_ARCH" ]; then
+    if [ -z "${TOOLCHAIN_ARCH:-}" ]; then
         # Get architecture
         case "$(uname -m)" in
             arm64|aarch64)
@@ -59,6 +58,9 @@ if [ "$BRASS_VERSION" = "latest" ]; then
 else
     url="$BRASS_REPO_BASE_URL/releases/download/$BRASS_VERSION/$tar_file"
 fi
-curl -L "$url" | tar -xz -C "$dest"
+download_dir="$(mktemp -d)"
+trap 'rm -rf "$download_dir"' 0
+curl -fSL "$url" -o "$download_dir/$tar_file"
+tar -xzf "$download_dir/$tar_file" -C "$dest"
 
 echo 'Add $HOME/.brass/bin to your PATH to complete the installation.'
