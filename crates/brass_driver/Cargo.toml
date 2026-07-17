@@ -30,10 +30,27 @@ tracing.workspace = true
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 brass_jit_llvm = { workspace = true, optional = true }
 inkwell = { workspace = true, optional = true }
+# The demand-driven half of the lazy pipeline: the driver lowers MIR bodies
+# as their checks stream in and monomorphizes from the entry roots itself.
+brass_mir = { workspace = true, optional = true }
+brass_engine = { workspace = true, optional = true }
+# The lazy-check pipeline (type inference on a checker thread alongside JIT
+# execution) is part of the JIT back end, so its runtime rides the same
+# native-only optional-dependency pattern: a wasm build -- which cannot spawn
+# threads -- never compiles any of the threading code and always checks
+# eagerly, the same way the language server confines its threaded runtime to
+# native targets.
+tokio = { version = "1", features = ["rt", "sync"], optional = true }
 
 [features]
 default = ["jit"]
-jit = ["dep:brass_jit_llvm", "dep:inkwell"]
+jit = [
+    "dep:brass_jit_llvm",
+    "dep:inkwell",
+    "dep:tokio",
+    "dep:brass_mir",
+    "dep:brass_engine",
+]
 
 # The plugin e2e test builds and loads the in-repo fixture plugin.
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]

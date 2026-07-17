@@ -89,14 +89,14 @@ what checking the entry alone costs.
   storage symbols), falling back to the full pipeline.
 
 Measured on the `serv` HTTP-server project: an entry edit re-checks in ~20ms
-(was ~300ms), an editor save publishes in ~10ms (was ~530ms). On `czm` (a
+(was ~300ms), an editor save publishes in ~10ms (was ~530ms). On `czpm` (a
 reflective program): an entry edit re-checks in ~0.3s (was ~2.2s).
 
 ## The analysis cache (`.czcache`)
 
 A clean run writes the front end's results next to the entry file —
-`app.cz` produces `app.czcache` (an extension-less script such as `czm`
-produces `czm.czcache`). The next run of the same entry reuses it and skips
+`app.cz` produces `app.czcache` (an extension-less script such as `czpm`
+produces `czpm.czcache`). The next run of the same entry reuses it and skips
 type checking entirely, going straight from a cheap re-lowering to MIR:
 
 ```text
@@ -156,8 +156,8 @@ directory is ignored) and atomic (temporary file + rename).
 ### Distributed caches
 
 Because stamps are origin-relative and content-addressed, a cache written when
-a release is packed validates wherever the archive is unpacked: `czm` ships
-with its `bin/czm.czcache`, whose stamps resolve through the installed
+a release is packed validates wherever the archive is unpacked: `czpm` ships
+with its `bin/czpm.czcache`, whose stamps resolve through the installed
 `libraries/` next to it, so the package manager starts warm from its first
 run. A released compiler is identified by channel and commit, so every install
 of the same release reproduces the packing machine's tag.

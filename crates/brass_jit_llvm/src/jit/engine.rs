@@ -63,6 +63,15 @@ pub fn run(
         "back/monomorphize: total {:.3}ms",
         t.elapsed().as_secs_f64() * 1000.0
     );
+    run_mono(program, &mono)
+}
+
+/// Compile and run an already-monomorphized program: the back half of
+/// [`run`], shared with the lazy pipeline (which builds its `MonoProgram`
+/// through demand-driven lowering instead of the whole-program pass).
+/// Rejects a program whose `main` fell outside the typed subset, builds one
+/// LLVM context/backend, and drives codegen + execution.
+pub fn run_mono(program: &Program, mono: &brass_engine::MonoProgram) -> Result<(), String> {
     // No Value fallback: a program outside the typed subset is rejected. The
     // skip reason names the first offending construct -- without it the user
     // sees only the generic sentence for a program the checker accepted.
@@ -76,7 +85,7 @@ pub fn run(
     }
     let context = Context::create();
     let mut backend = crate::LlvmCodegen::new_backend(&context, program);
-    brass_engine::Engine::run(&mut backend, &mono)
+    brass_engine::Engine::run(&mut backend, mono)
 }
 
 /// Map every runtime primitive the module declares to its host address. This

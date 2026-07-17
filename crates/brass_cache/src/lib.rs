@@ -282,7 +282,7 @@ pub struct Payload {
 }
 
 /// The cache path for an entry file: `app.cz` -> `app.czcache`, next to it.
-/// An extensionless entry (a `#!` script such as `czm`) gains the extension.
+/// An extensionless entry (a `#!` script such as `czpm`) gains the extension.
 pub fn cache_path(entry: &Path) -> PathBuf {
     entry.with_extension("czcache")
 }

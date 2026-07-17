@@ -1,0 +1,26 @@
+// The demand pipeline: main is checked and compiled first, and each callee
+// is pulled to the front of the checking order when compilation needs it.
+// Definition order deliberately reverses the call order, and the generic
+// helper is instantiated at two types so its per-instantiation entries must
+// agree across the streamed deltas.
+fun main() {
+    println(outer(4))
+    println(pick("lazy"))
+    println(pick(7))
+}
+
+fun outer(v: int32) -> int32 {
+    return middle(v) + 1
+}
+
+fun middle(v: int32) -> int32 {
+    return inner(v) * 2
+}
+
+fun inner(v: int32) -> int32 {
+    return v + 3
+}
+
+fun pick(v) {
+    return v
+}

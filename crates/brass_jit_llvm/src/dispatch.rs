@@ -96,6 +96,61 @@ pub fn with_dispatcher<R>(dispatcher: &mut RuntimeDispatcher, body: impl FnOnce(
     out
 }
 
+/// Deferred-site addresses already resolved, readable from ANY thread. A
+/// worker thread executing spawned code answers its deferred calls here --
+/// workers cannot compile (the LLVM engine lives on the main thread), so the
+/// main thread primes every recorded target before a spawning batch runs
+/// (see the driver's spawn drain), and this cache is how those answers
+/// cross threads. Keyed by instance symbol (the empty-type-string flavor of
+/// [`pp_resolve`]).
+static RESOLVED: std::sync::LazyLock<std::sync::RwLock<std::collections::HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+
+/// Record a resolved deferred-site address for every thread to read.
+pub fn prime_resolved(symbol: &str, addr: usize) {
+    if let Ok(mut map) = RESOLVED.write() {
+        map.insert(symbol.to_string(), addr);
+    }
+}
+
+/// The lazy JIT's resolver, type-erased for the thread-local slot: the
+/// backend the resolver may compile into, and the driver's resolution
+/// closure (which owns the checker channels and the growing MIR program).
+/// Split so the closure receives the backend re-materialized -- the two
+/// live in one slot precisely because `pp_resolve` is entered from JIT
+/// code while `execute_deferred` holds the backend.
+struct DeferredSlot {
+    backend: *mut (),
+    resolve: *mut (),
+}
+
+thread_local! {
+    /// The [`DeferredSlot`] installed for the current lazy run.
+    static CURRENT_DEFERRED: Cell<*mut ()> = const { Cell::new(ptr::null_mut()) };
+}
+
+/// Install the lazy resolver for the duration of `body` (running the
+/// program), so [`pp_resolve`] reaches it. Same discipline as
+/// [`with_dispatcher`]: the raw pointers are valid only within `body`, and
+/// `body` must not otherwise touch the backend or the closure.
+pub(crate) fn with_deferred_resolver<'ctx, 'p, R>(
+    backend: &mut crate::codegen::LlvmCodegen<'ctx, 'p>,
+    resolve: &mut dyn FnMut(&mut crate::codegen::LlvmCodegen<'ctx, 'p>, &str) -> usize,
+    body: impl FnOnce() -> R,
+) -> R {
+    let mut resolve = resolve;
+    let mut slot = DeferredSlot {
+        backend: backend as *mut crate::codegen::LlvmCodegen<'ctx, 'p> as *mut (),
+        resolve: &mut resolve
+            as *mut &mut dyn FnMut(&mut crate::codegen::LlvmCodegen<'ctx, 'p>, &str) -> usize
+            as *mut (),
+    };
+    let prev = CURRENT_DEFERRED.with(|c| c.replace(&mut slot as *mut DeferredSlot as *mut ()));
+    let out = body();
+    CURRENT_DEFERRED.with(|c| c.set(prev));
+    out
+}
+
 /// The dispatch trampoline generated code calls: resolve-or-
 /// compile the consumer named by `[name_ptr, name_len]` for the runtime type
 /// named by `[type_ptr, type_len]`, returning its callable address (0 if no
@@ -112,6 +167,40 @@ pub unsafe extern "C" fn pp_resolve(
     type_len: usize,
 ) -> usize {
     unsafe {
+        // The lazy JIT's sites pass the instance symbol with an empty type
+        // string. Already-resolved targets answer from the cross-thread
+        // cache -- the only path a worker thread (spawned code) can take,
+        // and the fast path for everyone else.
+        if type_len == 0 {
+            let name = std::str::from_utf8(std::slice::from_raw_parts(name_ptr, name_len));
+            if let Ok(name) = name
+                && let Ok(map) = RESOLVED.read()
+                && let Some(&addr) = map.get(name)
+            {
+                return addr;
+            }
+        }
+        // The compiling resolver: main-thread only. A worker reaching a
+        // target the spawn drain did not prime reads null here and the site
+        // traps -- kept defined, and unreachable while the drain invariant
+        // holds.
+        let deferred = CURRENT_DEFERRED.with(|c| c.get());
+        if !deferred.is_null() {
+            let slot = &mut *(deferred as *mut DeferredSlot);
+            let backend =
+                &mut *(slot.backend as *mut crate::codegen::LlvmCodegen<'static, 'static>);
+            let resolve = &mut *(slot.resolve
+                as *mut &mut dyn FnMut(
+                    &mut crate::codegen::LlvmCodegen<'static, 'static>,
+                    &str,
+                ) -> usize);
+            let Some(name) =
+                std::str::from_utf8(std::slice::from_raw_parts(name_ptr, name_len)).ok()
+            else {
+                return 0;
+            };
+            return resolve(backend, name);
+        }
         let cur = CURRENT.with(|c| c.get());
         if cur.is_null() {
             return 0;

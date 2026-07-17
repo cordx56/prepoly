@@ -1,18 +1,18 @@
 ---
 title: "Package manager"
-description: "Creating projects and managing dependencies with czm."
+description: "Creating projects and managing dependencies with czpm."
 ---
 
-Brass ships a minimal package manager called **czm** (Brass package
+Brass ships a minimal package manager called **czpm** (Brass package
 manager). It handles project scaffolding, dependency fetching, and
 compilation/execution with a handful of commands.
 
 ## Creating a project
 
-`czm new` creates a new directory and scaffolds a project inside it:
+`czpm new` creates a new directory and scaffolds a project inside it:
 
 ```bash
-czm new myapp
+czpm new myapp
 ```
 
 This creates a new directory with the following layout:
@@ -25,11 +25,11 @@ This creates a new directory with the following layout:
 | `myapp/AGENTS.md`   | Instructions teaching LLM agents Brass (see [LLM agents](/guides/llm/))    |
 | `myapp/CLAUDE.md`   | Symlink to `AGENTS.md`, so Claude Code reads the same instructions           |
 
-To initialize a project in the current directory instead, use `czm init`:
+To initialize a project in the current directory instead, use `czpm init`:
 
 ```bash
 mkdir myapp && cd myapp
-czm init myapp
+czpm init myapp
 ```
 
 The generated `package.toml` looks like this:
@@ -52,8 +52,8 @@ The commented lines show the two dependency forms, ready to fill in.
 Inside a project directory (where `package.toml` lives), use:
 
 ```bash
-czm run      # compile and run
-czm check    # type-check only
+czpm run      # compile and run
+czpm check    # type-check only
 ```
 
 Both commands read `package.toml`, fetch any missing dependencies, set the
@@ -62,9 +62,9 @@ file (`<package-name>.cz`).
 
 ## The language server in a project
 
-`czm lsp` starts `czls` with the same dependency resolution, so editor
+`czpm lsp` starts `czls` with the same dependency resolution, so editor
 diagnostics, hover, and completion see the project's dependencies. Point your
-editor's LSP command at `czm lsp` instead of `czls` (see
+editor's LSP command at `czpm lsp` instead of `czls` (see
 [Installing the LSP server](/installation/lsp/)). In a directory without a
 `package.toml` it simply starts the plain server, so the one editor
 configuration works for projects and loose `.cz` files alike.
@@ -82,7 +82,7 @@ directory given by path. Add them to the `[dependencies]` section of
 "mylib"    = { path = "../mylib" }
 ```
 
-When you run `czm run` or `czm check`, each Git dependency is cloned to
+When you run `czpm run` or `czpm check`, each Git dependency is cloned to
 `~/.brass/packages/<name>-git-<hash>` if it is not already present, and
 then checked out at the pinned commit.
 
@@ -90,7 +90,7 @@ A `path` dependency is used in place — nothing is copied or fetched. The
 path is resolved relative to the project root (the directory holding
 `package.toml`) and must point at the dependency project's root directory:
 the one containing its `<package-name>.cz` root file. Edits to the
-dependency are picked up on the next `czm run`/`czm check` with no extra
+dependency are picked up on the next `czpm run`/`czpm check` with no extra
 step, which makes `path` the form to use while developing a library
 alongside its consumer; a dependency cannot combine `path` with
 `git`/`hash`.
@@ -113,7 +113,7 @@ import geometry
 
 The package root file is `<package-name>.cz` inside the dependency directory,
 and sub-modules live under the `<package-name>/` directory — the same
-layout that `czm new` creates.
+layout that `czpm new` creates.
 
 ## Writing a library package
 
@@ -133,7 +133,7 @@ mylib/
 
 ## How it works
 
-`czm` sets the environment variable `BRASS_PACKAGES` before invoking
+`czpm` sets the environment variable `BRASS_PACKAGES` before invoking
 `brass`. The format is a colon-separated list of `name=path` entries:
 
 ```
@@ -143,7 +143,7 @@ BRASS_PACKAGES=geometry=/home/user/.brass/packages/geometry-git-a1b2c3d4:utils=/
 An import whose first segment is a declared name resolves under that entry's
 directory — and only there. The manifest therefore scopes exactly which
 external modules the project sees, and a declared name cannot be shadowed by
-a same-named local file. `czm` warns when a dependency directory contains no
+a same-named local file. `czpm` warns when a dependency directory contains no
 module of the declared name (the misnamed entry would otherwise only fail at
 its first import). Both the compiler and the language server read the
 variable at startup, so editor diagnostics and completions work for
@@ -151,7 +151,7 @@ dependencies too.
 
 ## Include paths
 
-Outside of `czm` projects — or alongside them — the compiler also honors
+Outside of `czpm` projects — or alongside them — the compiler also honors
 `BRASS_INCLUDE`, a colon-separated list of plain directories:
 
 ```

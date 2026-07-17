@@ -250,14 +250,16 @@ impl Monomorphizer<'_, '_> {
                 let recv_ty = pass_args
                     .first()
                     .and_then(|a| self.operand_type(a, caller_local_types).ok().flatten());
-                let prim = recv_ty
-                    .as_ref()
-                    .and_then(|t| t.primitive_class())
-                    .and_then(|class| {
-                        self.program
-                            .primitive_methods
-                            .get(&(class.to_string(), base.to_string()))
-                    })
+                let prim_symbol =
+                    recv_ty
+                        .as_ref()
+                        .and_then(|t| t.primitive_class())
+                        .and_then(|class| {
+                            self.program
+                                .primitive_methods
+                                .get(&(class.to_string(), base.to_string()))
+                        });
+                let prim = prim_symbol
                     .and_then(|s| self.by_fn.get(s.as_str()))
                     .map(|f| (&f.body, f.module.as_slice()));
                 let user = recv_ty
@@ -271,7 +273,28 @@ impl Monomorphizer<'_, '_> {
                     .map(|m| (&m.body, m.module.as_slice()));
                 match prim.or(user) {
                     Some(b) => b,
-                    None => return Ok(None),
+                    None => {
+                        // The probe may have missed only because the body is
+                        // not lowered yet (the lazy pipeline supplies function
+                        // bodies on demand): note the demand -- the bare name,
+                        // or the storage symbol a primitive method resolved to
+                        // -- so the caller can lower it and retry, instead of
+                        // reading the miss as an untypeable closure.
+                        let demand = if self.program.functions.contains_key(base) {
+                            Some(base)
+                        } else {
+                            prim_symbol
+                                .map(|s| s.as_str())
+                                .filter(|s| self.program.functions.contains_key(*s))
+                        };
+                        if let Some(symbol) = demand
+                            && self.missing_demand.borrow().is_none()
+                        {
+                            *self.missing_demand.borrow_mut() =
+                                Some((symbol.to_string(), Vec::new()));
+                        }
+                        return Ok(None);
+                    }
                 }
             }
         };
@@ -475,6 +498,9 @@ impl Monomorphizer<'_, '_> {
             .copied()
             .zip(capture_types.iter().cloned())
             .collect();
+        // Closure bodies never defer (see `Monomorphizer::closure_depth`);
+        // the depth must unwind on failure too, so `?` waits for the balance.
+        self.closure_depth += 1;
         let stored = self.type_and_store(
             sym,
             &clo.body,
@@ -487,7 +513,9 @@ impl Monomorphizer<'_, '_> {
             clo.captures.clone(),
             true,
             false,
-        )?;
+        );
+        self.closure_depth -= 1;
+        let stored = stored?;
         Ok(self.instances[&stored].ret.clone())
     }
 }

@@ -1,0 +1,9 @@
+// An error in code execution WILL need: the demand gate reports it before
+// anything runs, with the same diagnostics the eager pipeline prints.
+fun helper(v: int32) -> int32 {
+    return v + "one"
+}
+
+fun main() {
+    println(helper(1))
+}

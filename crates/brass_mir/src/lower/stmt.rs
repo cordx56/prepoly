@@ -20,7 +20,7 @@ use crate::value::{Literal, Operand, Place, Projection, Rvalue};
 /// `None` so the binding stays inferred (monomorphization recovers them from use);
 /// this preserves annotations the initializer or call site alone is ambiguous
 /// about, such as `int32?` for a `null` (a `let`, or a nullable parameter).
-pub(crate) fn resolve_simple_type(te: &TypeExpr) -> Option<Type> {
+pub fn resolve_simple_type(te: &TypeExpr) -> Option<Type> {
     match te {
         TypeExpr::Named(name, _) => primitive_type(name),
         TypeExpr::Nullable(inner, _) => Some(Type::Nullable(Box::new(resolve_simple_type(inner)?))),

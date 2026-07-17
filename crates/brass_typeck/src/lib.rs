@@ -14,6 +14,7 @@ pub mod hm;
 pub mod infer;
 pub mod interface;
 pub mod narrow;
+pub mod stream;
 pub mod structural;
 mod walk;
 
@@ -120,6 +121,28 @@ pub fn analyze(program: &Program) -> Analysis {
 /// context also defines: the collision qualifies the context's storage symbols
 /// in the combined program, detaching every seeded table key.
 pub fn analyze_with(program: &Program, seed: Option<&ContextTables>) -> Analysis {
+    analyze_impl(program, seed, None)
+}
+
+/// [`analyze_with`], streaming progress to `sched` (the lazy-check
+/// pipeline): bodies are checked in an execution-first order the scheduler
+/// can reprioritize between bodies, and each body's completion delivers the
+/// delta of checker channels recorded in its window (see [`stream`]). The
+/// returned `Analysis` is equivalent to the eager one; the event stream is
+/// an incremental view of it, ending with [`stream::CheckEvent::Finished`].
+pub fn analyze_streaming(
+    program: &Program,
+    seed: Option<&ContextTables>,
+    sched: &mut dyn stream::Scheduler,
+) -> Analysis {
+    analyze_impl(program, seed, Some(sched))
+}
+
+fn analyze_impl(
+    program: &Program,
+    seed: Option<&ContextTables>,
+    sched: Option<&mut dyn stream::Scheduler>,
+) -> Analysis {
     let entry_declares =
         |name: &str| {
             program.functions.values().any(|f| {
@@ -145,7 +168,17 @@ pub fn analyze_with(program: &Program, seed: Option<&ContextTables>) -> Analysis
     // functional core and rejects unification conflicts the ad-hoc pass may miss.
     errors.extend(hm::check(program));
     tracing::debug!(after_hm = errors.len(), "errors after Hindley-Milner pass");
-    let infer = infer::analyze_with(program, seed);
+    // A streaming consumer that intends to execute learns the static
+    // verdict before any body event: an error here is fatal to execution.
+    let mut ctl = sched.map(|sched| stream::StreamCtl {
+        sched,
+        state: Default::default(),
+    });
+    if let Some(ctl) = &mut ctl {
+        ctl.sched
+            .emit(stream::CheckEvent::StaticChecked(errors.clone()));
+    }
+    let (infer, final_delta) = infer::analyze_inner(program, seed, ctl.as_mut());
     // Exhaustiveness depends on the scrutinee's inferred nominal id. Running it
     // after inference prevents a same-named variant in another sum from being
     // mistaken for the match's owner.
@@ -157,6 +190,12 @@ pub fn analyze_with(program: &Program, seed: Option<&ContextTables>) -> Analysis
     errors.sort_by(|a, b| (a.span.lo, &a.message).cmp(&(b.span.lo, &b.message)));
     errors.dedup();
     tracing::debug!(total = errors.len(), "type analysis finished");
+    if let Some(ctl) = ctl {
+        ctl.sched.emit(stream::CheckEvent::Finished(
+            final_delta.unwrap_or_default(),
+            errors.clone(),
+        ));
+    }
     Analysis {
         errors,
         typed: infer.typed,

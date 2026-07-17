@@ -1,0 +1,11 @@
+// Lazy checking must not change WHETHER errors surface, only when: this
+// function is never called, so execution never depends on it and may even
+// have finished before the checker reaches it -- the run must still exit
+// non-zero with the diagnostic.
+fun never_called() -> int32 {
+    return "not an int"
+}
+
+fun main() {
+    println("reachable code ran")
+}

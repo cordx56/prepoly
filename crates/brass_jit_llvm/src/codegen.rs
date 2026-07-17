@@ -96,6 +96,12 @@ struct MirState<'ctx> {
     engine: Option<inkwell::execution_engine::ExecutionEngine<'ctx>>,
     /// Modules compiled at runtime (deferred monomorphization). Kept alive here
     /// because the execution engine references them after `add_module`.
+    /// Whether the CURRENT module is a runtime add-on (a lazily compiled
+    /// instance): its globals must DECLARE the startup module's storage --
+    /// an initializer here would define a second, zeroed copy the linker
+    /// happily keeps, and the body would read that instead of the program's
+    /// state.
+    in_runtime_module: bool,
     runtime_modules: Vec<Module<'ctx>>,
 }
 
@@ -2020,6 +2026,27 @@ impl<'ctx, 'p> brass_engine::RuntimeJit for LlvmCodegen<'ctx, 'p> {
         program: &MonoProgram,
         f: &MonoFunction,
     ) -> Result<usize, String> {
+        self.emit_instance_module(program, f)?;
+        let engine = self.mir.engine.as_ref().unwrap();
+        let addr = engine
+            .get_function_address(&mangle_fn(&f.symbol))
+            .map_err(|e| format!("runtime instance address unavailable: {e}"))?;
+        Ok(addr as usize)
+    }
+}
+
+impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
+    /// Emit one instance's definition into a fresh module and hand it to the
+    /// live engine WITHOUT resolving an address: an address lookup finalizes
+    /// every added module, and a mutually recursive batch (instance A calling
+    /// B directly) must have BOTH definitions added before either finalizes,
+    /// or the linker fails on the not-yet-added one. Batch emitters call this
+    /// per instance and fetch the one address they need afterwards.
+    pub fn emit_instance_module(
+        &mut self,
+        program: &MonoProgram,
+        f: &MonoFunction,
+    ) -> Result<(), String> {
         if self.mir.engine.is_none() {
             return Err("compile_instance called before finalize".to_string());
         }
@@ -2038,14 +2065,24 @@ impl<'ctx, 'p> brass_engine::RuntimeJit for LlvmCodegen<'ctx, 'p> {
         let saved_destructors = std::mem::take(&mut self.destructors);
         let saved_to_string_fns = std::mem::take(&mut self.to_string_fns);
         let saved_deep_copy_fns = std::mem::take(&mut self.deep_copy_fns);
+        let saved_tracers = std::mem::take(&mut self.tracers);
 
+        self.mir.in_runtime_module = true;
         self.begin_program(program);
         self.codegen_function(program, f);
+        self.mir.in_runtime_module = false;
         let verified = self
             .module
             .verify()
             .map_err(|e| format!("runtime instance verification failed:\n{}", e.to_string()));
 
+        // Debugging aid: dump each runtime module when requested
+        // (BRASS_LOG_TYPE=ir), mirroring `execute`'s dump of the startup
+        // module -- the first thing needed when a lazily compiled instance
+        // misbehaves relative to its eager twin.
+        if tracing::enabled!(target: "brass::ir", tracing::Level::TRACE) {
+            tracing::trace!(target: "brass::ir", "\n{}", self.module.print_to_string().to_string());
+        }
         let filled = std::mem::replace(&mut self.module, saved_module);
         self.fns = saved_fns;
         self.mir.globals = saved_globals;
@@ -2053,6 +2090,7 @@ impl<'ctx, 'p> brass_engine::RuntimeJit for LlvmCodegen<'ctx, 'p> {
         self.destructors = saved_destructors;
         self.to_string_fns = saved_to_string_fns;
         self.deep_copy_fns = saved_deep_copy_fns;
+        self.tracers = saved_tracers;
         verified?;
 
         // Keep the module alive and hand it to the live engine.
@@ -2063,10 +2101,64 @@ impl<'ctx, 'p> brass_engine::RuntimeJit for LlvmCodegen<'ctx, 'p> {
             .add_module(module_ref)
             .map_err(|_| "failed to add runtime module to engine".to_string())?;
         crate::jit::engine::map_runtime_symbols(engine, module_ref);
-        let addr = engine
-            .get_function_address(&mangle_fn(&f.symbol))
-            .map_err(|e| format!("runtime instance address unavailable: {e}"))?;
-        Ok(addr as usize)
+        Ok(())
+    }
+}
+
+impl<'ctx, 'p> LlvmCodegen<'ctx, 'p> {
+    /// [`brass_engine::Codegen::execute`] with the lazy JIT's runtime
+    /// resolution installed: while the program runs, a deferred call site's
+    /// `pp_resolve` lands in `resolve`, which may compile new instances into
+    /// this backend (through [`compile_instance`]) and returns the callable
+    /// address, or 0 when the instance cannot be supplied -- the site then
+    /// traps, after the resolver reported the real diagnostic.
+    ///
+    /// Entry addresses are fetched before installation and the program runs
+    /// through raw function pointers, so the only live borrow of the backend
+    /// during execution is the one `pp_resolve` re-materializes inside the
+    /// resolver (the same type-erasure discipline as `with_dispatcher`).
+    pub fn execute_deferred(
+        &mut self,
+        resolve: &mut dyn FnMut(&mut LlvmCodegen<'ctx, 'p>, &str) -> usize,
+    ) -> Result<(), String> {
+        if tracing::enabled!(target: "brass::ir", tracing::Level::TRACE) {
+            tracing::trace!(target: "brass::ir", "\n{}", self.module.print_to_string().to_string());
+        }
+        let inits = self.mir.init_symbols.clone();
+        let frozen = self.mir.frozen_globals.clone();
+        let (init_addrs, freeze_addr, main_addr) = {
+            let engine = self
+                .mir
+                .engine
+                .as_ref()
+                .ok_or("execute called before finalize")?;
+            let addr_of = |sym: &str| engine.get_function_address(&mangle_fn(sym)).ok();
+            let init_addrs: Vec<Option<usize>> = inits.iter().map(|s| addr_of(s)).collect();
+            let freeze_addr = if frozen.is_empty() {
+                None
+            } else {
+                engine.get_function_address(FREEZE_GLOBALS_FN).ok()
+            };
+            (init_addrs, freeze_addr, addr_of("main"))
+        };
+        let call = |addr: usize| {
+            let f: unsafe extern "C" fn() = unsafe { std::mem::transmute(addr) };
+            unsafe { f() };
+        };
+        crate::dispatch::with_deferred_resolver(self, resolve, || {
+            for a in init_addrs.iter().flatten() {
+                call(*a);
+            }
+            if let Some(a) = freeze_addr {
+                call(a);
+            }
+            if let Some(a) = main_addr {
+                call(a);
+            }
+        });
+        brass_runtime::conc::pp_join_all();
+        brass_runtime::gc::pp_gc_collect();
+        Ok(())
     }
 }
 
@@ -2091,11 +2183,16 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
             let func = self.module.add_function(&name, fty, None);
             self.fns.map.insert(name, func);
         }
-        // Declare each typed global, zero-initialized; init instances fill them.
+        // Declare each typed global, zero-initialized; init instances fill
+        // them. A runtime add-on module only DECLARES them (no initializer):
+        // MCJIT then resolves the reference to the startup module's storage,
+        // where the program's actual state lives.
         for (name, ty) in &program.globals {
             let llty = self.abi.typed_basic(ty);
             let g = self.module.add_global(llty, None, &mangle_global(name));
-            g.set_initializer(&llty.const_zero());
+            if !self.mir.in_runtime_module {
+                g.set_initializer(&llty.const_zero());
+            }
             self.mir.globals.insert(name.clone(), g);
         }
         self.mir.init_symbols = program.init_symbols.clone();
@@ -3821,6 +3918,74 @@ impl<'ctx, 'p> EngineCodegen for LlvmCodegen<'ctx, 'p> {
             .build_indirect_call(fn_ty, fp, &argv, "ci")
             .unwrap();
         if matches!(ret.as_ref(), Type::Void) {
+            self.typed_unit()
+        } else {
+            cs.try_as_basic_value().unwrap_basic()
+        }
+    }
+
+    fn deferred_call(
+        &mut self,
+        symbol: &str,
+        args: &[BasicValueEnum<'ctx>],
+        params: &[Type],
+        ret: &Type,
+    ) -> BasicValueEnum<'ctx> {
+        // The lazy JIT's runtime-resolved call. The trampoline is the same
+        // `pp_resolve` service deferred dispatch uses, but keyed by the
+        // INSTANCE SYMBOL alone (empty type string): the resolver holds the
+        // recorded (base, type args) contract for every deferred site, so no
+        // type encoding crosses the boundary. The indirect call is typed with
+        // the site's recorded signature, which is the instance's own ABI --
+        // instances are keyed by caller argument types.
+        let (sym_ptr, sym_len) = self.global_str(symbol);
+        let (ty_ptr, ty_len) = self.global_str("");
+        let i64t = self.abi.i64t();
+        let ptr = self.abi.ptr();
+        let resolve_ty = i64t.fn_type(&[ptr.into(), i64t.into(), ptr.into(), i64t.into()], false);
+        let resolve = self.abi.runtime_fn(&self.module, "pp_resolve", resolve_ty);
+        let addr = self
+            .builder
+            .build_call(
+                resolve,
+                &[
+                    sym_ptr.into(),
+                    self.i64c(sym_len as i64).into(),
+                    ty_ptr.into(),
+                    self.i64c(ty_len as i64).into(),
+                ],
+                "addr",
+            )
+            .unwrap()
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        // 0 means the resolver could not supply the instance (its check
+        // failed, or resolution ran on a thread that cannot compile); the
+        // resolver reports the real diagnostic itself, this trap only keeps
+        // the failure defined.
+        let failed = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                addr,
+                self.abi.i64t().const_zero(),
+                "noaddr",
+            )
+            .unwrap();
+        self.trap_if(failed, "deferred function was not compiled");
+        let fp = self
+            .builder
+            .build_int_to_ptr(addr, self.abi.ptr(), "fp")
+            .unwrap();
+        let fn_ty = self.abi.typed_fn_type(params, ret);
+        let meta: Vec<inkwell::values::BasicMetadataValueEnum> =
+            args.iter().map(|a| (*a).into()).collect();
+        let cs = self
+            .builder
+            .build_indirect_call(fn_ty, fp, &meta, "dc")
+            .unwrap();
+        if matches!(ret, Type::Void) {
             self.typed_unit()
         } else {
             cs.try_as_basic_value().unwrap_basic()

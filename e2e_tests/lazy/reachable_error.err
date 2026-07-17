@@ -1,0 +1,1 @@
+error: operator `+` is not defined for `int32` and `string`

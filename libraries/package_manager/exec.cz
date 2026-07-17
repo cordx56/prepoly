@@ -111,15 +111,15 @@ fun join_deps(deps: HashMap) {
 
 fun help() {
     println(
-        "czm - brass Package Manager
+        "czpm - brass Package Manager
 
 Usage:
-    czm new [name]  -> Create a new brass package in a new directory
-    czm init [name] -> Initialize a brass package in the current directory
-    czm run         -> Run the current package
-    czm check       -> Type-check the current package
-    czm fmt         -> Format all brass files
-    czm lsp         -> Start the Language Server (czls)
+    czpm new [name]  -> Create a new brass package in a new directory
+    czpm init [name] -> Initialize a brass package in the current directory
+    czpm run         -> Run the current package
+    czpm check       -> Type-check the current package
+    czpm fmt         -> Format all brass files
+    czpm lsp         -> Start the Language Server (czls)
 ",
     )
     exit(1)

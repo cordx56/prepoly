@@ -11,8 +11,8 @@ Run the following command to install `czls`:
 ./x cargo install --path crates/brass_language_server
 ```
 
-For projects managed with [czm](/guides/packages/), configure your editor to
-launch `czm lsp` rather than `czls` directly: it resolves the
+For projects managed with [czpm](/guides/packages/), configure your editor to
+launch `czpm lsp` rather than `czls` directly: it resolves the
 dependencies declared in `package.toml` before starting the server, and in a
 directory without a `package.toml` it starts the plain server, so the same
 configuration works everywhere.

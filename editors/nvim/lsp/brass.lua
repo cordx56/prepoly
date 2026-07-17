@@ -8,7 +8,7 @@
 --   vim.lsp.config("Brass", { cmd = { "/path/to/target/debug/czls" } })
 
 return {
-  cmd = { "czm", "lsp" },
+  cmd = { "czpm", "lsp" },
   filetypes = { "brass" },
   -- Imports resolve relative to each file's own directory, so a project root is
   -- optional; with no marker found the server still attaches as a single file.

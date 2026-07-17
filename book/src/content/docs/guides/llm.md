@@ -8,7 +8,7 @@ will otherwise write code in the dialect of whatever language the syntax most
 resembles. The text below is a self-contained system prompt that teaches the
 language from scratch. Drop it into your agent's project instructions (for
 example `AGENTS.md` or `CLAUDE.md`) so the agent writes valid Brass —
-projects created with [`czm new`/`czm init`](/guides/packages/) already
+projects created with [`czpm new`/`czpm init`](/guides/packages/) already
 contain it as `AGENTS.md`, with `CLAUDE.md` symlinked to it.
 
 ````markdown

@@ -70,6 +70,23 @@ fn is_nullable_wrap(dest_ty: &Type, value_ty: &Type) -> bool {
 /// thread, which releases the closure when it finishes). R6's capture analysis
 /// guarantees such a value is not live after the spawn, so excluding it from the
 /// spawner's end-of-scope releases is the move -- not a leak or a use-after-free.
+/// Whether any instance in `program` spawns a task. The lazy JIT compiles
+/// and primes every recorded deferred target before code from such a batch
+/// runs: spawned code executes on worker threads, which can only READ the
+/// resolved-address cache -- the compiler lives on the main thread.
+pub fn batch_spawns(program: &MonoProgram) -> bool {
+    let spawns =
+        |rv: &Rvalue| matches!(rv, Rvalue::Call(Callee::Builtin(name), _) if name == "spawn");
+    program.functions.iter().any(|f| {
+        f.body.blocks.iter().any(|b| {
+            b.stmts.iter().any(|s| match s {
+                MirStmt::Assign(_, rv) | MirStmt::Eval(rv) => spawns(rv),
+                _ => false,
+            })
+        })
+    })
+}
+
 fn spawn_moved_locals(f: &MonoFunction) -> std::collections::HashSet<LocalId> {
     let mut moved = std::collections::HashSet::new();
     let mut scan = |rv: &Rvalue| {
@@ -346,6 +363,21 @@ pub trait Codegen {
     /// A boolean: whether `subj` (of type `subj_ty`) is the named variant (for a
     /// sum, a tag comparison; a record always matches its sole shape).
     fn pattern_matches(&mut self, subj: Self::Value, subj_ty: &Type, variant: &str) -> Self::Value;
+    /// A call to a runtime-deferred instance (the lazy JIT): resolve
+    /// `symbol` through the runtime service (`pp_resolve`) and call the
+    /// returned address indirectly with the recorded signature. Back ends
+    /// that never see a deferred `MonoProgram` keep the default.
+    fn deferred_call(
+        &mut self,
+        symbol: &str,
+        args: &[Self::Value],
+        params: &[Type],
+        ret: &Type,
+    ) -> Self::Value {
+        let _ = (symbol, args, params, ret);
+        panic!("internal error: this back end cannot compile deferred calls");
+    }
+
     /// Abort with a runtime message (the unmatched-`match` fallthrough).
     fn emit_panic(&mut self, msg: &str);
     /// Abort with a runtime string `msg` *value* (the user-facing `_panic(msg)`,
@@ -1199,6 +1231,17 @@ pub trait Codegen {
             CallKind::Instance(target) => target,
         };
         let Some(inst) = program.lookup(&target) else {
+            // A recorded deferral compiles to a runtime-resolved call: the
+            // instance is monomorphized and compiled on first use, once its
+            // body's check has finished (the lazy JIT).
+            if let Some(sig) = program.deferred.get(&target) {
+                let vals: Vec<Self::Value> = args
+                    .iter()
+                    .zip(&sig.params)
+                    .map(|(a, pty)| self.codegen_operand(program, f, a, pty))
+                    .collect();
+                return self.deferred_call(&target, &vals, &sig.params, &sig.ret);
+            }
             // Validated MIR always resolves to an emitted instance; emitting a
             // placeholder value here would silently miscompile the call, so a
             // compiler bug must fail loudly instead.

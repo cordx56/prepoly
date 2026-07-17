@@ -164,9 +164,11 @@ name = "brass_driver"
 version = "0.1.0"
 dependencies = [
  "brass_cache",
+ "brass_engine",
  "brass_hir",
  "brass_jit_llvm",
  "brass_metadata",
+ "brass_mir",
  "brass_parser",
  "brass_plugin_host",
  "brass_repl",
@@ -176,6 +178,7 @@ dependencies = [
  "brass_utils",
  "clap",
  "inkwell",
+ "tokio",
  "tracing",
 ]
 

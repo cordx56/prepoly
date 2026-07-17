@@ -101,7 +101,11 @@ pub fn prim_method_instance(
     }
     let class = args.first()?.primitive_class()?;
     let sym = instance_symbol(&brass_hir::prim_method_symbol(class, name), &args);
-    program.lookup(&sym).map(|_| sym)
+    // A runtime-DEFERRED instance is as real as a monomorphized one: the
+    // lazy JIT records the primitive method's storage-symbol instance in
+    // `deferred` instead of creating it, and the call site must key on the
+    // same symbol the resolver will be asked for.
+    (program.lookup(&sym).is_some() || program.deferred.contains_key(&sym)).then_some(sym)
 }
 
 /// Instance symbol of a closure: distinct per closure id, captured types, and

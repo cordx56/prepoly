@@ -5,11 +5,41 @@ description: "The compilation pipeline, the two back ends, and runtime behavior 
 
 ## The pipeline
 
-`brass program.cz` runs one pipeline: parse the entry file, load its imports
-transitively (plus the embedded standard library), lower, and **type-check the
-whole program**. Only when no diagnostics remain is anything executed —
-diagnostics go to stderr and the process exits non-zero. `brass check`
-stops after this stage; it prints nothing when the program is well-typed.
+`brass program.cz` parses the entry file, loads its imports transitively
+(plus the embedded standard library), lowers, and **type-checks the whole
+program** — but by default it checks **lazily**: type inference runs on a
+dedicated checker thread, starting from the program's entry (the module
+initializers, then `main`), while the main thread compiles and prepares
+execution in parallel. When compilation reaches a function whose check has
+not finished, it sends the function's path and the concrete argument types
+of the call to the checker, which settles that body next.
+
+Compilation is as lazy as checking: only the entry (the initializers and
+`main`) compiles before execution starts. A call to a function whose
+signature is annotation-determined compiles into a *deferred site*; the
+first time execution actually reaches it, the function is monomorphized and
+compiled on the spot — waiting for the checker first if its body is still
+being inferred. A `spawn` pre-compiles everything the spawned task could
+reach, since worker threads never compile.
+
+Lazy checking changes **when** diagnostics surface, never **whether**:
+
+- Any diagnostic found before execution starts aborts the run with the same
+  full report the eager pipeline prints, and nothing executes.
+- An error in a function first reached mid-run reports identically at that
+  moment and the run exits non-zero (output already produced stands).
+- Code execution never needs (an uncalled function, an unimported branch of
+  a library) keeps checking concurrently while the program runs. If the
+  checker finds an error there, the run still exits non-zero with the
+  diagnostic — possibly after the program's own output.
+- A well-typed program behaves identically either way; unreachable code
+  simply no longer delays start-up.
+
+`brass check` always checks **eagerly** — the whole program, on the calling
+thread, before reporting; it prints nothing when the program is well-typed.
+`--eager` gives a run the same check-everything-first behavior. The
+interpreter back end, `brass repl`, and a `.czcache` hit (an already-checked
+program) are also eager.
 
 Execution then instantiates every reachable function at the concrete types it
 is used with (**monomorphization**) and runs the program:
@@ -75,8 +105,9 @@ interpreter.
 ## Tooling summary
 
 ```bash
-brass program.cz         # check + run (JIT)
-brass check program.cz   # check only
+brass program.cz         # lazy check + run (JIT)
+brass --eager program.cz # whole-program check, then run
+brass check program.cz   # check only (always whole-program)
 brass repl [program.cz]  # interpreter / interactive REPL
 czls                       # LSP server (hover, diagnostics, completion,
                            # go-to-definition, semantic tokens)

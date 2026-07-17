@@ -292,6 +292,27 @@ impl MonoFunction<'_> {
 
 /// A whole program lowered to concrete typed instances, with a symbol index for
 /// resolving call targets.
+/// The recorded contract of a runtime-deferred call site (the lazy JIT): the
+/// instance the site will ask the runtime resolver for, keyed in
+/// [`MonoProgram::deferred`] by its instance symbol. `type_args` are the
+/// concrete argument types the instance will be monomorphized at (they are
+/// also the site's ABI parameter types -- instances are keyed by caller
+/// argument types, so both sides agree by construction); `ret` is the
+/// callee's declared, fully concrete return type.
+#[derive(Clone, Debug)]
+pub struct DeferredSig {
+    pub base: String,
+    pub type_args: Vec<Type>,
+    /// The instance's ABI parameter types: the caller's argument types with
+    /// every fully-annotated parameter replaced by its DECLARED type -- the
+    /// same rule `type_and_store_inner` applies when it stores an instance's
+    /// resolved parameters ("an annotated parameter keeps its declared
+    /// type"), so the site's coercions and the eventual instance's signature
+    /// agree.
+    pub params: Vec<Type>,
+    pub ret: Type,
+}
+
 pub struct MonoProgram<'m> {
     pub functions: Vec<MonoFunction<'m>>,
     /// The HIR program the instances were monomorphized against. The shared
@@ -308,6 +329,10 @@ pub struct MonoProgram<'m> {
     /// fell outside the typed subset. Roots are best-effort, but for `main`
     /// (the program's entry point) the reason is the diagnostic the user needs.
     pub main_skip: Option<String>,
+    /// Call sites compiled as runtime-resolved calls instead of direct calls
+    /// (the lazy JIT's deferral), keyed by the target instance symbol. Empty
+    /// under eager monomorphization.
+    pub deferred: HashMap<String, DeferredSig>,
     index: HashMap<String, usize>,
     global_index: HashMap<String, Type>,
 }
@@ -397,6 +422,96 @@ pub fn monomorphize<'m>(
     Ok(mono_program)
 }
 
+/// Why entry-rooted monomorphization ([`monomorphize_entry`]) stopped.
+#[derive(Debug)]
+pub enum MonoStop {
+    /// A reachable call needed function `symbol`, whose MIR body is not in
+    /// the program (the lazy pipeline lowers function bodies on demand), at
+    /// the concrete argument types `type_args`. The caller lowers that body
+    /// into the MIR program and retries.
+    MissingBody {
+        symbol: String,
+        type_args: Vec<Type>,
+    },
+    /// Monomorphization genuinely failed (the same rejection
+    /// [`monomorphize`] reports for the entry).
+    Fail(String),
+}
+
+/// [`monomorphize`] with the LAZY pipeline's roots: the module initializers
+/// and the entry `main` only, instead of every zero-parameter function. The
+/// reachable graph is identical for code execution can reach -- execution
+/// only enters through inits and `main` -- so unreachable functions are
+/// never pulled in, which is the point: their bodies may not be checked or
+/// lowered yet. A missing reachable body stops the run with
+/// [`MonoStop::MissingBody`] (even inside a best-effort init, which
+/// [`monomorphize`] would silently skip) so the caller can supply the body
+/// and retry rather than mis-classify it as untypeable.
+pub fn monomorphize_entry<'m>(
+    mir: &'m MirProgram,
+    program: &'m Program,
+    defer: bool,
+) -> Result<MonoProgram<'m>, MonoStop> {
+    let mut mono = Monomorphizer::new(mir, program);
+    if defer {
+        mono.defer = Some(HashMap::new());
+    }
+    let missing = |mono: &Monomorphizer| mono.missing_demand.borrow_mut().take();
+    let mut init_symbols = Vec::with_capacity(mir.inits.len());
+    for (i, init) in mir.inits.iter().enumerate() {
+        let sym = format!("{SYNTH_SIGIL}init{i}");
+        let res = mono.type_and_store(
+            sym.clone(),
+            &init.body,
+            &init.module,
+            Vec::new(),
+            Some(Type::Void),
+            None,
+            None,
+            &[],
+            Vec::new(),
+            false,
+            false,
+        );
+        mono.in_progress.clear();
+        mono.assumed_rets.clear();
+        match res {
+            // A recovered speculative probe (a presence test) may have set a
+            // demand the successful root never needed; drop it so it cannot
+            // shadow a later root's real missing dependency.
+            Ok(_) => {
+                mono.missing_demand.borrow_mut().take();
+                init_symbols.push(sym);
+            }
+            Err(e) => {
+                if let Some((symbol, type_args)) = missing(&mono) {
+                    return Err(MonoStop::MissingBody { symbol, type_args });
+                }
+                if matches!(init.module.as_slice(), [m] if m == "main") {
+                    return Err(MonoStop::Fail(format!(
+                        "top-level code is outside the typed subset: {e}"
+                    )));
+                }
+            }
+        }
+    }
+    let mut main_skip = None;
+    if mir.functions.iter().any(|f| f.symbol == "main") || program.functions.contains_key("main") {
+        if let Err(e) = mono.instantiate_fn("main", Vec::new()) {
+            if let Some((symbol, type_args)) = missing(&mono) {
+                return Err(MonoStop::MissingBody { symbol, type_args });
+            }
+            tracing::debug!(root = "main", error = %e, "skipping untypeable entry");
+            main_skip = Some(e);
+        }
+        mono.in_progress.clear();
+        mono.assumed_rets.clear();
+    }
+    let mut mono_program = mono.into_program(init_symbols, program);
+    mono_program.main_skip = main_skip;
+    Ok(mono_program)
+}
+
 /// Monomorphize a single callable on demand for a concrete argument-type tuple,
 /// for deferred monomorphization: when a type is fixed at runtime,
 /// the consumer is specialized for it then. Returns a [`MonoProgram`] containing
@@ -415,6 +530,40 @@ pub fn monomorphize_instance<'m>(
     mono.in_progress.clear();
     mono.assumed_rets.clear();
     Ok(mono.into_program(Vec::new(), program))
+}
+
+/// [`monomorphize_instance`] with runtime deferral enabled (the lazy JIT's
+/// resolver): calls out of the new instance may themselves compile to
+/// runtime-resolved sites (collected in the result's `deferred`) instead of
+/// pulling their bodies in, so one resolution compiles one call's worth of
+/// code. A missing body that cannot defer surfaces as
+/// [`MonoStop::MissingBody`] for the resolver to supply and retry.
+pub fn monomorphize_instance_deferred<'m>(
+    mir: &'m MirProgram,
+    program: &'m Program,
+    base: &str,
+    type_args: Vec<Type>,
+    globals: &[(String, Type)],
+) -> Result<MonoProgram<'m>, MonoStop> {
+    let mut mono = Monomorphizer::new(mir, program);
+    mono.defer = Some(HashMap::new());
+    // Global types are discovered by typing init bodies, which a
+    // single-instance run never does: the caller passes the startup run's
+    // complete table (every init typed before execution began), or a body
+    // reading a module global could not be typed.
+    mono.global_types = globals.iter().cloned().collect();
+    let res = mono.instantiate_fn(base, type_args);
+    mono.in_progress.clear();
+    mono.assumed_rets.clear();
+    match res {
+        Ok(_) => Ok(mono.into_program(Vec::new(), program)),
+        Err(e) => {
+            if let Some((symbol, type_args)) = mono.missing_demand.borrow_mut().take() {
+                return Err(MonoStop::MissingBody { symbol, type_args });
+            }
+            Err(MonoStop::Fail(e))
+        }
+    }
 }
 
 struct Monomorphizer<'m, 'p> {
@@ -448,6 +597,23 @@ struct Monomorphizer<'m, 'p> {
     /// approved for is the view built here). `None` until then: programs
     /// without views never pay for the fixpoint.
     rows: Option<brass_typesys::RowInfo>,
+    /// When `Some`, calls to functions whose MIR body is absent but whose
+    /// whole ABI is annotation-determined compile to runtime-resolved calls
+    /// recorded here (see [`DeferredSig`]) instead of failing the frame --
+    /// the lazy JIT's deferral. `None` is eager/blocking monomorphization.
+    defer: Option<HashMap<String, DeferredSig>>,
+    /// Depth of closure-body instantiation frames. Deferral is disabled
+    /// inside them: closure code can cross to worker threads (`spawn`), and
+    /// only the main thread can compile.
+    closure_depth: u32,
+    /// The first function this run needed whose MIR body is absent, with the
+    /// concrete argument types of the call that needed it (empty when the
+    /// need arose in a `&self` probe that does not know them). Set on the
+    /// missing lookup in `instantiate_fn` and in the closure-contract probe;
+    /// [`monomorphize_entry`] surfaces it as [`MonoStop::MissingBody`] so a
+    /// demand-driven caller can lower the body and retry. A `RefCell`
+    /// because the probes only hold `&self`.
+    missing_demand: std::cell::RefCell<Option<(String, Vec<Type>)>>,
 }
 
 impl<'m, 'p> Monomorphizer<'m, 'p> {
@@ -480,6 +646,9 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             assumed_rets: HashMap::new(),
             instance_log: Vec::new(),
             rows: None,
+            defer: None,
+            closure_depth: 0,
+            missing_demand: std::cell::RefCell::new(None),
         }
     }
 
@@ -515,8 +684,45 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             globals,
             init_symbols,
             main_skip: None,
+            deferred: self.defer.unwrap_or_default(),
             index,
             global_index,
+        }
+    }
+
+    /// Whether `ty` fully describes a value's layout on its own: no type
+    /// slots, every declared member resolved and fully known. A bare
+    /// `-> Box` annotation on a type with an open member (an unannotated
+    /// field, a slot) is REFINED by each body's instance -- the annotation
+    /// under-describes the return, so a call on it cannot defer; the body
+    /// must be instantiated for its precise result.
+    fn self_describing(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Record(n) | Type::Sum(n) => {
+                let Some(info) = self.program.type_by_id(n.id) else {
+                    return false;
+                };
+                if !info.slots.is_empty() {
+                    return false;
+                }
+                let fields_ok = |fields: &[brass_hir::FieldInfo]| {
+                    fields.iter().all(|f| {
+                        f.resolved_ty
+                            .as_ref()
+                            .is_some_and(brass_hir::is_fully_known)
+                    })
+                };
+                match &info.kind {
+                    TypeKind::Record { fields, .. } => fields_ok(fields),
+                    TypeKind::Sum { variants } => variants.iter().all(|v| fields_ok(&v.fields)),
+                }
+            }
+            Type::Slice(e) | Type::Array(e, _) | Type::Nullable(e) => self.self_describing(e),
+            Type::Tuple(ts) => ts.iter().all(|t| self.self_describing(t)),
+            // A function-typed return carries a call contract the annotation
+            // syntax cannot fully pin; stay on the instantiating path.
+            Type::Fun(..) => false,
+            _ => true,
         }
     }
 
@@ -526,10 +732,17 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
         if self.instances.contains_key(&sym) {
             return Ok(sym);
         }
-        let func = *self
-            .by_fn
-            .get(base)
-            .ok_or_else(|| format!("unknown function `{base}`"))?;
+        let Some(&func) = self.by_fn.get(base) else {
+            // Record what a demand-driven caller (the lazy pipeline, which
+            // lowers function bodies into the MIR program on demand) would
+            // need to make this call instantiable. First sighting wins: the
+            // error unwinds the whole frame, so later sightings on the same
+            // unwind describe the same missing dependency chain.
+            if self.missing_demand.borrow().is_none() {
+                *self.missing_demand.borrow_mut() = Some((base.to_string(), type_args.clone()));
+            }
+            return Err(format!("unknown function `{base}`"));
+        };
         let sig_ret = self
             .program
             .functions
@@ -1976,8 +2189,69 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                 )),
             };
         }
+        if let Some(sig) = self.deferrable(base, &arg_types) {
+            let ret = sig.ret.clone();
+            let symbol = instance_symbol(base, &arg_types);
+            if let Some(targets) = self.defer.as_mut() {
+                targets.insert(symbol, sig);
+            }
+            return Ok(Some(ret));
+        }
         let sym = self.instantiate_fn(base, arg_types)?;
         Ok(self.instances.get(&sym).map(|i| i.ret.clone()))
+    }
+
+    /// The deferral contract (the lazy JIT): a call to `base`, whose MIR body
+    /// is not in the program, compiles to a runtime-resolved call when its
+    /// whole ABI is annotation-determined -- a fully concrete DECLARED return
+    /// (an inferred or fallible return needs the body; a body that raises
+    /// errors changes the ABI to a `Result`), and fully known argument types
+    /// (instances are keyed by them). Never inside a closure body: closure
+    /// code can cross to worker threads, which cannot compile.
+    fn deferrable(&self, base: &str, arg_types: &[Type]) -> Option<DeferredSig> {
+        self.defer.as_ref()?;
+        if self.closure_depth > 0 || self.by_fn.contains_key(base) {
+            return None;
+        }
+        let info = self.program.functions.get(base)?;
+        let ret = info.signature.ret_ty.clone()?;
+        if !brass_hir::is_fully_known(&ret) || !is_supported(&ret) {
+            return None;
+        }
+        if !self.self_describing(&ret) {
+            return None;
+        }
+        if brass_mir::constructs_error_block(&info.decl.body) {
+            return None;
+        }
+        if !arg_types.iter().all(brass_hir::is_fully_known) {
+            return None;
+        }
+        if info.decl.params.len() != arg_types.len() {
+            return None;
+        }
+        // The site's ABI mirrors the instance's parameter typing exactly:
+        // lowering seeds a parameter local's type only from a SIMPLE
+        // annotation (`resolve_simple_type` -- scalars, strings, arrays and
+        // nullables of them), and monomorphization's declared-type override
+        // reads that local. So a simple annotation wins here (an `int64`
+        // parameter widens an `int32` argument at the site), while a nominal
+        // annotation leaves the CALLER's argument type in charge -- the
+        // instance is specialized per caller type, `Node?` taking a non-null
+        // `Node` argument included.
+        let mut params = Vec::with_capacity(arg_types.len());
+        for (arg, p) in arg_types.iter().zip(&info.decl.params) {
+            match p.ty.as_ref().and_then(brass_mir::resolve_simple_type) {
+                Some(decl) => params.push(decl),
+                None => params.push(arg.clone()),
+            }
+        }
+        Some(DeferredSig {
+            base: base.to_string(),
+            type_args: arg_types.to_vec(),
+            params,
+            ret,
+        })
     }
 
     /// Type a `print`/`println` call: void, accepted only for a printable

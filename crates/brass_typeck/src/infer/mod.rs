@@ -12,8 +12,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use brass_hir::{
-    CallableSignature, Constness, FloatKind, FunInfo, IntKind, NominalType, ParamInfo, Program,
-    SchemeMethod, Substitution, Type, TypeInfo, TypeKind, TypeScheme, TypedProgram,
+    CallableSignature, Constness, FloatKind, FunInfo, IntKind, ModuleInit, NominalType, ParamInfo,
+    Program, SchemeMethod, Substitution, Type, TypeInfo, TypeKind, TypeScheme, TypedProgram,
     int_literal_kind, peel_modes,
 };
 use brass_parser::Span;
@@ -24,6 +24,7 @@ use crate::TypeError;
 use crate::constraint::ShapeConstraint;
 use crate::narrow;
 use crate::solver::{InferenceVarKind, Solver};
+use crate::stream::{self, StreamCtl};
 use crate::unify::Subst;
 
 mod assign;
@@ -438,6 +439,22 @@ pub fn analyze(program: &Program) -> Inference {
 /// their schemes, inferred returns, and globals are read from the seed, so the
 /// run costs roughly what checking the entry module alone costs.
 pub fn analyze_with(program: &Program, seed: Option<&ContextTables>) -> Inference {
+    analyze_inner(program, seed, None).0
+}
+
+/// [`analyze_with`] with optional streaming control (the lazy-check
+/// pipeline): with a [`StreamCtl`], bodies are checked in an execution-first
+/// order -- module initializers, then `main`, then the remaining functions,
+/// reprioritized between bodies by the scheduler's requests -- and a channel
+/// delta is emitted after each body. Without one, the body order is the
+/// eager pipeline's. The second return value is the terminal delta (flushed
+/// after the finalize re-resolution), for the caller to emit once the
+/// remaining whole-program passes are done.
+pub(crate) fn analyze_inner(
+    program: &Program,
+    seed: Option<&ContextTables>,
+    mut ctl: Option<&mut StreamCtl>,
+) -> (Inference, Option<stream::ChannelDelta>) {
     let phase = |name: &'static str, at: std::time::Instant| {
         brass_utils::perf_phase(name, at.elapsed());
     };
@@ -482,62 +499,119 @@ pub fn analyze_with(program: &Program, seed: Option<&ContextTables>) -> Inferenc
     check_method_bodies(&mut checker, program);
     checker.schemes = checker.build_schemes();
     phase("typeck/method-bodies", t);
-
-    let mut perf = brass_utils::PerfLog::start("typeck/fn-bodies");
-    for (symbol, f) in &program.functions {
-        // Context bodies were checked by the run that produced the seed; their
-        // call-site behavior is still exact, because a call from the entry
-        // re-elaborates the callee body at the call's own types.
-        if checker.seeded_module(&f.module) {
-            continue;
-        }
-        tracing::debug!(function = %f.signature.name, "inferring function body");
-        let fn_started = std::time::Instant::now();
-        // The module comes first: the body's bottom scope is the globals visible
-        // from IT, so building the scope before setting it would hand the function
-        // some other module's globals.
-        checker.current_module = f.module.clone();
-        let mut scopes = checker.signature_scopes(&f.signature.params);
-        let ret = f.signature.ret_ty.clone();
-        // The root module's bare `main` symbol is the program entry; its `!`
-        // propagations abort at runtime, waiving the fallible-return-context
-        // requirement for its own body.
-        checker.in_entry_main = symbol == "main";
-        checker.check_block_root(&f.decl.body, &mut scopes, ret.as_ref());
-        perf.item(symbol.clone(), fn_started.elapsed());
+    if let Some(ctl) = ctl.as_deref_mut() {
+        let delta = flush_delta(&checker, &mut ctl.state, false);
+        ctl.sched.emit(stream::CheckEvent::ContextReady(delta));
     }
-    perf.report();
-    checker.in_entry_main = false;
 
-    let t = std::time::Instant::now();
-    checker.const_scopes = vec![HashSet::new()];
-    for init in &program.inits {
-        checker.current_module = init.path.clone();
-        // The globals of OTHER modules this one can see. Its own are left out so
-        // they still accumulate as its statements are checked -- a later global is
-        // not visible to an earlier initializer.
-        let mut scopes = vec![checker.globals_visible_from(&init.path)];
-        if let Some(own) = checker.global_defs.get(&init.path) {
-            for name in own.keys() {
-                scopes[0].remove(name);
+    match ctl.as_deref_mut() {
+        // The eager order: every function body, then the module initializers.
+        None => {
+            let mut perf = brass_utils::PerfLog::start("typeck/fn-bodies");
+            for (symbol, f) in &program.functions {
+                // Context bodies were checked by the run that produced the seed;
+                // their call-site behavior is still exact, because a call from the
+                // entry re-elaborates the callee body at the call's own types.
+                if checker.seeded_module(&f.module) {
+                    continue;
+                }
+                let fn_started = std::time::Instant::now();
+                check_function_body(&mut checker, symbol, f);
+                perf.item(symbol.clone(), fn_started.elapsed());
             }
+            perf.report();
+            checker.in_entry_main = false;
+
+            let t = std::time::Instant::now();
+            checker.const_scopes = vec![HashSet::new()];
+            for init in &program.inits {
+                check_init_body(&mut checker, init);
+            }
+            checker.const_scopes.clear();
+            phase("typeck/inits", t);
         }
-        checker.narrowed_bindings.clear();
-        checker.closure_write_targets = init
-            .stmts
-            .iter()
-            .flat_map(|s| {
-                let mut acc = HashSet::new();
-                collect_closure_writes_stmt(s, false, &mut acc);
-                acc
-            })
-            .collect();
-        for s in &init.stmts {
-            checker.check_stmt(s, &mut scopes);
+        // The streaming (execution-first) order: initializers, then `main`,
+        // then the remaining functions, with the scheduler's priority
+        // requests jumping the queue between bodies. Body results are
+        // order-tolerant by construction (the eager order is a HashMap's),
+        // so the reorder changes when a body's entries become available,
+        // not what they end up being.
+        Some(ctl) => {
+            // Execution runs every module initializer before `main`, so the
+            // inits are the entry code the lazy driver needs first, in
+            // execution (module-load) order.
+            let t = std::time::Instant::now();
+            checker.const_scopes = vec![HashSet::new()];
+            for (i, init) in program.inits.iter().enumerate() {
+                check_init_body(&mut checker, init);
+                let delta = flush_delta(&checker, &mut ctl.state, false);
+                ctl.sched.emit(stream::CheckEvent::BodyChecked(
+                    stream::BodyId::Init(i),
+                    delta,
+                ));
+            }
+            checker.const_scopes.clear();
+            phase("typeck/inits", t);
+
+            // `main` first, the rest sorted so the static order is
+            // deterministic. Seeded (context) bodies skip the check like in
+            // the eager order but still emit their event immediately: the
+            // event means "this body is settled", and a seeded body is --
+            // its entries stream in through the re-elaboration a caller's
+            // own check performs. Without the event, a consumer waiting on
+            // a context function would wait forever.
+            let mut queue: std::collections::VecDeque<String> = {
+                let mut symbols: Vec<String> = program.functions.keys().cloned().collect();
+                symbols.sort();
+                if let Some(pos) = symbols.iter().position(|s| s == "main") {
+                    let main = symbols.remove(pos);
+                    symbols.insert(0, main);
+                }
+                symbols.into()
+            };
+            let mut done: HashSet<String> = HashSet::new();
+            let mut perf = brass_utils::PerfLog::start("typeck/fn-bodies");
+            loop {
+                // Priority requests land at the front in request order; a
+                // request for an unknown or already-checked symbol is spent.
+                for request in ctl.sched.drain_requests().into_iter().rev() {
+                    if !done.contains(&request.symbol)
+                        && program.functions.contains_key(&request.symbol)
+                    {
+                        queue.push_front(request.symbol);
+                    }
+                }
+                let Some(symbol) = queue.pop_front() else {
+                    break;
+                };
+                if !done.insert(symbol.clone()) {
+                    continue;
+                }
+                let f = &program.functions[&symbol];
+                if checker.seeded_module(&f.module) {
+                    // A seeded (context) body is settled without a check of
+                    // its own -- callers re-elaborate it at their call sites
+                    // -- but the event must still go out: a consumer waiting
+                    // on a context function would otherwise wait forever.
+                    ctl.sched.emit(stream::CheckEvent::BodyChecked(
+                        stream::BodyId::Function(symbol),
+                        stream::ChannelDelta::default(),
+                    ));
+                    continue;
+                }
+                let fn_started = std::time::Instant::now();
+                check_function_body(&mut checker, &symbol, f);
+                perf.item(symbol.clone(), fn_started.elapsed());
+                let delta = flush_delta(&checker, &mut ctl.state, false);
+                ctl.sched.emit(stream::CheckEvent::BodyChecked(
+                    stream::BodyId::Function(symbol),
+                    delta,
+                ));
+            }
+            perf.report();
+            checker.in_entry_main = false;
         }
     }
-    checker.const_scopes.clear();
-    phase("typeck/inits", t);
     let t = std::time::Instant::now();
     // Each expression's type was resolved against the substitution as it was
     // recorded, but a variable can be pinned *after* an expression that mentions
@@ -548,6 +622,11 @@ pub fn analyze_with(program: &Program, seed: Option<&ContextTables>) -> Inferenc
     checker.report_uninferable_error_types();
     checker.finalize_typed();
     phase("typeck/finalize", t);
+    // The terminal flush: finalize re-resolved the recorded types in place,
+    // so this delta settles every entry the earlier flushes withheld or
+    // emitted provisionally. Emitted by the caller (as `Finished`) once the
+    // remaining whole-program passes contribute their errors.
+    let final_delta = ctl.map(|ctl| flush_delta(&checker, &mut ctl.state, true));
     let function_returns: HashMap<String, Type> = checker
         .function_returns
         .clone()
@@ -646,22 +725,191 @@ pub fn analyze_with(program: &Program, seed: Option<&ContextTables>) -> Inferenc
             (*s, t)
         })
         .collect();
-    Inference {
-        errors: checker.errors,
-        typed: checker.typed,
-        schemes: checker.schemes,
-        view_args: checker.view_args,
-        lift_errs: checker.lift_errs,
-        sum_views,
-        fields_loops: checker.fields_loops,
-        type_names: checker.type_names,
-        keyed_calls: checker.keyed_calls,
-        typeof_types: checker.typeof_types,
-        null_props: checker.null_props,
-        function_returns,
-        method_returns,
-        context_tables,
+    (
+        Inference {
+            errors: checker.errors,
+            typed: checker.typed,
+            schemes: checker.schemes,
+            view_args: checker.view_args,
+            lift_errs: checker.lift_errs,
+            sum_views,
+            fields_loops: checker.fields_loops,
+            type_names: checker.type_names,
+            keyed_calls: checker.keyed_calls,
+            typeof_types: checker.typeof_types,
+            null_props: checker.null_props,
+            function_returns,
+            method_returns,
+            context_tables,
+        },
+        final_delta,
+    )
+}
+
+/// One free function's dedicated body pass -- the per-body core both body
+/// orders share. The caller decides ordering and skips seeded modules.
+fn check_function_body(checker: &mut Checker, symbol: &str, f: &FunInfo) {
+    tracing::debug!(function = %f.signature.name, "inferring function body");
+    // The module comes first: the body's bottom scope is the globals visible
+    // from IT, so building the scope before setting it would hand the function
+    // some other module's globals.
+    checker.current_module = f.module.clone();
+    let mut scopes = checker.signature_scopes(&f.signature.params);
+    let ret = f.signature.ret_ty.clone();
+    // The root module's bare `main` symbol is the program entry; its `!`
+    // propagations abort at runtime, waiving the fallible-return-context
+    // requirement for its own body.
+    checker.in_entry_main = symbol == "main";
+    checker.check_block_root(&f.decl.body, &mut scopes, ret.as_ref());
+}
+
+/// One module initializer's dedicated pass -- the per-init core both body
+/// orders share. The caller brackets the whole init sequence with the shared
+/// `const_scopes` frame.
+fn check_init_body(checker: &mut Checker, init: &ModuleInit) {
+    checker.current_module = init.path.clone();
+    // The globals of OTHER modules this one can see. Its own are left out so
+    // they still accumulate as its statements are checked -- a later global is
+    // not visible to an earlier initializer.
+    let mut scopes = vec![checker.globals_visible_from(&init.path)];
+    if let Some(own) = checker.global_defs.get(&init.path) {
+        for name in own.keys() {
+            scopes[0].remove(name);
+        }
     }
+    checker.narrowed_bindings.clear();
+    checker.closure_write_targets = init
+        .stmts
+        .iter()
+        .flat_map(|s| {
+            let mut acc = HashSet::new();
+            collect_closure_writes_stmt(s, false, &mut acc);
+            acc
+        })
+        .collect();
+    for s in &init.stmts {
+        checker.check_stmt(s, &mut scopes);
+    }
+}
+
+/// Flush the channel entries recorded since the previous flush into a
+/// [`stream::ChannelDelta`] (see the field notes there). `terminal` is the
+/// flush after `finalize_typed`: the recorded types were re-resolved in
+/// place -- which a prefix cursor cannot see -- so the aggregate scan
+/// restarts from scratch, and a still-open `Result` payload in `sum_views`
+/// defaults to `void` exactly like the channel copy the eager tail builds.
+fn flush_delta(
+    checker: &Checker,
+    state: &mut stream::FlushState,
+    terminal: bool,
+) -> stream::ChannelDelta {
+    let mut delta = stream::ChannelDelta::default();
+    // Aggregate result types: fold the newly recorded typed expressions into
+    // the running per-span agreement, then diff the seedable view against
+    // what was already delivered. A span can gain a seed (it resolved, or
+    // was first seen), change it (superseded value), or lose it (a later
+    // instantiation disagreed).
+    if terminal {
+        state.typed_seen = 0;
+        state.agg = Default::default();
+    }
+    for e in &checker.typed.expressions[state.typed_seen..] {
+        // An entry was resolved when it was RECORDED, which can be mid-body:
+        // a constructor's open slots are pinned by the statements after it
+        // (`HashMap.new()` then `set`). Resolve against the substitution as
+        // it stands NOW -- at a body boundary, with the whole body's pins
+        // committed -- or the entry would stay invisible to the aggregate
+        // until the terminal flush, far too late for a consumer that lowers
+        // the body's MIR from this delta.
+        let mut e = e.clone();
+        e.ty = checker.resolve(&e.ty);
+        state.agg.observe(&e, checker.program);
+    }
+    state.typed_seen = checker.typed.expressions.len();
+    let want = state.agg.seedable_map();
+    for (span, ty) in &want {
+        if state.expr_flushed.get(span) != Some(ty) {
+            delta.expr_types.push((*span, ty.clone()));
+        }
+    }
+    for span in state.expr_flushed.keys() {
+        if !want.contains_key(span) {
+            delta.expr_types_removed.push(*span);
+        }
+    }
+    state.expr_flushed = want;
+    // Append-only span sets.
+    for s in checker.view_args.difference(&state.view_args) {
+        delta.view_args.push(*s);
+    }
+    state.view_args.extend(delta.view_args.iter().copied());
+    for s in checker.lift_errs.difference(&state.lift_errs) {
+        delta.lift_errs.push(*s);
+    }
+    state.lift_errs.extend(delta.lift_errs.iter().copied());
+    for s in checker.null_props.difference(&state.null_props) {
+        delta.null_props.push(*s);
+    }
+    state.null_props.extend(delta.null_props.iter().copied());
+    for (span, fields) in &checker.fields_loops {
+        if state.fields_loops.insert(*span) {
+            delta.fields_loops.push((*span, fields.clone()));
+        }
+    }
+    // Last-write-wins maps. `sum_views` values mirror the eager channel
+    // copy: resolved against the current substitution, with a still-open
+    // `Result` payload defaulted to `void` -- an Err-only flow may leave the
+    // Ok slot pinned by nothing, ever, so waiting for it to close would
+    // withhold the entry forever. The default is provisional: a later body
+    // that does pin the slot changes the resolved value, and the revision is
+    // re-emitted for the consumer to re-lower against.
+    for (span, t) in &checker.sum_views {
+        let mut t = checker.resolve(t);
+        if let Type::Sum(n) = &mut t
+            && n.is_result_type()
+        {
+            for key in [
+                brass_hir::types::RESULT_OK_VALUE,
+                brass_hir::types::RESULT_ERR_ERROR,
+            ] {
+                if n.substitution.get(key).is_none_or(|t| t.is_unknown()) {
+                    n.substitution.insert(key, Type::Void);
+                }
+            }
+        }
+        if state.sum_views.get(span) != Some(&t) {
+            delta.sum_views.push((*span, t.clone()));
+            state.sum_views.insert(*span, t);
+        }
+    }
+    for (span, name) in &checker.type_names {
+        if state.type_names.get(span) != Some(name) {
+            delta.type_names.push((*span, name.clone()));
+            state.type_names.insert(*span, name.clone());
+        }
+    }
+    for (span, t) in &checker.typeof_types {
+        if state.typeof_types.get(span) != Some(t) {
+            delta.typeof_types.push((*span, t.clone()));
+            state.typeof_types.insert(*span, t.clone());
+        }
+    }
+    // A typeof entry disappears when disagreeing instantiations poison it.
+    let poisoned: Vec<Span> = state
+        .typeof_types
+        .keys()
+        .filter(|s| !checker.typeof_types.contains_key(*s))
+        .copied()
+        .collect();
+    for span in poisoned {
+        state.typeof_types.remove(&span);
+        delta.typeof_types_removed.push(span);
+    }
+    // The errors reported in this window (raw report order; the final
+    // analysis sorts and dedups the full set).
+    delta.errors = checker.errors[state.errors_seen..].to_vec();
+    state.errors_seen = checker.errors.len();
+    delta
 }
 
 struct Checker<'a> {

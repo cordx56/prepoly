@@ -19,6 +19,8 @@ mod expr;
 mod pattern;
 mod stmt;
 
+pub use stmt::resolve_simple_type;
+
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
@@ -35,17 +37,75 @@ use crate::program::{MirClosure, MirFunction, MirInit, MirMethod, MirProgram};
 /// mutability holds the growing closure table and the global closure-id counter,
 /// so deeply nested closure lowering can borrow this context immutably and still
 /// register the closures it discovers without a borrow conflict.
-pub(crate) struct ProgramCtx<'p> {
-    program: &'p Program,
+/// The program-wide tables lowering derives from the HIR alone (no checker
+/// channels): computed once and shared across every `ProgramCtx`. The lazy
+/// pipeline builds a fresh context per lowered body -- and rebuilds the whole
+/// lowering when the channel state moves -- so recomputing these each time
+/// would re-run the whole-program mutation analysis per body.
+pub struct LowerTables {
     /// The program's mutation facts (self-mutating methods, write-through
-    /// positions), computed once per lowering: the entry-copy decision for an
-    /// unannotated parameter needs them to count handing the parameter to a
-    /// mutating position (a `m.set(..)` receiver) as a mutation, exactly like
-    /// the const checker does.
+    /// positions): the entry-copy decision for an unannotated parameter needs
+    /// them to count handing the parameter to a mutating position (a
+    /// `m.set(..)` receiver) as a mutation, exactly like the const checker.
     mutation: brass_hir::MutationInfo,
     /// Every sum-variant name in the program, used to tell a binding pattern
     /// (`x`) from a unit-variant pattern (`Red`) during match lowering.
     variant_names: std::collections::HashSet<String>,
+    /// Names each module's init binds as module-level globals (top-level
+    /// `let`s), used to key global storage per defining module.
+    module_globals: HashMap<Vec<String>, std::collections::HashSet<String>>,
+    /// Defining module of each standard-library global (the implicit prelude:
+    /// `INT64_MAX` etc. are visible everywhere without an import). First
+    /// definition in sorted module order wins, deterministically.
+    prelude_globals: HashMap<String, Vec<String>>,
+}
+
+impl LowerTables {
+    pub fn new(program: &Program) -> Self {
+        let mut variant_names = std::collections::HashSet::new();
+        for info in program.types.values() {
+            if let TypeKind::Sum { variants } = &info.kind {
+                for v in &variants[..] {
+                    variant_names.insert(v.name.clone());
+                }
+            }
+        }
+        let mut module_globals: HashMap<Vec<String>, std::collections::HashSet<String>> =
+            HashMap::new();
+        for init in &program.inits {
+            let names = module_globals.entry(init.path.clone()).or_default();
+            for s in &init.stmts {
+                if let brass_parser::ast::Stmt::Let { pat, .. } = s {
+                    collect_global_names(pat, names);
+                }
+            }
+        }
+        let mut prelude_globals: HashMap<String, Vec<String>> = HashMap::new();
+        let mut std_paths: Vec<&Vec<String>> = module_globals
+            .keys()
+            .filter(|p| p.first().is_some_and(|seg| seg == "std"))
+            .collect();
+        std_paths.sort();
+        for path in std_paths {
+            for name in &module_globals[path] {
+                prelude_globals
+                    .entry(name.clone())
+                    .or_insert_with(|| path.clone());
+            }
+        }
+        LowerTables {
+            mutation: brass_hir::MutationInfo::analyze(program),
+            variant_names,
+            module_globals,
+            prelude_globals,
+        }
+    }
+}
+
+pub(crate) struct ProgramCtx<'p> {
+    program: &'p Program,
+    /// The shared program-wide tables (see [`LowerTables`]).
+    tables: &'p LowerTables,
     /// Checker-resolved types of selected expressions, keyed by source span. A
     /// call whose result is a constructed aggregate is looked up here so its
     /// result local is seeded `Known`, carrying the instance type the back end
@@ -93,13 +153,6 @@ pub(crate) struct ProgramCtx<'p> {
     /// when lowering without a checked program (tests, deferred re-lowering),
     /// where a nullable `!` is therefore unsupported.
     null_props: &'p std::collections::HashSet<Span>,
-    /// Names each module's init binds as module-level globals (top-level
-    /// `let`s), used to key global storage per defining module.
-    module_globals: HashMap<Vec<String>, std::collections::HashSet<String>>,
-    /// Defining module of each standard-library global (the implicit prelude:
-    /// `INT64_MAX` etc. are visible everywhere without an import). First
-    /// definition in sorted module order wins, deterministically.
-    prelude_globals: HashMap<String, Vec<String>>,
     closures: RefCell<Vec<MirClosure>>,
     next_closure: Cell<u32>,
 }
@@ -108,6 +161,7 @@ impl<'p> ProgramCtx<'p> {
     #[allow(clippy::too_many_arguments)] // mirrors the checker's channel outputs
     fn new(
         program: &'p Program,
+        tables: &'p LowerTables,
         expr_types: &'p HashMap<Span, Type>,
         view_args: &'p std::collections::HashSet<Span>,
         sum_views: &'p HashMap<Span, Type>,
@@ -118,41 +172,9 @@ impl<'p> ProgramCtx<'p> {
         typeof_types: &'p HashMap<Span, Type>,
         null_props: &'p std::collections::HashSet<Span>,
     ) -> Self {
-        let mut variant_names = std::collections::HashSet::new();
-        for info in program.types.values() {
-            if let TypeKind::Sum { variants } = &info.kind {
-                for v in &variants[..] {
-                    variant_names.insert(v.name.clone());
-                }
-            }
-        }
-        let mut module_globals: HashMap<Vec<String>, std::collections::HashSet<String>> =
-            HashMap::new();
-        for init in &program.inits {
-            let names = module_globals.entry(init.path.clone()).or_default();
-            for s in &init.stmts {
-                if let brass_parser::ast::Stmt::Let { pat, .. } = s {
-                    collect_global_names(pat, names);
-                }
-            }
-        }
-        let mut prelude_globals: HashMap<String, Vec<String>> = HashMap::new();
-        let mut std_paths: Vec<&Vec<String>> = module_globals
-            .keys()
-            .filter(|p| p.first().is_some_and(|seg| seg == "std"))
-            .collect();
-        std_paths.sort();
-        for path in std_paths {
-            for name in &module_globals[path] {
-                prelude_globals
-                    .entry(name.clone())
-                    .or_insert_with(|| path.clone());
-            }
-        }
         ProgramCtx {
             program,
-            mutation: brass_hir::MutationInfo::analyze(program),
-            variant_names,
+            tables,
             expr_types,
             view_args,
             sum_views,
@@ -162,8 +184,6 @@ impl<'p> ProgramCtx<'p> {
             type_names,
             typeof_types,
             null_props,
-            module_globals,
-            prelude_globals,
             closures: RefCell::new(Vec::new()),
             next_closure: Cell::new(0),
         }
@@ -270,7 +290,8 @@ impl<'p> ProgramCtx<'p> {
     /// resolution [`Self::global_symbol`] keys storage by.
     fn is_global_name(&self, module: &[String], name: &str) -> bool {
         let defines = |m: &[String], n: &str| {
-            self.module_globals
+            self.tables
+                .module_globals
                 .get(m)
                 .is_some_and(|names| names.contains(n))
         };
@@ -284,12 +305,13 @@ impl<'p> ProgramCtx<'p> {
             || self
                 .aliased_global(module, name)
                 .is_some_and(|(declared, origin)| defines(&origin, &declared))
-            || self.prelude_globals.contains_key(name)
+            || self.tables.prelude_globals.contains_key(name)
     }
 
     fn global_symbol(&self, module: &[String], name: &str) -> String {
         let defines = |m: &[String], n: &str| {
-            self.module_globals
+            self.tables
+                .module_globals
                 .get(m)
                 .is_some_and(|names| names.contains(n))
         };
@@ -310,7 +332,7 @@ impl<'p> ProgramCtx<'p> {
         {
             return brass_hir::qualify(&declared, &origin);
         }
-        if let Some(owner) = self.prelude_globals.get(name) {
+        if let Some(owner) = self.tables.prelude_globals.get(name) {
             return brass_hir::qualify(name, owner);
         }
         brass_hir::qualify(name, module)
@@ -652,7 +674,7 @@ impl<'a, 'p> FnLower<'a, 'p> {
                         &self.module,
                         body,
                         &p.name,
-                        &self.ctx.mutation,
+                        &self.ctx.tables.mutation,
                     ),
                 }
             })
@@ -753,8 +775,10 @@ pub fn lower_body(
     let no_type_names = HashMap::new();
     let no_typeof_types = HashMap::new();
     let no_null_props = std::collections::HashSet::new();
+    let tables = LowerTables::new(program);
     let ctx = ProgramCtx::new(
         program,
+        &tables,
         &no_types,
         &no_views,
         &no_sum_views,
@@ -821,71 +845,164 @@ pub fn lower_program(program: &Program) -> MirProgram {
     )
 }
 
-/// Lower a whole program with the checker's outputs available: resolved
-/// expression types, so call results that construct an aggregate are seeded
-/// with their instance type (see [`ProgramCtx::expr_types`]); and the spans of
-/// view-convertible anonymous arguments (see [`ProgramCtx::view_args`]). The
-/// real execution paths pass the checker's data; [`lower_program`] is the
-/// inputs-free form used by tests and by runtime re-lowering, where the back
-/// end re-derives types on its own and keeps full argument values.
-#[allow(clippy::too_many_arguments)] // mirrors the checker's channel outputs
-pub fn lower_program_with_types(
-    program: &Program,
-    expr_types: &HashMap<Span, Type>,
-    view_args: &std::collections::HashSet<Span>,
-    sum_views: &HashMap<Span, Type>,
-    call_locations: &HashMap<Span, (String, u32, u32)>,
-    lift_errs: &std::collections::HashSet<Span>,
-    fields_loops: &HashMap<Span, Vec<String>>,
-    type_names: &HashMap<Span, String>,
-    typeof_types: &HashMap<Span, Type>,
-    null_props: &std::collections::HashSet<Span>,
-) -> MirProgram {
-    let ctx = ProgramCtx::new(
-        program,
-        expr_types,
-        view_args,
-        sum_views,
-        call_locations,
-        lift_errs,
-        fields_loops,
-        type_names,
-        typeof_types,
-        null_props,
-    );
-    let mut out = MirProgram::default();
+/// The checker's span-keyed channel outputs, borrowed as one bundle -- the
+/// same ten maps [`lower_program_with_types`] takes positionally, for the
+/// APIs that consume them repeatedly (the lazy pipeline re-lowers against a
+/// growing channel state).
+pub struct CheckerChannels<'a> {
+    pub expr_types: &'a HashMap<Span, Type>,
+    pub view_args: &'a std::collections::HashSet<Span>,
+    pub sum_views: &'a HashMap<Span, Type>,
+    pub call_locations: &'a HashMap<Span, (String, u32, u32)>,
+    pub lift_errs: &'a std::collections::HashSet<Span>,
+    pub fields_loops: &'a HashMap<Span, Vec<String>>,
+    pub type_names: &'a HashMap<Span, String>,
+    pub typeof_types: &'a HashMap<Span, Type>,
+    pub null_props: &'a std::collections::HashSet<Span>,
+}
 
-    let mut fn_names: Vec<&String> = program.functions.keys().collect();
-    fn_names.sort();
-    for name in fn_names {
-        let info = &program.functions[name];
-        // The entry `main` (the root module's bare `main` symbol) is the
-        // program: a failed `expr!` there aborts with the error instead of
-        // propagating (there is no caller to receive a Result), so `!` alone
-        // does not make `main` fallible -- only an explicit `error(...)` does.
-        let entry_main = info.symbol == "main";
-        let body = lower_one(
-            &ctx,
-            info.module.clone(),
-            None,
-            &info.decl.params,
-            &info.decl.body,
-            entry_main,
-        );
-        let fallible = if entry_main && info.decl.ret.is_none() {
-            crate::analysis::constructs_error_block(&info.decl.body)
-        } else {
-            function_fallible(info.decl.ret.as_ref(), &info.decl.body, null_props)
-        };
-        out.functions.push(MirFunction {
-            name: info.decl.name.clone(),
-            symbol: info.symbol.clone(),
-            module: info.module.clone(),
-            fallible,
-            body,
-        });
+/// A partially lowered MIR program for the lazy pipeline. Methods and module
+/// initializers are lowered up front -- the checker settles every method body
+/// before its first body event, and execution runs every init -- while free
+/// functions are lowered one at a time as their checks stream in
+/// ([`SubsetLowering::add_function`]). Closure ids are allocated from one
+/// counter carried across calls, so a late body's closures never collide
+/// with an early one's.
+///
+/// Constant-array promotion is NOT run: it is a whole-program
+/// interprocedural fixpoint (see [`crate::promote`]) and cannot run on a
+/// partial call graph, so the literals are constructed at their use sites,
+/// exactly as un-promoted code always is.
+pub struct SubsetLowering {
+    pub mir: MirProgram,
+    lowered: std::collections::HashSet<String>,
+    next_closure: u32,
+}
+
+impl SubsetLowering {
+    /// Lower every method body and module initializer of `program` (with the
+    /// channel state current at call time); no free function is lowered yet.
+    /// `tables` are the shared HIR-derived tables ([`LowerTables`]), computed
+    /// once by the caller and reused across rebuilds.
+    pub fn new(program: &Program, tables: &LowerTables, channels: &CheckerChannels) -> Self {
+        let ctx = subset_ctx(program, tables, channels, 0);
+        let mut mir = MirProgram::default();
+        lower_methods_into(&ctx, &mut mir, program);
+        for init in &program.inits {
+            let body = lower_init(&ctx, init.path.clone(), &init.stmts);
+            mir.inits.push(MirInit {
+                module: init.path.clone(),
+                body,
+            });
+        }
+        let next_closure = ctx.next_closure.get();
+        let mut closures = ctx.closures.into_inner();
+        closures.sort_by_key(|c| c.id.0);
+        mir.closures = closures;
+        SubsetLowering {
+            mir,
+            lowered: std::collections::HashSet::new(),
+            next_closure,
+        }
     }
 
+    /// Whether free function `symbol`'s body was already added on demand.
+    pub fn is_lowered(&self, symbol: &str) -> bool {
+        self.lowered.contains(symbol)
+    }
+
+    /// Lower free function `symbol`'s body into the program against the
+    /// CURRENT channel state. Returns `false` when `symbol` names no function
+    /// of `program` or was already lowered -- nothing was added, and a caller
+    /// looping on demand should treat a repeat as an unsatisfiable demand
+    /// rather than retry forever.
+    pub fn add_function(
+        &mut self,
+        program: &Program,
+        tables: &LowerTables,
+        symbol: &str,
+        channels: &CheckerChannels,
+    ) -> bool {
+        if self.lowered.contains(symbol) {
+            return false;
+        }
+        let Some(info) = program.functions.get(symbol) else {
+            return false;
+        };
+        let ctx = subset_ctx(program, tables, channels, self.next_closure);
+        lower_function_into(&ctx, &mut self.mir, info, channels.null_props);
+        self.next_closure = ctx.next_closure.get();
+        let mut closures = ctx.closures.into_inner();
+        closures.sort_by_key(|c| c.id.0);
+        self.mir.closures.extend(closures);
+        self.lowered.insert(symbol.to_string());
+        true
+    }
+}
+
+/// A lowering context over the bundled channels, with the closure-id counter
+/// seeded so ids stay unique across separately lowered batches.
+fn subset_ctx<'p>(
+    program: &'p Program,
+    tables: &'p LowerTables,
+    channels: &CheckerChannels<'p>,
+    closure_base: u32,
+) -> ProgramCtx<'p> {
+    let ctx = ProgramCtx::new(
+        program,
+        tables,
+        channels.expr_types,
+        channels.view_args,
+        channels.sum_views,
+        channels.call_locations,
+        channels.lift_errs,
+        channels.fields_loops,
+        channels.type_names,
+        channels.typeof_types,
+        channels.null_props,
+    );
+    ctx.next_closure.set(closure_base);
+    ctx
+}
+
+/// Lower one free function into `out` (the per-function core of
+/// [`lower_program_with_types`]).
+fn lower_function_into(
+    ctx: &ProgramCtx,
+    out: &mut MirProgram,
+    info: &brass_hir::FunInfo,
+    null_props: &std::collections::HashSet<Span>,
+) {
+    // The entry `main` (the root module's bare `main` symbol) is the
+    // program: a failed `expr!` there aborts with the error instead of
+    // propagating (there is no caller to receive a Result), so `!` alone
+    // does not make `main` fallible -- only an explicit `error(...)` does.
+    let entry_main = info.symbol == "main";
+    let body = lower_one(
+        ctx,
+        info.module.clone(),
+        None,
+        &info.decl.params,
+        &info.decl.body,
+        entry_main,
+    );
+    let fallible = if entry_main && info.decl.ret.is_none() {
+        crate::analysis::constructs_error_block(&info.decl.body)
+    } else {
+        function_fallible(info.decl.ret.as_ref(), &info.decl.body, null_props)
+    };
+    out.functions.push(MirFunction {
+        name: info.decl.name.clone(),
+        symbol: info.symbol.clone(),
+        module: info.module.clone(),
+        fallible,
+        body,
+    });
+}
+
+/// Lower every record and sum method into `out` (the method block of
+/// [`lower_program_with_types`]), in sorted order.
+fn lower_methods_into(ctx: &ProgramCtx, out: &mut MirProgram, program: &Program) {
     let mut type_names: Vec<&String> = program.types.keys().collect();
     type_names.sort();
     for tn in type_names {
@@ -904,7 +1021,7 @@ pub fn lower_program_with_types(
                     }
                     if let Some(body) = &method.decl.body {
                         out.methods.push(lower_method(
-                            &ctx,
+                            ctx,
                             info,
                             None,
                             &method.decl.name,
@@ -927,7 +1044,7 @@ pub fn lower_program_with_types(
                         }
                         if let Some(body) = &method.decl.body {
                             out.methods.push(lower_method(
-                                &ctx,
+                                ctx,
                                 info,
                                 Some(v.name.clone()),
                                 &method.decl.name,
@@ -942,6 +1059,51 @@ pub fn lower_program_with_types(
             }
         }
     }
+}
+
+/// Lower a whole program with the checker's outputs available: resolved
+/// expression types, so call results that construct an aggregate are seeded
+/// with their instance type (see [`ProgramCtx::expr_types`]); and the spans of
+/// view-convertible anonymous arguments (see [`ProgramCtx::view_args`]). The
+/// real execution paths pass the checker's data; [`lower_program`] is the
+/// inputs-free form used by tests and by runtime re-lowering, where the back
+/// end re-derives types on its own and keeps full argument values.
+#[allow(clippy::too_many_arguments)] // mirrors the checker's channel outputs
+pub fn lower_program_with_types(
+    program: &Program,
+    expr_types: &HashMap<Span, Type>,
+    view_args: &std::collections::HashSet<Span>,
+    sum_views: &HashMap<Span, Type>,
+    call_locations: &HashMap<Span, (String, u32, u32)>,
+    lift_errs: &std::collections::HashSet<Span>,
+    fields_loops: &HashMap<Span, Vec<String>>,
+    type_names: &HashMap<Span, String>,
+    typeof_types: &HashMap<Span, Type>,
+    null_props: &std::collections::HashSet<Span>,
+) -> MirProgram {
+    let tables = LowerTables::new(program);
+    let ctx = ProgramCtx::new(
+        program,
+        &tables,
+        expr_types,
+        view_args,
+        sum_views,
+        call_locations,
+        lift_errs,
+        fields_loops,
+        type_names,
+        typeof_types,
+        null_props,
+    );
+    let mut out = MirProgram::default();
+
+    let mut fn_names: Vec<&String> = program.functions.keys().collect();
+    fn_names.sort();
+    for name in fn_names {
+        lower_function_into(&ctx, &mut out, &program.functions[name], null_props);
+    }
+
+    lower_methods_into(&ctx, &mut out, program);
 
     for init in &program.inits {
         let body = lower_init(&ctx, init.path.clone(), &init.stmts);

@@ -184,7 +184,7 @@ impl FnLower<'_, '_> {
     }
 
     pub(crate) fn is_variant_name(&self, name: &str) -> bool {
-        self.ctx.variant_names.contains(name)
+        self.ctx.tables.variant_names.contains(name)
     }
 
     fn value_matches(&mut self, subj: LocalId, name: &str) -> Operand {

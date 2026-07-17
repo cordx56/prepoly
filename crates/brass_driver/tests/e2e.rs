@@ -174,6 +174,33 @@ fn e2e_cases_produce_expected_output() {
     }
 }
 
+/// `--eager` runs the whole check before execution instead of the default
+/// lazy pipeline; both must produce identical output and status on a
+/// demand-heavy case (reversed definition order, generic reuse).
+#[test]
+fn eager_flag_matches_the_lazy_pipeline() {
+    let bin = env!("CARGO_BIN_EXE_brass");
+    let pp = e2e_root().join("lazy/demand_chain.cz");
+    let lazy = run_case(bin, &pp);
+    let eager = Command::new(bin)
+        .env("BRASS_CACHE", "off")
+        .arg("--eager")
+        .arg(&pp)
+        .env("BRASS_INCLUDE", libraries_root())
+        .output()
+        .expect("spawn brass --eager");
+    assert!(
+        eager.status.success(),
+        "--eager failed: {}",
+        String::from_utf8_lossy(&eager.stderr)
+    );
+    assert_eq!(lazy.status.code(), eager.status.code());
+    assert_eq!(
+        String::from_utf8_lossy(&lazy.stdout),
+        String::from_utf8_lossy(&eager.stdout),
+    );
+}
+
 /// The interpreter's call-depth guard must fire before the host stack
 /// overflows: runaway recursion through `brass repl` ends in the guard's
 /// clean error, not a process abort. (The JIT intentionally uses the native

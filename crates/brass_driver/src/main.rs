@@ -48,6 +48,11 @@ struct Cli {
     /// program file followed by these.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
+    /// Type-check the whole program before running it (what `brass check`
+    /// does), instead of the default lazy check that runs type inference on a
+    /// separate thread.
+    #[arg(long)]
+    eager: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -69,7 +74,13 @@ enum Command {
 /// Which back end / phase `drive` runs after the front end produces a checked
 /// program.
 enum Mode {
-    Run,
+    /// Type-check and run. `eager` (the `--eager` flag) forces the whole
+    /// check to finish on the calling thread before execution; the default
+    /// for a JIT run is the lazy path, which moves type inference to a
+    /// dedicated checker thread.
+    Run {
+        eager: bool,
+    },
     Check,
     Repl,
 }
@@ -111,7 +122,7 @@ fn run_cli() -> ExitCode {
         None => match cli.file {
             Some(file) => {
                 set_program_args(Some(&file), &cli.args);
-                exit_code(drive(Mode::Run, &file))
+                exit_code(drive(Mode::Run { eager: cli.eager }, &file))
             }
             None => {
                 set_program_args(None, &cli.args);
@@ -514,226 +525,12 @@ fn execute_repl(
     )
 }
 
-/// Resolve each aggregate-producing expression's source span to its
-/// checker-resolved instance type, for the back end to follow. This carries the
-/// element/field types the checker inferred from use into MIR lowering, so a
-/// witness-free constructor (`HashMap.new()`) whose result type the back end
-/// could not infer on its own is seeded from the caller's resolved type. Only
-/// fully-known aggregates (record/sum/array, no remaining inference variable) are
-/// kept; a span recorded with conflicting types (a polymorphic position) is
-/// dropped so a wrong type is never seeded.
-fn aggregate_result_types(
-    typed: &brass_hir::TypedProgram,
-    program: &Program,
-) -> HashMap<Span, brass_hir::Type> {
-    use brass_hir::TypedExprKind;
-    // Per span: the one type every instantiation of the enclosing body agreed on
-    // and whether it may be seeded, or `None` once two instantiations disagreed.
-    //
-    // Seedability is judged AFTER agreement, never before. A generic body checked
-    // once per instantiation reaches the same span at different types -- a call
-    // that yields a `Path` for one receiver and a `string` for another -- and
-    // seeding either onto the shared MIR local would reinterpret the other. Only
-    // FULLY KNOWN types count as observations: a partially inferred sighting of
-    // the same span (an empty `[]` before its element type is fixed) is less
-    // information about the same instantiation, not a disagreement.
-    let mut per_span: HashMap<Span, Option<(brass_hir::Type, bool)>> = HashMap::new();
-    for e in &typed.expressions {
-        // A `ref`/`mut`/`const` view of a value is the same value: the same span
-        // seen once as `int32[]` and once as `const int32[]` agrees with itself.
-        let ty = brass_hir::peel_modes(&e.ty);
-        let seedable = match e.kind {
-            TypedExprKind::Call
-            | TypedExprKind::TypeLiteral(_)
-            | TypedExprKind::VariantLiteral { .. } => is_seedable_instance(ty),
-            // An array literal is seeded only when its element representation
-            // (a nullable cell, a non-default numeric width) cannot be
-            // re-derived from the bare element values, so the checked type must
-            // flow into lowering. Other literals stay inferred. An EMPTY
-            // literal has no element values at all, so any fully-known checked
-            // type (an annotation, or inference from a later use) is seeded.
-            TypedExprKind::Array { empty } => {
-                is_seedable_array(ty) || (empty && is_seedable_empty_array(ty))
-            }
-            _ => continue,
-        };
-        if !is_fully_known(ty) {
-            continue;
-        }
-        // The checker records only the inferred (unannotated) fields in a record's
-        // substitution; the back end's constructor builds the full one. Complete
-        // it so the seeded type is the same nominal the back end constructs --
-        // otherwise the binding's type and its methods key off a sparser type and
-        // misresolve the annotated fields.
-        let ty = complete_aggregate(ty, program);
-        match per_span.get(&e.span) {
-            None => {
-                per_span.insert(e.span, Some((ty, seedable)));
-            }
-            Some(Some((prev, _))) if *prev != ty => {
-                per_span.insert(e.span, None);
-            }
-            _ => {}
-        }
-    }
-    per_span
-        .into_iter()
-        .filter_map(|(span, t)| match t {
-            Some((ty, true)) => Some((span, ty)),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Complete a record's field substitution with its declared fields, recursing
-/// through array elements and nested records. The checker records only the
-/// inferred fields; the back end lays a constructed record out from every
-/// declared field, so the seeded type must carry them all to be the same nominal.
-fn complete_aggregate(ty: &brass_hir::Type, program: &Program) -> brass_hir::Type {
-    complete_aggregate_rec(ty, program, &mut Vec::new())
-}
-
-/// The recursion of [`complete_aggregate`]. `in_progress` holds the nominal ids
-/// currently being completed on this descent: a self-referential type (e.g.
-/// `type Node = { next: Node? }`) mentions itself in its own declared field
-/// types, so descending into that occurrence would rebuild the same fields
-/// forever. The inner occurrence is left as written -- the nominal id is what the
-/// back end keys on, and its own construction sites are seeded separately.
-fn complete_aggregate_rec(
-    ty: &brass_hir::Type,
-    program: &Program,
-    in_progress: &mut Vec<i32>,
-) -> brass_hir::Type {
-    use brass_hir::{NominalType, Type, TypeKind};
-    match ty {
-        Type::Slice(e) => Type::Slice(Box::new(complete_aggregate_rec(e, program, in_progress))),
-        Type::Array(e, n) => Type::Array(
-            Box::new(complete_aggregate_rec(e, program, in_progress)),
-            *n,
-        ),
-        Type::Nullable(e) => {
-            Type::Nullable(Box::new(complete_aggregate_rec(e, program, in_progress)))
-        }
-        Type::Record(n) => {
-            if in_progress.contains(&n.id) {
-                return ty.clone();
-            }
-            in_progress.push(n.id);
-            let mut subst = brass_hir::Substitution::empty();
-            if let Some(TypeKind::Record { fields, .. }) = program.type_by_id(n.id).map(|i| &i.kind)
-            {
-                for f in fields {
-                    let seeded = n.substitution.get(&f.name).cloned();
-                    // A declared-nullable field keeps its declared type whatever
-                    // the constructor stored (the rule mono's `record_type` also
-                    // applies): a `null` seeds `never?` and a non-null value
-                    // seeds its raw type, but the slot is laid out -- and read
-                    // back -- as the declared nullable cell, so a seeded raw
-                    // type would make the destructor/readers reinterpret the
-                    // cell. A seeded proper nullable (a refined `infer?` slot)
-                    // stays.
-                    let value = match (&f.resolved_ty, seeded) {
-                        (Some(decl @ brass_hir::Type::Nullable(_)), seeded)
-                            if is_fully_known(decl)
-                                && !matches!(
-                                    &seeded,
-                                    Some(brass_hir::Type::Nullable(i))
-                                        if !matches!(**i, brass_hir::Type::Never)
-                                ) =>
-                        {
-                            Some(decl.clone())
-                        }
-                        (_, Some(s)) => Some(s),
-                        (decl, None) => decl.clone(),
-                    };
-                    if let Some(v) = value {
-                        subst.insert(
-                            f.name.clone(),
-                            complete_aggregate_rec(&v, program, in_progress),
-                        );
-                    }
-                }
-            } else {
-                // A structural record (no declaration): keep its own fields.
-                for (k, v) in n.substitution.iter() {
-                    subst.insert(k, complete_aggregate_rec(v, program, in_progress));
-                }
-            }
-            in_progress.pop();
-            Type::Record(NominalType::with_substitution(
-                n.id,
-                n.name().to_string(),
-                subst,
-            ))
-        }
-        // Sums carry per-variant fields; the constructor records the active
-        // variant's fields. Recurse into the existing substitution values without
-        // adding declared fields (which are variant-keyed), enough for the payloads.
-        Type::Sum(n) => {
-            if in_progress.contains(&n.id) {
-                return ty.clone();
-            }
-            in_progress.push(n.id);
-            let mut subst = brass_hir::Substitution::empty();
-            for (k, v) in n.substitution.iter() {
-                subst.insert(k, complete_aggregate_rec(v, program, in_progress));
-            }
-            in_progress.pop();
-            Type::Sum(NominalType::with_substitution(
-                n.id,
-                n.name().to_string(),
-                subst,
-            ))
-        }
-        other => other.clone(),
-    }
-}
-
-/// Whether a resolved type is a fully-known record/sum worth seeding onto a call
-/// result: no remaining inference variable anywhere in it. Matches the back end's
-/// [`brass_mir`] seeding filter (records/sums only -- a constructor's result,
-/// whose array fields the back end cannot otherwise type).
-fn is_seedable_instance(ty: &brass_hir::Type) -> bool {
-    use brass_hir::Type;
-    matches!(ty, Type::Record(_) | Type::Sum(_)) && is_fully_known(ty)
-}
-
-/// Whether an array literal's checked type is worth seeding onto its result
-/// local: a fully-known slice/array whose *element representation* the back end
-/// would re-derive differently from the element values -- a nullable element (a
-/// heap cell) or a non-default numeric element (`int64[]`, `uint8[]`,
-/// `float32[]`, a different width than the literal defaults). Matches the
-/// [`brass_mir`] filter for array literals.
-fn is_seedable_array(ty: &brass_hir::Type) -> bool {
-    use brass_hir::{FloatKind, IntKind, Type};
-    let elem = match ty {
-        Type::Slice(e) | Type::Array(e, _) => e,
-        _ => return false,
-    };
-    let needs_pin = match elem.as_ref() {
-        Type::Nullable(_) => true,
-        Type::Int(k) => *k != IntKind::I32,
-        Type::Float(f) => *f != FloatKind::F64,
-        _ => false,
-    };
-    needs_pin && is_fully_known(ty)
-}
-
-/// Whether an *empty* array literal's checked type is worth seeding: any
-/// fully-known slice/array. With no element values to derive from, the checked
-/// type is the back end's only possible source for the element representation
-/// (`let xs: int32[] = []` read before any push would otherwise be refused).
-fn is_seedable_empty_array(ty: &brass_hir::Type) -> bool {
-    matches!(ty, brass_hir::Type::Slice(_) | brass_hir::Type::Array(..)) && is_fully_known(ty)
-}
-
-use brass_hir::is_fully_known;
-
 /// A program that passed every front-end check, ready to run.
 struct Checked {
     program: Program,
     /// Checker-resolved instance types of aggregate-producing expressions, keyed
-    /// by span; the back-end seeding channel (see [`aggregate_result_types`]).
+    /// by span; the back-end seeding channel (see
+    /// `brass_typeck::stream::aggregate_result_types`).
     expr_types: HashMap<Span, brass_hir::Type>,
     /// Spans of anonymous structural arguments the checker approved for view
     /// conversion; MIR lowering wraps exactly these in `Rvalue::RecordView`.
@@ -770,13 +567,22 @@ fn drive(mode: Mode, file: &str) -> Result<(), u8> {
     })?;
     let root = main_path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
-    let checked = match analyze(file, &main_src, &root) {
-        Ok(c) => c,
-        Err(diagnostics) => {
-            for d in diagnostics {
-                eprintln!("{d}");
-            }
-            return Err(1);
+    // A default JIT run checks lazily: type inference runs on a dedicated
+    // checker thread while this thread compiles and executes the program,
+    // demand-first (see [`run_lazy`]). `check`, `repl`, `--eager`, and the
+    // interpreter-only builds (including wasm, which cannot spawn threads)
+    // check eagerly on this thread. A cache hit skips both -- the program
+    // is already fully checked and runs the ordinary way.
+    let lazy = cfg!(jit_backend) && matches!(mode, Mode::Run { eager: false });
+    let checked = if lazy {
+        match load_cached(file, &root) {
+            Some(checked) => checked,
+            None => return run_lazy(file.to_string(), main_src, root),
+        }
+    } else {
+        match analyze(file, &main_src, &root) {
+            Ok(c) => c,
+            Err(diagnostics) => return Err(print_diags(diagnostics)),
         }
     };
 
@@ -785,7 +591,7 @@ fn drive(mode: Mode, file: &str) -> Result<(), u8> {
         // carries the answer, and anything on stdout is noise an editor or a script
         // has to filter out.
         Mode::Check => Ok(()),
-        Mode::Run => execute(
+        Mode::Run { .. } => execute(
             &checked.program,
             &checked.expr_types,
             &checked.view_args,
@@ -895,65 +701,970 @@ fn cached_context_seed(
     seed
 }
 
-/// Parse, resolve the module graph, lower, and statically check `main_src` (a
-/// program whose label is `main_label`, imports resolved relative to `root`).
-/// Returns the checked program or the rendered diagnostics. Shared by file
-/// execution and the interactive REPL, so both report identical errors.
-fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec<String>> {
-    let phase = |name: &'static str, at: std::time::Instant| {
-        brass_utils::perf_phase(name, at.elapsed());
-    };
-    // The analysis cache: on a valid `.czcache` (same compiler, same resolution
-    // environment, every recorded source unchanged) the final module ASTs are
-    // re-lowered -- deterministic and cheap -- and the cached checker channels
-    // are used as-is, skipping type checking entirely. Only an error-free
-    // analysis is ever cached, so a hit implies a clean program; a re-lowering
-    // that nonetheless reports an error treats the cache as stale.
+/// A finished front-end analysis in thread-transportable form: the final
+/// module graph (post-resolution, post-rewrite, post-keyed-specialization)
+/// plus the checker's span-keyed channels. HIR holds `Rc`, so a checked
+/// `Program` cannot cross the checker-thread boundary; the receiver rebuilds
+/// it from the modules with [`assemble_checked`]. A cache hit reproduces the
+/// same shape from disk (`brass_cache::Payload` stores exactly these parts).
+struct AnalyzedProgram {
+    modules: Vec<LoadedModule>,
+    channels: brass_cache::Channels,
+}
+
+/// Re-lower an analysis result into an executable [`Checked`] program.
+/// Lowering is deterministic, so the rebuilt HIR carries the same spans and
+/// type ids the channels are keyed by. A clean analysis re-lowers cleanly; an
+/// error here means a stale cache or a driver bug, and the caller decides
+/// whether to fall back or report.
+fn assemble_checked(analyzed: AnalyzedProgram) -> Result<Checked, Vec<String>> {
+    let (program, lower_errors) = lower(&analyzed.modules);
+    if !lower_errors.is_empty() {
+        return Err(lower_errors
+            .into_iter()
+            .map(|e| format!("error: {}", e.message))
+            .collect());
+    }
+    let c = analyzed.channels;
+    Ok(Checked {
+        program,
+        expr_types: c.expr_types.into_iter().collect(),
+        view_args: c.view_args.into_iter().collect(),
+        sum_views: c.sum_views.into_iter().collect(),
+        call_locations: c.call_locations.into_iter().collect(),
+        lift_errs: c.lift_errs.into_iter().collect(),
+        fields_loops: c.fields_loops.into_iter().collect(),
+        type_names: c.type_names.into_iter().collect(),
+        typeof_types: c.typeof_types.into_iter().collect(),
+        null_props: c.null_props.into_iter().collect(),
+    })
+}
+
+/// The analysis-cache probe: on a valid `.czcache` (same compiler, same
+/// resolution environment, every recorded source unchanged) the final module
+/// ASTs are re-lowered -- deterministic and cheap -- and the cached checker
+/// channels are used as-is, skipping type checking entirely. Only an
+/// error-free analysis is ever cached, so a hit implies a clean program; a
+/// re-lowering that nonetheless reports an error treats the cache as stale
+/// (`None`, and the caller runs the full pipeline).
+fn load_cached(main_label: &str, root: &Path) -> Option<Checked> {
     let entry_path = PathBuf::from(main_label);
     let search = brass_resolve::SearchPaths::from_env();
-    if brass_cache::enabled()
-        && let Some(mut payload) = brass_cache::load(&entry_path, CACHE_FLAVOR, &search)
-    {
-        let t = std::time::Instant::now();
-        reanchor_module_paths(&mut payload.modules, &entry_path, root, &search);
-        let (program, lower_errors) = lower(&payload.modules);
-        if lower_errors.is_empty() {
+    if !brass_cache::enabled() {
+        return None;
+    }
+    let mut payload = brass_cache::load(&entry_path, CACHE_FLAVOR, &search)?;
+    let t = std::time::Instant::now();
+    reanchor_module_paths(&mut payload.modules, &entry_path, root, &search);
+    match assemble_checked(AnalyzedProgram {
+        modules: payload.modules,
+        channels: payload.channels,
+    }) {
+        Ok(checked) => {
             // The full pipeline's clean-program warnings replay so warm runs
             // are not silently quieter than cold ones.
             for w in &payload.warnings {
                 eprintln!("{w}");
             }
-            let c = payload.channels;
-            phase("front/cache-hit", t);
-            return Ok(Checked {
-                program,
-                expr_types: c.expr_types.into_iter().collect(),
-                view_args: c.view_args.into_iter().collect(),
-                sum_views: c.sum_views.into_iter().collect(),
-                call_locations: c.call_locations.into_iter().collect(),
-                lift_errs: c.lift_errs.into_iter().collect(),
-                fields_loops: c.fields_loops.into_iter().collect(),
-                type_names: c.type_names.into_iter().collect(),
-                typeof_types: c.typeof_types.into_iter().collect(),
-                null_props: c.null_props.into_iter().collect(),
-            });
+            brass_utils::perf_phase("front/cache-hit", t.elapsed());
+            Some(checked)
         }
-        tracing::debug!(target: "brass::perf", "cache: re-lowering failed, falling back");
+        Err(_) => {
+            tracing::debug!(target: "brass::perf", "cache: re-lowering failed, falling back");
+            None
+        }
     }
+}
+
+/// Parse, resolve the module graph, lower, and statically check `main_src` (a
+/// program whose label is `main_label`, imports resolved relative to `root`):
+/// the cached fast path when it is valid, the full pipeline otherwise, on the
+/// calling thread. Returns the checked program or the rendered diagnostics.
+/// Shared by eager file execution and the interactive REPL, so both report
+/// identical errors.
+fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec<String>> {
+    if let Some(checked) = load_cached(main_label, root) {
+        return Ok(checked);
+    }
+    assemble_checked(analyze_fresh(main_label, main_src, root, None)?)
+}
+
+/// The checker-thread half of the streaming wiring: progress events flow out
+/// over an unbounded channel (the checker never blocks on a slow consumer),
+/// priority requests flow in and are drained non-blockingly between bodies.
+#[cfg(jit_backend)]
+struct ThreadScheduler {
+    events: tokio::sync::mpsc::UnboundedSender<brass_typeck::stream::CheckEvent>,
+    requests: tokio::sync::mpsc::UnboundedReceiver<brass_typeck::stream::BodyRequest>,
+}
+
+#[cfg(jit_backend)]
+impl brass_typeck::stream::Scheduler for ThreadScheduler {
+    fn drain_requests(&mut self) -> Vec<brass_typeck::stream::BodyRequest> {
+        let mut out = Vec::new();
+        while let Ok(request) = self.requests.try_recv() {
+            out.push(request);
+        }
+        out
+    }
+
+    fn emit(&mut self, event: brass_typeck::stream::CheckEvent) {
+        // A dropped receiver means the consumer stopped listening (it
+        // aborted); checking still finishes for the thread's final result.
+        let _ = self.events.send(event);
+    }
+}
+
+/// The main-thread accumulation of the checker thread's event stream: the
+/// same span-keyed maps [`Checked`] carries, built by replaying channel
+/// deltas as they arrive (removals first -- a delta never removes and
+/// re-adds one span). A `Restarted` event (the keyed-specialization re-pass
+/// rewrote the program, moving spans) drops everything accumulated.
+#[cfg(jit_backend)]
+#[derive(Default)]
+struct MergedChannels {
+    expr_types: HashMap<Span, brass_hir::Type>,
+    view_args: HashSet<Span>,
+    sum_views: HashMap<Span, brass_hir::Type>,
+    lift_errs: HashSet<Span>,
+    fields_loops: HashMap<Span, Vec<String>>,
+    type_names: HashMap<Span, String>,
+    typeof_types: HashMap<Span, brass_hir::Type>,
+    null_props: HashSet<Span>,
+}
+
+#[cfg(jit_backend)]
+impl MergedChannels {
+    fn apply(&mut self, event: brass_typeck::stream::CheckEvent) {
+        use brass_typeck::stream::CheckEvent;
+        match event {
+            // Error verdicts ride the thread's final result in this pipeline;
+            // the event copy gates execution once the JIT consumes the stream
+            // mid-run.
+            CheckEvent::StaticChecked(_) => {}
+            CheckEvent::ContextReady(d)
+            | CheckEvent::BodyChecked(_, d)
+            | CheckEvent::Finished(d, _) => self.apply_delta(d),
+            CheckEvent::Restarted => *self = Self::default(),
+        }
+    }
+
+    fn apply_delta(&mut self, d: brass_typeck::stream::ChannelDelta) {
+        for s in &d.expr_types_removed {
+            self.expr_types.remove(s);
+        }
+        for s in &d.typeof_types_removed {
+            self.typeof_types.remove(s);
+        }
+        self.expr_types.extend(d.expr_types);
+        self.view_args.extend(d.view_args);
+        self.sum_views.extend(d.sum_views);
+        self.lift_errs.extend(d.lift_errs);
+        self.fields_loops.extend(d.fields_loops);
+        self.type_names.extend(d.type_names);
+        self.typeof_types.extend(d.typeof_types);
+        self.null_props.extend(d.null_props);
+    }
+}
+
+/// Render diagnostics to stderr and yield the front end's failure exit code.
+fn print_diags(diags: Vec<String>) -> u8 {
+    for d in diags {
+        eprintln!("{d}");
+    }
+    1
+}
+
+/// The execution side of the lazy pipeline: replays the checker thread's
+/// events into the merged channel state, tracks which bodies are settled,
+/// and sends the priority requests -- the demanded function's path plus the
+/// concrete argument types of the call that needs it -- that pull bodies to
+/// the front of the checking order.
+#[cfg(jit_backend)]
+struct LazyState {
+    events: tokio::sync::mpsc::UnboundedReceiver<brass_typeck::stream::CheckEvent>,
+    requests: tokio::sync::mpsc::UnboundedSender<brass_typeck::stream::BodyRequest>,
+    merged: MergedChannels,
+    checked_fns: HashSet<String>,
+    inits_checked: usize,
+    /// Some diagnostic was reported. Fatal before execution starts: the run
+    /// falls back to the whole-analysis verdict, exactly as eager checking
+    /// would have refused to run the program.
+    errors: bool,
+    /// The keyed-specialization re-pass restarted the analysis: spans moved,
+    /// so everything merged is unusable and the run falls back likewise.
+    restarted: bool,
+    /// The event channel closed (the checker finished and hung up).
+    closed: bool,
+    /// The complete, sorted diagnostic set the terminal event carried, for
+    /// failure paths that must report without joining the checker thread
+    /// (the runtime resolver aborts from inside JIT execution).
+    final_errors: Option<Vec<brass_typeck::TypeError>>,
+    /// A delta carried channel content since the last MIR (re)build. Bodies
+    /// lowered before it may be missing entries the checker settled later
+    /// (a cross-body pinning: an init's array literal fixed by a function's
+    /// `push`), so the lowering is rebuilt before its output is trusted.
+    dirty: bool,
+}
+
+#[cfg(jit_backend)]
+impl LazyState {
+    fn take(&mut self, event: brass_typeck::stream::CheckEvent) {
+        use brass_typeck::stream::{BodyId, CheckEvent};
+        match &event {
+            CheckEvent::StaticChecked(errors) => self.errors |= !errors.is_empty(),
+            CheckEvent::ContextReady(d) => self.absorb_delta(d),
+            CheckEvent::BodyChecked(id, d) => {
+                self.absorb_delta(d);
+                match id {
+                    BodyId::Init(_) => self.inits_checked += 1,
+                    BodyId::Function(symbol) => {
+                        self.checked_fns.insert(symbol.clone());
+                    }
+                }
+            }
+            CheckEvent::Finished(d, errors) => {
+                self.absorb_delta(d);
+                self.errors |= !errors.is_empty();
+                self.final_errors = Some(errors.clone());
+            }
+            CheckEvent::Restarted => self.restarted = true,
+        }
+        self.merged.apply(event);
+    }
+
+    /// Track a delta's verdicts: errors are fatal-before-execution, channel
+    /// content marks the current lowering stale.
+    fn absorb_delta(&mut self, d: &brass_typeck::stream::ChannelDelta) {
+        self.errors |= !d.errors.is_empty();
+        self.dirty |= !d.expr_types.is_empty()
+            || !d.expr_types_removed.is_empty()
+            || !d.view_args.is_empty()
+            || !d.lift_errs.is_empty()
+            || !d.null_props.is_empty()
+            || !d.fields_loops.is_empty()
+            || !d.sum_views.is_empty()
+            || !d.type_names.is_empty()
+            || !d.typeof_types.is_empty()
+            || !d.typeof_types_removed.is_empty();
+    }
+
+    fn pump_blocking(&mut self) {
+        match self.events.blocking_recv() {
+            Some(event) => self.take(event),
+            None => self.closed = true,
+        }
+    }
+
+    /// Absorb everything already queued without blocking.
+    fn pump_pending(&mut self) {
+        while let Ok(event) = self.events.try_recv() {
+            self.take(event);
+        }
+    }
+
+    fn ok(&self) -> bool {
+        !self.errors && !self.restarted
+    }
+
+    /// Block until the entry is settled: every module initializer and (when
+    /// the program has one) `main`. False means the run must fall back --
+    /// an error, a restart, or a checker that finished without settling them.
+    fn wait_gate(&mut self, inits: usize, has_main: bool) -> bool {
+        let settled =
+            |s: &Self| s.inits_checked >= inits && (!has_main || s.checked_fns.contains("main"));
+        while self.ok() && !self.closed && !settled(self) {
+            self.pump_blocking();
+        }
+        self.ok() && settled(self)
+    }
+
+    /// Ask the checker to settle `symbol` next -- the demanded function's
+    /// path and the concrete argument types of the call that needs it --
+    /// and block until it is. False means the run must fall back.
+    fn demand(&mut self, symbol: &str, type_args: Vec<brass_hir::Type>) -> bool {
+        if !self.checked_fns.contains(symbol) {
+            let _ = self.requests.send(brass_typeck::stream::BodyRequest {
+                symbol: symbol.to_string(),
+                type_args,
+            });
+            while self.ok() && !self.closed && !self.checked_fns.contains(symbol) {
+                self.pump_blocking();
+            }
+        }
+        self.ok() && self.checked_fns.contains(symbol)
+    }
+
+    /// The merged channel state as the lowering bundle. Call locations are
+    /// computed by the executor from its own module ASTs, not streamed.
+    fn channels<'a>(
+        &'a self,
+        call_locations: &'a HashMap<Span, (String, u32, u32)>,
+    ) -> brass_mir::CheckerChannels<'a> {
+        brass_mir::CheckerChannels {
+            expr_types: &self.merged.expr_types,
+            view_args: &self.merged.view_args,
+            sum_views: &self.merged.sum_views,
+            call_locations,
+            lift_errs: &self.merged.lift_errs,
+            fields_loops: &self.merged.fields_loops,
+            type_names: &self.merged.type_names,
+            typeof_types: &self.merged.typeof_types,
+            null_props: &self.merged.null_props,
+        }
+    }
+}
+
+/// Fall back to the whole-analysis verdict: drain the event stream, join the
+/// checker, and either report its diagnostics or -- when it succeeded but
+/// the streaming path could not be used (a restart, an executor-side
+/// assembly failure) -- assemble its payload and run the program eagerly.
+#[cfg(jit_backend)]
+fn finish_eagerly(
+    rt: &tokio::runtime::Runtime,
+    checker: tokio::task::JoinHandle<Result<AnalyzedProgram, Vec<String>>>,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<brass_typeck::stream::CheckEvent>,
+) -> Result<(), u8> {
+    while events.blocking_recv().is_some() {}
+    let payload = rt
+        .block_on(checker)
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic.into_panic()));
+    let checked = payload.and_then(assemble_checked).map_err(print_diags)?;
+    execute(
+        &checked.program,
+        &checked.expr_types,
+        &checked.view_args,
+        &checked.sum_views,
+        &checked.call_locations,
+        &checked.lift_errs,
+        &checked.fields_loops,
+        &checked.type_names,
+        &checked.typeof_types,
+        &checked.null_props,
+    )
+    .map_err(|e| {
+        report_runtime_error(&e);
+        1
+    })
+}
+
+/// Compile and prime EVERY recorded deferred target, to a fixpoint: called
+/// when a batch containing `spawn` was compiled, before its code runs.
+/// Spawned code executes on worker threads, which answer deferred calls only
+/// from the cross-thread resolved cache; after this drain, every site any
+/// worker could reach is in it. False aborts the run (a target's check or
+/// compilation failed -- `resolve_deferred` reported it).
+#[cfg(jit_backend)]
+#[allow(clippy::too_many_arguments)] // the execution-side state is one bundle
+fn drain_targets_for_spawn(
+    backend: &mut brass_jit_llvm::LlvmCodegen,
+    program: &Program,
+    tables: &brass_mir::LowerTables,
+    call_locations: &HashMap<Span, (String, u32, u32)>,
+    sources: &brass_resolve::SourceMap,
+    globals: &[(String, brass_hir::Type)],
+    lowering: &mut brass_mir::SubsetLowering,
+    lazy: &mut LazyState,
+    targets: &mut HashMap<String, brass_engine::DeferredSig>,
+) -> bool {
+    loop {
+        let pending: Vec<String> = targets
+            .keys()
+            .filter(|symbol| backend.address_of(symbol).is_none())
+            .cloned()
+            .collect();
+        if pending.is_empty() {
+            return true;
+        }
+        for symbol in pending {
+            let addr = resolve_deferred(
+                backend,
+                &symbol,
+                program,
+                tables,
+                call_locations,
+                sources,
+                globals,
+                lowering,
+                lazy,
+                targets,
+            );
+            if addr == 0 {
+                return false;
+            }
+            brass_jit_llvm::prime_resolved(&symbol, addr);
+        }
+    }
+}
+
+/// The runtime half of deferral: called (through `pp_resolve`) the first
+/// time execution reaches a deferred call site. Ensures the target's body is
+/// checked -- sending the function's path and the site's concrete argument
+/// types to the checker and waiting, when it is not -- lowers it, then
+/// monomorphizes and compiles the instance (and everything it newly needs;
+/// its own calls may defer further) into the LIVE engine. Returns the
+/// callable address, or 0 after reporting -- the site then traps, keeping a
+/// resolver failure defined.
+///
+/// A diagnostic discovered here means the program needed ill-typed code:
+/// the full report is printed (the checker is drained to its terminal event
+/// for the same sorted set eager printing shows) and the process exits 1,
+/// exactly as if the error had been found before execution -- output the
+/// program already produced stands, as documented for lazy checking.
+#[cfg(jit_backend)]
+#[allow(clippy::too_many_arguments)] // the execution-side state is one bundle
+fn resolve_deferred(
+    backend: &mut brass_jit_llvm::LlvmCodegen,
+    symbol: &str,
+    program: &Program,
+    tables: &brass_mir::LowerTables,
+    call_locations: &HashMap<Span, (String, u32, u32)>,
+    sources: &brass_resolve::SourceMap,
+    globals: &[(String, brass_hir::Type)],
+    lowering: &mut brass_mir::SubsetLowering,
+    lazy: &mut LazyState,
+    targets: &mut HashMap<String, brass_engine::DeferredSig>,
+) -> usize {
+    tracing::debug!(target: "brass::perf", %symbol, "lazy: runtime resolve");
+    // Already compiled -- by the startup set, or by an earlier resolution.
+    if let Some(addr) = backend.address_of(symbol) {
+        return addr;
+    }
+    let Some(sig) = targets.get(symbol).cloned() else {
+        eprintln!("error: deferred call to unrecorded instance `{symbol}`");
+        return 0;
+    };
+    let fail = |lazy: &mut LazyState, fallback: &str| -> usize {
+        // Drain to the checker's terminal event so the report is the same
+        // complete, sorted set the eager pipeline prints.
+        while !lazy.closed {
+            lazy.pump_blocking();
+        }
+        match lazy.final_errors.take().filter(|e| !e.is_empty()) {
+            Some(errors) => {
+                let rendered: Vec<(String, Span)> =
+                    errors.into_iter().map(|e| (e.message, e.span)).collect();
+                use std::io::Write;
+                let _ = io::stdout().flush();
+                for line in render_errors(&rendered, sources) {
+                    eprintln!("{line}");
+                }
+                std::process::exit(1);
+            }
+            None => {
+                eprintln!("{fallback}");
+                0
+            }
+        }
+    };
+    if !lowering.is_lowered(&sig.base) {
+        tracing::debug!(
+            target: "brass::perf",
+            base = %sig.base,
+            expr_types = lazy.merged.expr_types.len(),
+            slices = lazy
+                .merged
+                .expr_types
+                .values()
+                .filter(|t| matches!(t, brass_hir::Type::Slice(_)))
+                .count(),
+            "lazy: runtime lower"
+        );
+        if !lazy.demand(&sig.base, sig.type_args.clone()) {
+            return fail(
+                lazy,
+                &format!("error: the check of `{}` did not complete", sig.base),
+            );
+        }
+        let channels = lazy.channels(call_locations);
+        lowering.add_function(program, tables, &sig.base, &channels);
+    }
+    loop {
+        match brass_engine::monomorphize_instance_deferred(
+            &lowering.mir,
+            program,
+            &sig.base,
+            sig.type_args.clone(),
+            globals,
+        ) {
+            Ok(mono) => {
+                targets.extend(mono.deferred.clone());
+                let batch_spawns = brass_engine::batch_spawns(&mono);
+                // Emit every new instance's module BEFORE resolving the one
+                // address: the batch may be mutually recursive, and an
+                // address lookup finalizes all added modules -- each
+                // definition must be in place by then.
+                for f in &mono.functions {
+                    if backend.address_of(&f.symbol).is_some() {
+                        continue;
+                    }
+                    tracing::debug!(target: "brass::perf", symbol = %f.symbol, "lazy: runtime compile");
+                    if let Err(e) = backend.emit_instance_module(&mono, f) {
+                        eprintln!("error: runtime compilation of `{}` failed: {e}", f.symbol);
+                        return 0;
+                    }
+                }
+                drop(mono);
+                let addr = backend.address_of(symbol).unwrap_or(0);
+                if addr != 0 {
+                    brass_jit_llvm::prime_resolved(symbol, addr);
+                }
+                // The batch spawns: everything a worker thread could reach
+                // must be compiled and primed before this call returns (the
+                // spawn runs after it) -- workers cannot compile.
+                if addr != 0
+                    && batch_spawns
+                    && !drain_targets_for_spawn(
+                        backend,
+                        program,
+                        tables,
+                        call_locations,
+                        sources,
+                        globals,
+                        lowering,
+                        lazy,
+                        targets,
+                    )
+                {
+                    return 0;
+                }
+                return addr;
+            }
+            Err(brass_engine::MonoStop::MissingBody {
+                symbol: miss,
+                type_args,
+            }) => {
+                if lowering.is_lowered(&miss) || !program.functions.contains_key(&miss) {
+                    eprintln!("error: lazy compilation cannot supply `{miss}`");
+                    return 0;
+                }
+                if !lazy.demand(&miss, type_args) {
+                    return fail(
+                        lazy,
+                        &format!("error: the check of `{miss}` did not complete"),
+                    );
+                }
+                let channels = lazy.channels(call_locations);
+                lowering.add_function(program, tables, &miss, &channels);
+            }
+            Err(brass_engine::MonoStop::Fail(e)) => {
+                // The same transient-vs-final rule as start-up: retry once
+                // more of the check has landed; a failure against the final
+                // state is real.
+                if !lazy.closed {
+                    lazy.pump_blocking();
+                    lazy.pump_pending();
+                    if lazy.ok() {
+                        continue;
+                    }
+                }
+                return fail(
+                    lazy,
+                    &format!("error: runtime compilation of `{}` failed: {e}", sig.base),
+                );
+            }
+        }
+    }
+}
+
+/// The lazy-check run: type inference happens on the checker thread while
+/// this thread prepares and executes the program, gating only on the bodies
+/// execution actually needs.
+///
+/// 1. The checker thread runs the full streaming analysis; this thread
+///    assembles its own identical module graph (lowering is deterministic,
+///    so spans and type ids agree with the streamed channels).
+/// 2. Once every module initializer and `main` are settled, entry-rooted
+///    monomorphization starts. A reachable function whose body is not
+///    settled yet stops it; the demand -- the function's path and the
+///    concrete argument types of the call -- goes to the checker thread,
+///    which checks that body next; its channel delta lands here, the body
+///    is lowered, and monomorphization retries. Unreachable code never
+///    gates execution.
+/// 3. Any diagnostic that arrives before the program starts aborts the run
+///    with the checker's full, eager-identical report. Once the program
+///    ran, the still-running checker (working through what execution never
+///    needed) is drained at exit, and anything it found is reported with a
+///    non-zero exit: lazy checking defers WHEN errors surface, never
+///    WHETHER.
+/// 4. A keyed-specialization restart or an executor-side assembly failure
+///    falls back to [`finish_eagerly`] -- behaviorally the eager pipeline.
+///
+/// The one diagnostic class that can land after its code ran is a
+/// whole-program-terminal one (match exhaustiveness): a non-exhaustive match
+/// reached before its diagnostic is still DEFINED behavior -- the lowered
+/// match chain ends in an explicit no-arm panic, never LLVM `unreachable` --
+/// so the program aborts cleanly and the exit is non-zero either way.
+#[cfg(jit_backend)]
+fn run_lazy(label: String, src: String, root: PathBuf) -> Result<(), u8> {
+    // The checker recurses per call-site re-elaboration much like the
+    // interpreter recurses per Brass call, so its thread gets the same
+    // generous stack as the driver thread (virtual memory; pages commit only
+    // as the stack grows).
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .thread_name("brass-checker")
+        .thread_stack_size(MAIN_STACK_BYTES)
+        .build()
+        .map_err(|e| {
+            eprintln!("error: cannot start the checker runtime: {e}");
+            1u8
+        })?;
+    // One front end for both sides: the checker thread gets a clone of the
+    // assembled module graph, this thread keeps the original to execute --
+    // lowering is deterministic, so spans and type ids agree with the
+    // streamed channels. Syntax and module-graph problems abort here, before
+    // any thread starts, exactly as eagerly.
+    let search = brass_resolve::SearchPaths::from_env();
+    let front = match front_load(&label, &src, &root, &search) {
+        Ok(front) => front,
+        Err(diags) => return Err(print_diags(diags)),
+    };
+    let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (requests_tx, requests_rx) = tokio::sync::mpsc::unbounded_channel();
+    let checker = rt.spawn_blocking({
+        let (label, front) = (label.clone(), front.clone());
+        move || {
+            let search = brass_resolve::SearchPaths::from_env();
+            let mut sched = ThreadScheduler {
+                events: events_tx,
+                requests: requests_rx,
+            };
+            check_front(&label, front, &search, Some(&mut sched))
+        }
+    });
+
+    // Front-pass diagnostics (qualified uses, spawn ownership) are not
+    // rendered here: the checker reports them with the rest, eager-identical.
+    if !front.errors.is_empty() {
+        return finish_eagerly(&rt, checker, events_rx);
+    }
+    let (program, lower_errors) = lower(&front.modules);
+    if !lower_errors.is_empty() {
+        return finish_eagerly(&rt, checker, events_rx);
+    }
+    let call_locations = call_site_locations(&front.modules, &front.sources);
+
+    let mut lazy = LazyState {
+        events: events_rx,
+        requests: requests_tx,
+        merged: MergedChannels::default(),
+        checked_fns: HashSet::new(),
+        inits_checked: 0,
+        errors: false,
+        restarted: false,
+        closed: false,
+        final_errors: None,
+        dirty: false,
+    };
+    if !lazy.wait_gate(program.inits.len(), program.functions.contains_key("main")) {
+        return finish_eagerly(&rt, checker, lazy.events);
+    }
+
+    // Demand-driven compilation: methods and inits lower up front, function
+    // bodies as monomorphization discovers it needs them. A delta arriving
+    // after a body was lowered can carry entries for that body's spans (a
+    // cross-body pinning settles an earlier body's literal), so the whole
+    // lowering is rebuilt whenever the channel state moved -- per-body
+    // lowering is cheap next to checking and codegen.
+    let mut demanded: Vec<String> = Vec::new();
+    // The HIR-derived lowering tables are channel-independent: computed once,
+    // shared across every rebuild.
+    let tables = brass_mir::LowerTables::new(&program);
+    let mut lowering = 'rebuild: loop {
+        lazy.dirty = false;
+        tracing::debug!(
+            target: "brass::perf",
+            demanded = demanded.len(),
+            closed = lazy.closed,
+            "lazy: lowering rebuild"
+        );
+        let mut built = {
+            let channels = lazy.channels(&call_locations);
+            let mut built = brass_mir::SubsetLowering::new(&program, &tables, &channels);
+            for symbol in &demanded {
+                built.add_function(&program, &tables, symbol, &channels);
+            }
+            built
+        };
+        // The demand loop: monomorphize, and supply each missing body as it
+        // is reported, INCREMENTALLY -- new bodies are appended against the
+        // channel state of their arrival, and only a mono pass over a fully
+        // rebuilt (all-deltas-folded) lowering with no pending revisions is
+        // trusted. Rebuilding once per missing body would re-lower every
+        // method for each round.
+        loop {
+            match brass_engine::monomorphize_entry(&built.mir, &program, true) {
+                Ok(mono) => {
+                    // A `main` that fell outside the typed subset can be
+                    // TRANSIENT under lazy checking -- most prominently a
+                    // keyed (`-> infer!`) call whose specialization re-pass
+                    // is about to restart the whole analysis. Only a skip
+                    // against the checker's final state is the real
+                    // rejection (which the re-run below then reports,
+                    // exactly like the eager JIT).
+                    let main_skipped =
+                        program.functions.contains_key("main") && mono.lookup("main").is_none();
+                    drop(mono);
+                    if main_skipped {
+                        if !lazy.closed {
+                            lazy.pump_blocking();
+                            lazy.pump_pending();
+                            if !lazy.ok() {
+                                return finish_eagerly(&rt, checker, lazy.events);
+                            }
+                            continue 'rebuild;
+                        }
+                        if lazy.dirty {
+                            continue 'rebuild;
+                        }
+                        if !lazy.ok() {
+                            return finish_eagerly(&rt, checker, lazy.events);
+                        }
+                    } else if lazy.dirty {
+                        // Success over a stale (incrementally extended)
+                        // lowering: fold every delta in and prove it again.
+                        continue 'rebuild;
+                    }
+                    break 'rebuild built;
+                }
+                Err(brass_engine::MonoStop::MissingBody { symbol, type_args }) => {
+                    tracing::debug!(target: "brass::perf", %symbol, "lazy: missing body");
+                    if demanded.contains(&symbol) || !program.functions.contains_key(&symbol) {
+                        // The demand cannot be satisfied: not a function of
+                        // the program, or supplied already yet reported
+                        // missing again. A pipeline bug, not a user error --
+                        // fail readably.
+                        eprintln!("error: lazy compilation cannot supply `{symbol}`");
+                        return Err(1);
+                    }
+                    if !lazy.demand(&symbol, type_args) {
+                        return finish_eagerly(&rt, checker, lazy.events);
+                    }
+                    let channels = lazy.channels(&call_locations);
+                    built.add_function(&program, &tables, &symbol, &channels);
+                    demanded.push(symbol);
+                }
+                Err(brass_engine::MonoStop::Fail(e)) => {
+                    // Monomorphization can fail TRANSIENTLY under lazy
+                    // checking: an entry a later body pins (or a whole delta
+                    // still in flight) may be exactly what the failed
+                    // inference needed. Wait for more of the check and
+                    // retry; only a failure against the checker's FINAL
+                    // state -- where eager would have failed identically --
+                    // is real. Diagnostics, when the checker found any,
+                    // explain the program better than the mono error does;
+                    // prefer them.
+                    if !lazy.closed {
+                        lazy.pump_blocking();
+                        lazy.pump_pending();
+                        if !lazy.ok() {
+                            return finish_eagerly(&rt, checker, lazy.events);
+                        }
+                        continue 'rebuild;
+                    }
+                    if lazy.dirty {
+                        continue 'rebuild;
+                    }
+                    if !lazy.ok() {
+                        return finish_eagerly(&rt, checker, lazy.events);
+                    }
+                    report_runtime_error(&format!("typed lowering failed: {e}"));
+                    return Err(1);
+                }
+            }
+        }
+    };
+    // Deterministic inputs: the re-run reproduces the loop's successful pass.
+    let Ok(mono) = brass_engine::monomorphize_entry(&lowering.mir, &program, true) else {
+        eprintln!("error: lazy compilation diverged between passes");
+        return Err(1);
+    };
+
+    // Everything execution can reach is settled. Any diagnostic that arrived
+    // meanwhile aborts before the program runs, exactly as eager checking
+    // refuses to run an ill-typed program.
+    lazy.pump_pending();
+    if !lazy.ok() {
+        drop(mono);
+        return finish_eagerly(&rt, checker, lazy.events);
+    }
+    install_jit_panic_guard();
+    // The deferred runtime: reject an untypeable `main` exactly as `run_mono`
+    // would, compile the startup set, then run with the resolver installed --
+    // a deferred site's first call lands there.
+    if program.functions.contains_key("main") && mono.lookup("main").is_none() {
+        let reason = match &mono.main_skip {
+            Some(reason) => {
+                format!("program uses constructs outside the typed (Value-free) subset: {reason}")
+            }
+            None => "program uses constructs outside the typed (Value-free) subset".to_string(),
+        };
+        report_runtime_error(&reason);
+        return Err(1);
+    }
+    use brass_engine::Codegen as _;
+    let context = inkwell::context::Context::create();
+    let mut backend = brass_jit_llvm::LlvmCodegen::new_backend(&context, &program);
+    backend.begin_program(&mono);
+    backend.codegen_program(&mono);
+    let mut targets: HashMap<String, brass_engine::DeferredSig> = mono.deferred.clone();
+    // The startup run typed every init, so its global table is complete;
+    // runtime single-instance monos read module globals through it.
+    let globals: Vec<(String, brass_hir::Type)> = mono.globals.clone();
+    let startup_spawns = brass_engine::batch_spawns(&mono);
+    // Free the lowering for the resolver's on-demand additions.
+    drop(mono);
+    let result = match backend.finalize() {
+        Ok(()) => {
+            // The startup set spawns: compile and prime every recorded
+            // target BEFORE anything runs, so worker threads -- which can
+            // only read the resolved-address cache -- never reach an
+            // unresolved site.
+            let drained = !startup_spawns
+                || drain_targets_for_spawn(
+                    &mut backend,
+                    &program,
+                    &tables,
+                    &call_locations,
+                    &front.sources,
+                    &globals,
+                    &mut lowering,
+                    &mut lazy,
+                    &mut targets,
+                );
+            if drained {
+                let mut resolve = |backend: &mut brass_jit_llvm::LlvmCodegen, symbol: &str| {
+                    resolve_deferred(
+                        backend,
+                        symbol,
+                        &program,
+                        &tables,
+                        &call_locations,
+                        &front.sources,
+                        &globals,
+                        &mut lowering,
+                        &mut lazy,
+                        &mut targets,
+                    )
+                };
+                backend.execute_deferred(&mut resolve)
+            } else {
+                Err("lazy compilation could not pre-compile the spawned code".to_string())
+            }
+        }
+        Err(e) => Err(e),
+    };
+    match result {
+        Ok(()) => {
+            // The program finished; the checker may still be working through
+            // the parts execution never needed. Drain it and fail the run on
+            // anything it found -- lazy checking defers WHEN errors surface,
+            // never WHETHER.
+            while lazy.events.blocking_recv().is_some() {}
+            match rt
+                .block_on(checker)
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic.into_panic()))
+            {
+                Ok(_payload) => Ok(()),
+                Err(diags) => Err(print_diags(diags)),
+            }
+        }
+        Err(e) => {
+            report_runtime_error(&e);
+            Err(1)
+        }
+    }
+}
+
+/// Interpreter-only builds never take the lazy path (`drive` gates it on
+/// `jit_backend`); this stand-in keeps them compiling and, if ever reached,
+/// behaves exactly like an eager run.
+#[cfg(not(jit_backend))]
+fn run_lazy(label: String, src: String, root: PathBuf) -> Result<(), u8> {
+    let checked = match analyze(&label, &src, &root) {
+        Ok(c) => c,
+        Err(diags) => return Err(print_diags(diags)),
+    };
+    execute(
+        &checked.program,
+        &checked.expr_types,
+        &checked.view_args,
+        &checked.sum_views,
+        &checked.call_locations,
+        &checked.lift_errs,
+        &checked.fields_loops,
+        &checked.type_names,
+        &checked.typeof_types,
+        &checked.null_props,
+    )
+    .map_err(|e| {
+        report_runtime_error(&e);
+        1
+    })
+}
+
+/// The full front-end pipeline on the calling thread: parse, resolve, lower,
+/// and statically check, with no cache probe. Returns the analysis in
+/// thread-transportable form ([`AnalyzedProgram`]); the executable program is
+/// rebuilt from it with [`assemble_checked`]. Persists the analysis to the
+/// cache when possible.
+///
+/// With a scheduler, the type check streams its progress through it (see
+/// `brass_typeck::stream`); a keyed-specialization re-pass emits `Restarted`
+/// first, because the rewritten program's spans invalidate everything
+/// streamed by the first pass.
+fn analyze_fresh(
+    main_label: &str,
+    main_src: &str,
+    root: &Path,
+    sched: Option<&mut dyn brass_typeck::stream::Scheduler>,
+) -> Result<AnalyzedProgram, Vec<String>> {
+    let search = brass_resolve::SearchPaths::from_env();
+    let front = front_load(main_label, main_src, root, &search)?;
+    check_front(main_label, front, &search, sched)
+}
+
+/// The assembled front end, ready to check: the final module graph
+/// (post-resolution, post-rewrite), its sources, and what the front passes
+/// reported. Everything here is thread-transportable and clonable, so the
+/// lazy runner can keep one copy to execute and hand an identical one to the
+/// checker thread -- assembling once instead of parsing the program twice.
+#[derive(Clone)]
+struct FrontEnd {
+    modules: Vec<LoadedModule>,
+    sources: brass_resolve::SourceMap,
+    /// Byte-offset base the entry source was parsed at (identifies the entry
+    /// in `sources` when hashing the context).
+    entry_base: usize,
+    /// Clean-program warnings (spawn auto-acquire notes), already printed;
+    /// carried for the cache payload so warm runs replay them.
+    warnings: Vec<String>,
+    /// Qualified-use and spawn-ownership diagnostics: not fatal on their own
+    /// here -- they abort the analysis together with lowering and type
+    /// errors, keeping the eager report order.
+    errors: Vec<(String, Span)>,
+}
+
+/// Parse, resolve the module graph, and run the AST rewrites (qualified-use
+/// promotion, spawn auto-acquire): the deterministic front half of
+/// [`analyze_fresh`]. Aborts (rendered) on syntax errors and a broken module
+/// graph -- the driver's error policy is per problem class, and checking a
+/// recovered AST would bury the real problem under cascading name/type
+/// errors. Also prints the spawn warnings, once.
+fn front_load(
+    main_label: &str,
+    main_src: &str,
+    root: &Path,
+    search: &brass_resolve::SearchPaths,
+) -> Result<FrontEnd, Vec<String>> {
     let t = std::time::Instant::now();
-    let front = brass_resolve::frontend::assemble(&entry_path, main_src, root, &search);
+    let entry_path = PathBuf::from(main_label);
+    let front = brass_resolve::frontend::assemble(&entry_path, main_src, root, search);
     // A prelude parse failure is a build bug; nothing else can be trusted.
     if let Some(message) = front.stdlib_error {
         return Err(vec![message]);
     }
     let sources = front.sources;
-    let base = front.entry_base;
-    // The driver's error policy: abort per problem class, everything in the
-    // failing class reported with its location. The entry's own syntax errors
-    // come first (checking a recovered AST would bury them under cascading
-    // name/type errors); a broken module graph aborts before lowering, because
-    // analyzing a partial graph would drown the real problem in cascading
-    // unknown-name errors.
     if !front.parse_errors.is_empty() {
         return Err(render_errors(&front.parse_errors, &sources));
     }
@@ -961,12 +1672,67 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         return Err(render_errors(&front.load_errors, &sources));
     }
     let mut modules = front.modules;
-    phase("front/load-modules", t);
+    brass_utils::perf_phase("front/load-modules", t.elapsed());
+
+    // Resolve qualified uses of module imports (`import a.b` + `b.name`),
+    // promoting the used names onto the imports so everything downstream sees
+    // name-based imports. Problems join the analysis diagnostics.
+    let mut errors: Vec<(String, Span)> = Vec::new();
+    for e in brass_resolve::resolve_qualified_uses(&mut modules) {
+        errors.push((e.message, e.span));
+    }
+
+    // The spawn-ownership pass only matters for the JIT runtime (the REPL does not
+    // execute concurrency); it lives in the LLVM crate, so it is feature-gated.
+    // The pass may reject a `spawn` it cannot analyze; those diagnostics join the
+    // analysis errors.
+    #[cfg(jit_backend)]
+    let warnings: Vec<String> = {
+        let warnings = report_spawn_ownership(&modules);
+        for w in &warnings {
+            eprintln!("{w}");
+        }
+        errors.extend(auto_acquire_modules(&mut modules));
+        warnings
+    };
+    #[cfg(not(jit_backend))]
+    let warnings: Vec<String> = Vec::new();
+
+    Ok(FrontEnd {
+        modules,
+        sources,
+        entry_base: front.entry_base,
+        warnings,
+        errors,
+    })
+}
+
+/// Statically check an assembled front end and package the result: the check
+/// half of [`analyze_fresh`], and what the lazy runner's checker thread
+/// executes over its copy of the modules. Persists the analysis to the cache
+/// when possible.
+fn check_front(
+    main_label: &str,
+    front: FrontEnd,
+    search: &brass_resolve::SearchPaths,
+    mut sched: Option<&mut dyn brass_typeck::stream::Scheduler>,
+) -> Result<AnalyzedProgram, Vec<String>> {
+    let phase = |name: &'static str, at: std::time::Instant| {
+        brass_utils::perf_phase(name, at.elapsed());
+    };
+    let entry_path = PathBuf::from(main_label);
+    let FrontEnd {
+        mut modules,
+        sources,
+        entry_base: base,
+        warnings,
+        errors: front_errors,
+    } = front;
 
     // The context key: module names plus the hash of every source that is not
     // the entry's. Contents, not ASTs, because the entry's length shifts every
     // later module's spans -- an AST key would treat each entry edit as a new
-    // context. The rewrites applied below are deterministic functions of these
+    // context. The front rewrites are deterministic functions of these
     // sources, so pre-rewrite content identifies the post-rewrite context.
     let ctx_end = modules.len() - 1;
     let ctx_key = brass_cache::context_key(
@@ -977,26 +1743,6 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
             .filter(|(b, _)| *b != base)
             .map(|(_, src)| brass_cache::content_hash(src.as_bytes())),
     );
-
-    // Resolve qualified uses of module imports (`import a.b` + `b.name`),
-    // promoting the used names onto the imports so everything downstream sees
-    // name-based imports. Problems join the front-end diagnostics below.
-    let qualified_errors = brass_resolve::resolve_qualified_uses(&mut modules);
-
-    // The spawn-ownership pass only matters for the JIT runtime (the REPL does not
-    // execute concurrency); it lives in the LLVM crate, so it is feature-gated.
-    // The pass may reject a `spawn` it cannot analyze; those diagnostics join the
-    // front-end errors below.
-    #[cfg(jit_backend)]
-    let (warnings, spawn_errors): (Vec<String>, Vec<(String, Span)>) = {
-        let warnings = report_spawn_ownership(&modules);
-        for w in &warnings {
-            eprintln!("{w}");
-        }
-        (warnings, auto_acquire_modules(&mut modules))
-    };
-    #[cfg(not(jit_backend))]
-    let (warnings, spawn_errors): (Vec<String>, Vec<(String, Span)>) = (Vec::new(), Vec::new());
 
     // The context seed: the analysis tables of every module EXCEPT the entry,
     // reused so the full check below re-infers only the entry. Looked up in the
@@ -1009,10 +1755,7 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
     let t = std::time::Instant::now();
     let (program, lower_errors) = lower(&modules);
     phase("front/lower-hir", t);
-    let mut errors: Vec<(String, Span)> = spawn_errors;
-    for e in qualified_errors {
-        errors.push((e.message, e.span));
-    }
+    let mut errors: Vec<(String, Span)> = front_errors;
     for e in lower_errors {
         errors.push((e.message, e.span));
     }
@@ -1025,7 +1768,10 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         "running type analysis"
     );
     let t = std::time::Instant::now();
-    let mut analysis = brass_typeck::analyze_with(&program, ctx_seed.as_ref());
+    let mut analysis = match sched.as_deref_mut() {
+        Some(s) => brass_typeck::analyze_streaming(&program, ctx_seed.as_ref(), s),
+        None => brass_typeck::analyze_with(&program, ctx_seed.as_ref()),
+    };
     phase("front/typecheck", t);
     // Reflective decoders: a `-> infer!` method call is keyed by the caller's
     // expectation. Generate a concrete method per requested key, inject them,
@@ -1069,7 +1815,15 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
                     errors.push((e.message, e.span));
                 }
                 program = program2;
-                analysis = brass_typeck::analyze_with(&program, repass_seed.as_ref());
+                // The injected specializations and rewritten call sites moved
+                // spans: a streaming consumer starts over on the re-pass.
+                analysis = match sched {
+                    Some(s) => {
+                        s.emit(brass_typeck::stream::CheckEvent::Restarted);
+                        brass_typeck::analyze_streaming(&program, repass_seed.as_ref(), s)
+                    }
+                    None => brass_typeck::analyze_with(&program, repass_seed.as_ref()),
+                };
                 phase("front/keyed-repass", t);
             }
             Err(e) => errors.push(e),
@@ -1084,8 +1838,19 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
         return Err(render_errors(&errors, &sources));
     }
 
-    let expr_types = aggregate_result_types(&analysis.typed, &program);
+    let expr_types = brass_typeck::stream::aggregate_result_types(&analysis.typed, &program);
     let call_locations = call_site_locations(&modules, &sources);
+    let channels = brass_cache::Channels {
+        expr_types: expr_types.into_iter().collect(),
+        view_args: analysis.view_args.into_iter().collect(),
+        sum_views: analysis.sum_views.into_iter().collect(),
+        call_locations: call_locations.into_iter().collect(),
+        lift_errs: analysis.lift_errs.into_iter().collect(),
+        fields_loops: analysis.fields_loops.into_iter().collect(),
+        type_names: analysis.type_names.into_iter().collect(),
+        typeof_types: analysis.typeof_types.into_iter().collect(),
+        null_props: analysis.null_props.into_iter().collect(),
+    };
     // Persist the clean analysis for the next run. Every on-disk source in
     // the map is stamped (the embedded stdlib has no path and is covered by
     // the compiler tag in the header): `.cz` sources from the very text that
@@ -1097,7 +1862,7 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
     // anymore makes the build uncacheable rather than wrongly cacheable.
     if brass_cache::enabled() {
         let t = std::time::Instant::now();
-        let roots = brass_cache::StampRoots::new(&entry_path, &search);
+        let roots = brass_cache::StampRoots::new(&entry_path, search);
         let mut deps = Vec::new();
         let mut stampable = true;
         for (path, text) in sources.sourced() {
@@ -1116,61 +1881,22 @@ fn analyze(main_label: &str, main_src: &str, root: &Path) -> Result<Checked, Vec
             }
         }
         if stampable {
-            brass_cache::save(
-                &entry_path,
-                CACHE_FLAVOR,
-                &brass_cache::Payload {
-                    deps,
-                    packages: brass_cache::package_names(&search),
-                    modules,
-                    warnings,
-                    channels: brass_cache::Channels {
-                        expr_types: expr_types.iter().map(|(s, t)| (*s, t.clone())).collect(),
-                        view_args: analysis.view_args.iter().copied().collect(),
-                        sum_views: analysis
-                            .sum_views
-                            .iter()
-                            .map(|(s, n)| (*s, n.clone()))
-                            .collect(),
-                        call_locations: call_locations
-                            .iter()
-                            .map(|(s, l)| (*s, l.clone()))
-                            .collect(),
-                        lift_errs: analysis.lift_errs.iter().copied().collect(),
-                        fields_loops: analysis
-                            .fields_loops
-                            .iter()
-                            .map(|(s, f)| (*s, f.clone()))
-                            .collect(),
-                        type_names: analysis
-                            .type_names
-                            .iter()
-                            .map(|(s, n)| (*s, n.clone()))
-                            .collect(),
-                        typeof_types: analysis
-                            .typeof_types
-                            .iter()
-                            .map(|(s, t)| (*s, t.clone()))
-                            .collect(),
-                        null_props: analysis.null_props.iter().copied().collect(),
-                    },
-                },
-            );
+            let payload = brass_cache::Payload {
+                deps,
+                packages: brass_cache::package_names(search),
+                modules,
+                warnings,
+                channels,
+            };
+            brass_cache::save(&entry_path, CACHE_FLAVOR, &payload);
             phase("front/cache-save", t);
+            return Ok(AnalyzedProgram {
+                modules: payload.modules,
+                channels: payload.channels,
+            });
         }
     }
-    Ok(Checked {
-        program,
-        expr_types,
-        view_args: analysis.view_args,
-        sum_views: analysis.sum_views,
-        call_locations,
-        lift_errs: analysis.lift_errs,
-        fields_loops: analysis.fields_loops,
-        type_names: analysis.type_names,
-        typeof_types: analysis.typeof_types,
-        null_props: analysis.null_props,
-    })
+    Ok(AnalyzedProgram { modules, channels })
 }
 
 /// Generate concrete specializations of the reflective (`-> infer!`) methods
