@@ -36,27 +36,32 @@ type Person = {
     first_name: string,
     last_name: string,
 }
+// Method definition
 fun Person.display(self) {
     return "{self.first_name} {self.last_name}"
 }
 fun get_display_name(obj) {
+    // Type conversion
     if let person = Person.from(obj) {
         return person.display()
     } else {
         error("not a Person type")!
     }
 }
+// \`!\` unwraps a Result value
 println(
     get_display_name({
         first_name: "Grace",
         last_name: "Hopper",
-    })
+    })!
 )
+// \`context\` method adds context message to an Error
 println(
     get_display_name({
         name: "Haskell Curry",
         age: 125,
     })
+    .context("type error")!
 )`;
 
 // The language-server wasm is copied into `public/` by the `prebuild` script,
