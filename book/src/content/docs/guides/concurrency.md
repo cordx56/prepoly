@@ -7,7 +7,7 @@ description: "Experimental concurrency with spawn, sync, and with."
 Concurrency is **experimental** and runs on the native (JIT) runtime only.
 :::
 
-Brass's concurrency surface is three functions — there is no `async`, no
+Brass's concurrency surface is three functions, with no `async`, no
 locks, and no ownership annotations to write:
 
 - `spawn(f)` runs a zero-argument closure on another thread.
@@ -59,10 +59,10 @@ count = 6, total = 21
 ```
 
 Both tasks mutate the same `counter`; the compiler notices the shared capture
-and guards it, so the updates do not race. It also prints a warning telling
-you that every access to `counter` is auto-guarded — acquiring the object
+and guards it, so the updates do not race. It also prints a warning that
+every access to `counter` is auto-guarded; acquiring the object
 explicitly with `with(cown, f)` gives finer-grained control and silences it.
-`sync()` is the barrier that makes the spawned work's effects observable —
+`sync()` is the barrier that makes the spawned work's effects observable:
 without it, the final read could run ahead of the tasks. Spawned work is
 otherwise joined at the end of `main`.
 

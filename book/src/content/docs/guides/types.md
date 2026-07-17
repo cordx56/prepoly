@@ -5,7 +5,7 @@ description: "Records, methods, sum types, interfaces, and structural subtyping 
 
 ## Record types
 
-We can define new types with their fields as follows:
+New types are defined with their fields:
 
 ```brass
 type Account = {
@@ -52,7 +52,7 @@ Records have reference semantics: `acc.deposit(100)` mutates the account the
 caller sees, because `self` is always a reference. A method is in scope
 wherever the type is, with no separate import.
 
-Method parameter and return types are inferred like function ones — `deposit`
+Method parameter and return types are inferred like function ones. `deposit`
 and `describe` above carry no annotations at all, and `Account.open` could
 omit its `-> Account` too.
 
@@ -75,7 +75,7 @@ println("{a.id} / {b.id}")   // 1001 / AL17001
 ## Sum types
 
 The same `type` keyword defines "OR" types (tagged unions). Variants are
-written with `|`, and each variant may carry fields — or none:
+written with `|`, and each variant may carry fields, or none:
 
 ```brass
 type Shape =
@@ -85,7 +85,7 @@ type Shape =
 ```
 
 Construct a variant as `Type.Variant { ... }` (a unit variant is just
-`Type.Variant`), and take values apart with `match` — see
+`Type.Variant`), and take values apart with `match`. See
 [Pattern matching](/guides/pattern-matching/):
 
 ```brass
@@ -163,8 +163,8 @@ fun User.to_string(self) -> string {
 ```
 
 Multiple interfaces are comma-separated: `type User: Showable, Comparable`.
-An interface may also require plain fields, and it works for sum types too —
-every variant must satisfy it:
+An interface may also require plain fields; it works for sum types too,
+where every variant must satisfy it:
 
 ```brass
 type Named = {
@@ -179,8 +179,8 @@ type Pet: Named =
 ## Structural subtyping
 
 Separately from interfaces, a plain function with an unannotated parameter
-accepts _any_ value that structurally has the members it uses — no interface
-declaration needed:
+accepts _any_ value that structurally has the members it uses, with no
+interface declaration needed:
 
 ```brass
 type ConsoleLogger = {
@@ -232,11 +232,11 @@ someone.display()   // I am Asimov
 "In scope" is per module: an anonymous value only adopts a type declared in
 or imported into the module where the call appears. If `Person` lives in
 another module this one never imports, `someone.display()` is an error naming
-the missing import — while a `Person` returned by an imported function still
-dispatches `display()`, because its type is already known.
+the missing import. A `Person` returned by an imported function still
+dispatches `display()`, though, because its type is already known.
 
 You can also convert a value to a record type explicitly with `T.from(v)`,
-which yields `T?` — the record when `v` structurally has all of `T`'s fields,
+which yields `T?`, the record when `v` structurally has all of `T`'s fields,
 else `null`:
 
 ```brass

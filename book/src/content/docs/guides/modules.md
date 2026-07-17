@@ -4,7 +4,8 @@ description: "Splitting a program across files with imports and visibility."
 ---
 
 Brass organizes code into modules: every file is a module, and directories
-form the module path. Let's split a small geometry library across files.
+form the module path. The following example splits a small geometry library
+across files.
 
 First, write `geometry/vec.cz`:
 
@@ -79,13 +80,13 @@ fun main() {
 }
 ```
 
-A few points worth noting:
+A few points:
 
 - A type's methods travel with it: importing `Vec2` makes `a.add(b)` and
   `Vec2.new(...)` available with no separate import.
 - A name beginning with `_` (like `_helper`) is private to its module and
   cannot be imported.
-- The top-level standard library is an implicit prelude — `sqrt`, `println`,
+- The top-level standard library is an implicit prelude: `sqrt`, `println`,
   and the array/string helpers need no import. Nested standard-library
   modules are not in the prelude and are imported explicitly, e.g.
   `import std.collections.{ HashMap }`.

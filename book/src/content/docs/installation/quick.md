@@ -3,7 +3,7 @@ title: "Quick start"
 description: "Download and install the Brass toolchain."
 ---
 
-You can download and install Brass toolchain by running the command below:
+Install the Brass toolchain by running the command below:
 
 ```bash
 curl -fSL https://raw.githubusercontent.com/brass-cz/brass/refs/heads/main/scripts/install.sh | sh

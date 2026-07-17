@@ -6,7 +6,7 @@ description: "Printing, reading input, and file I/O."
 ## Printing
 
 `print(value)` writes a value's text to standard output; `println(value)` adds
-a newline. Both take a single argument — combine values with string
+a newline. Both take a single argument, so combine values with string
 interpolation:
 
 ```brass
@@ -25,8 +25,8 @@ println(Point { x: 1, y: 2 })
 ## Reading input
 
 `input()` reads one line from standard input, without the trailing newline.
-It returns `string!` (reading can fail), so unwrap it with `!` — at the top
-level a failure just ends the program with the error — or handle it with
+It returns `string!` (reading can fail). Unwrap it with `!`, which at the top
+level ends the program with the error on failure, or handle it with
 `match`:
 
 ```brass

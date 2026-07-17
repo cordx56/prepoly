@@ -5,8 +5,8 @@ description: "fields(x), typeof(x), definite assignment, and reflective decoders
 
 Brass exposes a value's type and a record's structure to code through
 compile-time constructs (`fields`, `typeof`). They are resolved entirely during
-type checking -- there is no runtime type information and no dynamic field
-access -- so their behavior is predictable by mentally expanding them.
+type checking: there is no runtime type information and no dynamic field
+access, so their behavior is predictable by mentally expanding them.
 
 ## `fields(x)`
 
@@ -78,7 +78,7 @@ const n = typeof(x).from(3.9)!  // the `from` of x's numeric type
 
 In every value context `typeof(v)` decays to the type's name string, exactly as
 a `fields()` descriptor decays to the field name outside `v[field]`. Only the
-operand's type is consulted -- a bare variable costs nothing at runtime -- but a
+operand's type is consulted, so a bare variable costs nothing at runtime; a
 compound operand (a call, an element read) is still evaluated for its effects,
 like any other argument.
 
@@ -89,7 +89,7 @@ answer is fixed at compile time:
 
 - a **field** reads as the field's value, as always;
 - a **method** decays to its own **name** as a string, exactly as a `fields()`
-  descriptor does -- a non-null value, so it is truthy. This holds for the
+  descriptor does: a non-null value, so it is truthy. This holds for the
   methods of a `string`, an array, or a scalar class, and for a record's or a
   sum's declared methods (`fun T.m`) alike, so
   `if v.m { v.m() } else { ... }` dispatches on whether the receiver's type
@@ -122,19 +122,19 @@ println(describe(["x", "y"]))
 ```
 
 `s.split(...)` would not type against `Segments`, and `s.parts` names no member
-of `string` -- but each arm is reached only by the receiver it fits. This is how
+of `string`, but each arm is reached only by the receiver it fits. This is how
 a library takes "a string, an array of strings, or a `Path`" through one
 parameter without overloading or union types.
 
 Every receiver class supports the test. A scalar (`int32`, `bool`, ...)
 carries only its stdlib methods, so an unknown name on one reads as `null`
-like everywhere else -- which is what lets a presence-dispatching body
+like everywhere else, which is what lets a presence-dispatching body
 instantiate at scalars too.
 
 The prelude turns this into a direct **type test** for the primitives: each
 primitive type implements only its own `is_<type>` method (`is_string`,
 `is_int32`, `is_uint8`, ..., `is_bool`, `is_float64`, `is_array`), so
-`v.is_string` is present -- truthy -- exactly when `v` is a `string`, and
+`v.is_string` is present (truthy) exactly when `v` is a `string`, and
 reads as `null` on every other type:
 
 ```brass
@@ -152,14 +152,14 @@ println(describe(3))
 println(describe(1.5))
 ```
 
-Calling the method (`v.is_string()`) returns `true` -- it only exists on the
+Calling the method (`v.is_string()`) returns `true`: it only exists on the
 matching type, so the call is only reachable there. Records and sums carry
 none of these members.
 
 ## Building a value field by field
 
 An annotated `let` may omit its initializer. The binding must then be
-definitely assigned before it is read -- either all at once, or, for a record,
+definitely assigned before it is read, either all at once, or, for a record,
 one field at a time. A `fields` loop that stores into every field of such a
 binding initializes it completely:
 
@@ -181,10 +181,10 @@ so they are allowed on an uninitialized binding.
 
 ## Reflective deserialization
 
-Together these make deserialization -- filling a struct from a name-keyed source
--- expressible without any per-type boilerplate beyond the field walk. The
-target's own field names drive the lookup, and a missing key is a decode error
-naming the field:
+Together these make deserialization (filling a struct from a name-keyed
+source) expressible without any per-type boilerplate beyond the field walk.
+The target's own field names drive the lookup, and a missing key is a decode
+error naming the field:
 
 ```brass
 import std.collections.{ HashMap }
@@ -219,7 +219,7 @@ the target type (`let ret: infer` becomes `let ret: User`), and
 (numbers between numeric types, a value of the target's own type), producing a
 runtime decode error otherwise.
 
-This turns a whole recursive JSON-to-struct decoder into one method — this is
+This turns a whole recursive JSON-to-struct decoder into one method. This is
 exactly how the `data.json` library implements `JsonValue.into` (abridged):
 
 ```brass norun
@@ -252,7 +252,7 @@ arm.
 
 Reflective decoding is specialized at compile time: each `(receiver, method,
 target type)` triple becomes a generated concrete method, and injecting those
-changes the program — so the whole front end type-checks a second time. A
+changes the program, so the whole front end type-checks a second time. A
 keyed build costs roughly twice a plain one; the caches described in
-[Performance & caching](/references/performance/) absorb that cost -- the
+[Performance & caching](/references/performance/) absorb that cost: the
 `.czcache` makes every unchanged build skip both passes entirely.

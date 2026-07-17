@@ -16,12 +16,11 @@
 </div>
 
 Brass is a statically typed, structurally typed scripting language with
-flexible type inference. Its `.cz` source extension is taken from *copper* and
-*zinc* -- the two metals that make up brass; it
-runs like an interpreter, but every function is fully type-checked just before
-it executes, and most types are inferred rather than written. A program is run by
-a **just-in-time compiler** for native speed, or by an **interpreter** for the
-REPL and WebAssembly.
+flexible type inference. Its `.cz` source extension comes from *copper* and
+*zinc*, the two metals that make up brass. A Brass program runs like a script,
+but every function is fully type-checked just before it executes, and most
+types are inferred rather than written. A **just-in-time compiler** runs the
+program at native speed; an **interpreter** backs the REPL and WebAssembly.
 
 Quick start:
 
@@ -45,8 +44,8 @@ curl -fSL https://raw.githubusercontent.com/brass-cz/brass/refs/heads/main/scrip
   `!` on a nullable unwraps or returns null early (the return type gains
   `?`), and works at the top level and in `main`, where a failure prints the
   error and exits.
-- **Structural conversion.** `T.from(v)` for a record type `T` yields `T?` — the
-  record when `v` structurally has all of `T`'s fields, else null — so
+- **Structural conversion.** `T.from(v)` for a record type `T` yields `T?`: the
+  record when `v` structurally has all of `T`'s fields, null otherwise. So
   `if let p = T.from(v)` branches on the actual value.
 - **References with inferred mutability.** An unannotated parameter is passed by
   reference and its mutability is inferred; `infer` deep-copies instead; `ref(T)`

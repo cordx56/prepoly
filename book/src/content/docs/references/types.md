@@ -7,8 +7,8 @@ Brass is statically typed with flexible type inference. The whole program
 is checked before anything runs; annotations constrain, they are never
 required for safety.
 
-The inference is Hindley-Milner-**style** — unification over type variables —
-but deliberately not textbook HM, deviating where a scripting language
+The inference is Hindley-Milner-**style**, unification over type variables,
+but deliberately not textbook HM; it deviates where a scripting language
 benefits:
 
 - A polymorphic function is not generalized once into a principal type
@@ -20,7 +20,7 @@ benefits:
 - Numeric literals default by magnitude and _adapt_ to the context they flow
   into, and value-preserving numeric conversions are inserted implicitly at
   flow points (see [Literals](#literals) and
-  [conversions](#explicit-conversions)) — textbook HM would reject these
+  [conversions](#explicit-conversions)). Textbook HM would reject these
   mixed-type uses instead of converting.
 
 ## Primitive types
@@ -32,7 +32,7 @@ benefits:
 | Floats            | `float32` `float64`                |
 | Other             | `bool` `string` `void`             |
 
-`void` is the no-value return type. There is no character type — a character
+`void` is the no-value return type. There is no character type: a character
 is a one-character `string`. Error diagnostics may additionally mention
 `never` (the type of `null` before it meets a context, spelled `never?`); it
 is not writable in source.
@@ -60,7 +60,7 @@ A bracket literal `[...]` is typed in this order:
 
 1. A type annotation (or another inference result, such as the parameter it is
    passed to) decides: the literal takes that type.
-2. Elements that cannot unify make it a **tuple** — but a `null` element never
+2. Elements that cannot unify make it a **tuple**, but a `null` element never
    does: `null` unifies with any element type, so `[4, null, 65]` is a
    sequence of `int32?`.
 3. Bound immutably (`const`), it is a **fixed-length array**:
@@ -87,8 +87,8 @@ concatenates.
 ### Flow conversions
 
 Numeric values also convert automatically when they _flow_ into a numeric
-position of another type — an assignment, an argument, a return value, a
-compound assignment, or an element/field store — but only when the conversion
+position of another type (an assignment, an argument, a return value, a
+compound assignment, or an element/field store), but only when the conversion
 is **value-preserving**:
 
 - an integer into a strictly wider integer of the same signedness;
@@ -98,12 +98,12 @@ is **value-preserving**:
   `int32`/`uint32` for `float64`, up to `int16`/`uint16` for `float32`.
 
 So `let b: int64 = an_int32` and `total += an_int32` (with `total: int64`)
-both widen the value. Anything lossy — a narrower integer, a sign change, a
-narrower float, `int64` into `float64`, or float into int — never happens
+both widen the value. Anything lossy (a narrower integer, a sign change, a
+narrower float, `int64` into `float64`, or float into int) never happens
 implicitly; the error suggests the explicit conversion.
 
 A `T` value also flows freely into a `T?` position. A nullable value never
-flows into a non-nullable one — it must be narrowed first.
+flows into a non-nullable one; it must be narrowed first.
 
 ### Explicit conversions
 
@@ -111,16 +111,16 @@ flows into a non-nullable one — it must be narrowed first.
 | --------------------------------- | --------- | -------------------------------------------------------------------------------- |
 | `intN.from(x)`                    | `intN!`   | range-checked; `Err` when out of range                                           |
 | `intN.parse(s)`                   | `intN!`   | parses a string                                                                  |
-| `floatN.from(x)`                  | `floatN`  | **total** — always succeeds, precision loss is accepted because it was asked for |
+| `floatN.from(x)`                  | `floatN`  | **total**: always succeeds, precision loss is accepted because it was asked for  |
 | `floatN.parse(s)`                 | `floatN!` | parses a string                                                                  |
 | `string.from(x)`                  | `string`  | total; renders any value                                                         |
-| `T.from(v)` for a record type `T` | `T?`      | structural conversion — see [below](#structural-conversion)                      |
+| `T.from(v)` for a record type `T` | `T?`      | structural conversion: see [below](#structural-conversion)                       |
 
-Note the asymmetry: `int32.from(3.9)` can fail (and truncates toward zero on
-success), so it returns a Result; `float64.from(big_int64)` cannot fail, so it
-returns a plain float even though it may round. The prelude also provides free
-function aliases (`int32_from`, `int32_parse`, `float64_from`,
-`float64_parse`, `string_from`).
+`int32.from(3.9)` can fail (and truncates toward zero on success), so it
+returns a Result; `float64.from(big_int64)` cannot fail, so it returns a plain
+float even though it may round. The prelude also provides free function
+aliases (`int32_from`, `int32_parse`, `float64_from`, `float64_parse`,
+`string_from`).
 
 ## Parameter passing
 
@@ -134,8 +134,8 @@ not annotated:
 | `ref(T)`                  | immutable reference                   | rejected                                                    |
 | `ref(mut(T))`             | mutable reference                     | **writes through** to the caller                            |
 | `mut(T)`                  | mutable deep copy                     | stays local                                                 |
-| `infer`                   | read-only deep copy                   | rejected — mutating an `infer` parameter is a compile error |
-| _(numeric type)_          | by value                              | n/a — numbers are copied                                    |
+| `infer`                   | read-only deep copy                   | rejected; mutating an `infer` parameter is a compile error  |
+| _(numeric type)_          | by value                              | n/a; numbers are copied                                     |
 
 Details:
 
@@ -169,7 +169,7 @@ to `null`. The prelude's `assert(cond, msg: string?)` is callable as
 
 `type Name = { fields... }` declares a nominal record type. A field without a
 type annotation accepts any value; its type is fixed per construction site (a
-record type with such open fields behaves as an inferred-generic type — each
+record type with such open fields behaves as an inferred-generic type: each
 use site gets its own instantiation).
 
 Records and arrays have **reference semantics**: mutating through one binding
@@ -182,10 +182,10 @@ A value of a record type is usable wherever a _structurally smaller_ record is
 required: a function parameter constrains a value only by the members it
 actually uses (unannotated parameters), or by the named type's members
 (annotated). A record with more fields satisfies a requirement of fewer
-fields. Arrays are invariant in their element type. Sum types are nominal —
+fields. Arrays are invariant in their element type. Sum types are nominal:
 only the declared type matches, unless the sum **declares a parent**
 (`type Child: Parent`), which admits it at the parent's flow sites by
-rebuild — see
+rebuild. See
 [Declared sum subtyping](/references/syntax-sugar/#declared-sum-subtyping).
 
 When an **anonymous record** (`{ field: value, ... }`) is passed to an
@@ -197,19 +197,18 @@ parameter.
 ### Anonymous-record method dispatch
 
 Calling a method on a structural value resolves it against the **in-scope**
-record types — those declared in or imported into the calling module
-(builtins and the implicit prelude count): if **exactly one** such type
-declares that method and the value satisfies that type's fields, the call
-dispatches to it with no annotation. An anonymous value never adopts a type
-the module has not imported, even when its shape matches; the error names the
-satisfied type and the missing import. Zero candidates produce a near-miss
-diagnostic; several candidates make the call ambiguous — a compile error at
-the value asking for an annotation.
+record types: those declared in or imported into the calling module (builtins
+and the implicit prelude count). If **exactly one** such type declares that
+method and the value satisfies that type's fields, the call dispatches to it
+with no annotation. An anonymous value never adopts a type the module has not
+imported, even when its shape matches; the error names the satisfied type and
+the missing import. Zero candidates produce a near-miss diagnostic; several
+candidates make the call ambiguous: a compile error at the value asking for an
+annotation.
 
 This scoping gates only the adoption of a type by an anonymous value. A value
-whose nominal type is already known — the return of an imported function,
-say — dispatches its methods by that type; the type's name need not be
-imported.
+whose nominal type is already known (the return of an imported function, say)
+dispatches its methods by that type; the type's name need not be imported.
 
 ### Structural conversion
 
@@ -223,10 +222,10 @@ if let person = Person.from(obj) {
 }
 ```
 
-`v` may be of **any** type — a value that is not a record at all simply has
+`v` may be of **any** type: a value that is not a record at all simply has
 none of `T`'s fields, so the conversion answers `null` rather than failing to
-compile. That is what lets one function take a value whose type differs per
-call site and branch on what it turned out to be:
+compile. This lets one function take a value whose type differs per call site
+and branch on what it turned out to be:
 
 ```
 fun as_text(value) -> string! {
@@ -242,13 +241,13 @@ fun as_text(value) -> string! {
 
 The second guard is a **member-presence test**: an uncalled member is a
 compile-time question about the argument's type, and the arm behind a member
-that type does not have is statically dead — never checked, never emitted (see
+that type does not have is statically dead: never checked, never emitted (see
 [Absent fields in conditions](#absent-fields-in-conditions)). `Path.from`, by
 contrast, decides at run time, which is why the string case needs a guard of its
 own: without it, `return value` would be checked against the `string` return with
 `value` still a `Path`. The same guard is written more directly as
-`value.is_string` — each primitive type implements only its own `is_<type>`
-method, so the presence test doubles as a type test (see
+`value.is_string`, since each primitive type implements only its own
+`is_<type>` method, so the presence test doubles as a type test (see
 [the reflection reference](/references/reflection/#member-presence-xm-without-a-call)).
 
 ## Interfaces
@@ -259,7 +258,7 @@ compile time; multiple constraints are comma-separated (`type B: A, C`). When
 [declared sum subtyping](/references/syntax-sugar/#declared-sum-subtyping)
 instead: exact variant coverage, widening-only variants, and admission at the
 parent's flow sites by rebuild. For record constraints, no implementation is
-inherited — the constraint is pure satisfaction:
+inherited; the constraint is pure satisfaction:
 
 - a required **field** must exist with an _invariant_ type (fields are
   mutable, so a subtype field would be unsound);
@@ -285,7 +284,7 @@ it does not declare.
 
 Method return types are inferred like function return types. A method call on
 a value whose concrete type is not yet known is resolved when it becomes
-known — per instantiation.
+known, per instantiation.
 
 ## Nullable
 
@@ -297,14 +296,14 @@ An un-narrowed nullable allows only: the boolean test positions below,
 passing it where `T` is required are compile errors
 ("nullable value must be checked for null before use").
 
-**Narrowing** — inside these forms, the value has type `T`:
+**Narrowing**: inside these forms, the value has type `T`:
 
-- `if x { ... }` and `if x != null { ... }` — in the truthy branch;
-- `if !x { return ... }` / `if x == null { return ... }` — after the guard,
+- `if x { ... }` and `if x != null { ... }`: in the truthy branch;
+- `if !x { return ... }` / `if x == null { return ... }`: after the guard,
   when the guard block always returns;
-- `if let y = x { ... }` — `y` is the non-null value in the then branch.
+- `if let y = x { ... }`: `y` is the non-null value in the then branch.
 
-A narrowed module global — or a local that a closure assigns — is re-widened
+A narrowed module global, or a local that a closure assigns, is re-widened
 after any call, since the call could reassign it.
 
 ### Absent fields in conditions
@@ -316,8 +315,8 @@ fields (`if person.name { ... }`). Outside a condition, a missing field is
 still an error, and a missing field on a _sum type_ value is an error even in
 a condition.
 
-A condition the type alone decides — an absent member (always false) or a
-present, non-nullable one (always true) — **folds statically**, and everything
+A condition the type alone decides, whether an absent member (always false)
+or a present, non-nullable one (always true), **folds statically**, and everything
 the fold makes unreachable is left unchecked: the arm that is not taken, and,
 when the taken arm always returns, the statements after the `if`. The back end
 folds the same branch and never emits that code, so a generic body can probe
@@ -332,13 +331,13 @@ fun as_text(value) -> string {
 }
 ```
 
-An ordinary `bool` condition is not statically known, so it never folds — this
+An ordinary `bool` condition is not statically known, so it never folds; this
 does not hide errors in code that can run.
 
 ## Result
 
 `T!` is `Result<T, E>` over the `Result` declared in the prelude
-(std/prelude/error.cz) — an ordinary two-variant sum with `Ok { value }` and
+(std/prelude/error.cz): an ordinary two-variant sum with `Ok { value }` and
 `Err { error }`, resolved by normal scoping at every sugar site, so a module
 may [shadow it](/references/syntax-sugar/#the-result-behind-fallibility). The
 error payload type `E` is inferred from the function's error sources (all
@@ -346,10 +345,10 @@ error sites of one function must reconcile to one payload type).
 
 - `error(x)` is an ordinary prelude function (its name is reserved in call
   position) that builds
-  `Err { error: Error { value: x, location: <call site>, frames: [] } }` —
-  the payload is the prelude `Error` record, stamped with the caller's
-  position through the implicit `Location` argument. Traces, `context`, and
-  the rendering are specified in
+  `Err { error: Error { value: x, location: <call site>, frames: [] } }`. The
+  payload is the prelude `Error` record, stamped with the caller's position
+  through the implicit `Location` argument. Traces, `context`, and the
+  rendering are specified in
   [Error traces](/references/syntax-sugar/#error-traces).
 - A function is _fallible_ when its body uses `error(...)` or a
   Result-operand `expr!`, or its declared return type is a Result. In a
@@ -359,30 +358,29 @@ error sites of one function must reconcile to one payload type).
 - The postfix **`!`** operator propagates: `expr!` unwraps an `Ok` or returns
   the `Err` early from the enclosing function. A propagated payload that is
   not already the prelude `Error` (a builtin's or plugin's plain string, for
-  example) is **lifted** into one at the propagation site — that is what
-  lets one body mix `error(..)` with `!`-forwarded builtin failures.
+  example) is **lifted** into one at the propagation site, which is what lets
+  one body mix `error(..)` with `!`-forwarded builtin failures.
 - `!` also accepts a **declared subtype** of the scope's Result
-  (`type MyResult: Result` — see
+  (`type MyResult: Result`, see
   [Declared sum subtyping](/references/syntax-sugar/#declared-sum-subtyping)):
   the value is rebuilt as the parent at the operand and `!` proceeds on it.
 - On a **NULLABLE** operand, `expr!` unwraps the value, and a null returns
-  **null itself** early -- the enclosing function's return type gains an
-  outer `?` (it does not become fallible). A body mixing bare returns,
-  `error(...)`, and a nullable `!` therefore infers `Result<T, E>?`: consume
-  it by narrowing the `?` first, then matching the Result. An explicit
-  non-nullable return annotation rejects a nullable `!` in the body.
+  **null itself** early: the enclosing function's return type gains an outer
+  `?` (it does not become fallible). A body mixing bare returns, `error(...)`,
+  and a nullable `!` therefore infers `Result<T, E>?`: consume it by
+  narrowing the `?` first, then matching the Result. An explicit non-nullable
+  return annotation rejects a nullable `!` in the body.
 - `!` is allowed inside any named function whose return can carry the
-  failure, **at the module top level, and in `main`** (not yet in closures —
-  see [Closures](#closures)). At those two entry
-  points a failed `!` does not propagate (there is no caller to receive it):
-  the program aborts on stderr with a non-zero exit — with the nested
-  `[file:line:col] unhandled error:` trace when the payload went through
-  `error(..)`/`context`, or the plain `unhandled error: <payload>` line (or
-  the null message) when it never did.
+  failure, **at the module top level, and in `main`** (not yet in closures,
+  see [Closures](#closures)). At those two entry points a failed `!` does not
+  propagate (there is no caller to receive it): the program aborts on stderr
+  with a non-zero exit, using the nested `[file:line:col] unhandled error:`
+  trace when the payload went through `error(..)`/`context`, or the plain
+  `unhandled error: <payload>` line (or the null message) when it never did.
 - Consume a Result by matching `Ok { value }` / `Err { error }`. A payload
-  raised by `error(..)` — or lifted at a `!` — matches as the `Error`
-  record: the original value is `error.value`, and `error.display()` renders
-  the trace.
+  raised by `error(..)`, or lifted at a `!`, matches as the `Error` record:
+  the original value is `error.value`, and `error.display()` renders the
+  trace.
 - A function that can only ever `error(...)` (no successful return) cannot be
   used where a value is required.
 
@@ -395,7 +393,7 @@ Separately, returns of `null` and returns of `T` in one function join to
   use instantiates the inferred scheme freshly.
 - **Function polymorphism**: an unannotated function is re-checked per call
   site with the concrete argument types, then compiled per instantiation. This
-  is stronger than a single inferred scheme — `fun add1(x) { return x + 1 }`
+  is stronger than a single inferred scheme: `fun add1(x) { return x + 1 }`
   works for `int32`, `int64`, and `float64` callers alike.
 - **`infer`** in a signature marks an inference hole explicitly; each
   occurrence is independent.
@@ -404,7 +402,7 @@ Separately, returns of `null` and returns of `T` in one function join to
   instantiation. Methods share the record's inferred parameters, so a
   container's `set`/`get` agree on the element type without a witness value.
 - **`fun T.m(self) -> infer!`** declares a reflective template whose result
-  type is fixed by each call site's expected type — see
+  type is fixed by each call site's expected type; see
   [Compile-time reflection](/references/reflection/#generic-decoders-with---infer).
 - When a concrete type is only known at runtime (e.g. decoding external
   data), the needed specialization is compiled at that moment; this is
@@ -414,8 +412,8 @@ There is **no explicit type-parameter syntax** (`<T>` does not exist).
 
 ### Type slots and refinements
 
-A record can name its type parameters as **slots** — fields declared with the
-`type` keyword as their type — and refer to them elsewhere with `Self.slot`. A
+A record can name its type parameters as **slots** (fields declared with the
+`type` keyword as their type) and refer to them elsewhere with `Self.slot`. A
 slot has no runtime storage: it never appears in the layout, in `fields()`, or
 in a construction literal. It only names a type another field is expressed
 over.
@@ -446,9 +444,9 @@ type StringInts = Map { key: string, value: int64 }
   generic in the slots it does not mention.
 - A slot may be pinned to anything; a real field that already has a concrete
   type may only be refined to that same type (a mismatch is rejected).
-- The alias is not a new nominal — it unifies with any matching instance, so a
-  witness-free value built by the container's constructor is accepted where the
-  refined type is annotated.
+- The alias is not a new nominal: it unifies with any matching instance, so a
+  witness-free value built by the container's constructor is accepted where
+  the refined type is annotated.
 - Annotating a binding with the alias pins the container's types up front, so
   `let m: Counts = HashMap.new()` (with `type Counts = HashMap { key: string,
 value: int64 }`) is a usable `string -> int64` map: subsequent stores are
@@ -477,13 +475,13 @@ then be definitely assigned before use:
 
 - assigning the whole binding completes it;
 - for a record type whose field skeleton is default-constructible (numbers,
-  bool, string, nullable, arrays, tuples, and records of those — not sums or
+  bool, string, nullable, arrays, tuples, and records of those, not sums or
   functions), assigning **every field individually** also completes it;
 - branches join by intersection (both arms must assign); paths that return or
   diverge drop out;
 - a `for field in fields(x)` loop that assigns `x[field]` on every non-exiting
   path counts as assigning all fields (see [Reflection](/references/reflection/));
-- reading the binding — or capturing it in a closure — before completion is a
+- reading the binding, or capturing it in a closure, before completion is a
   compile error. `typeof(x)` and `fields(x)` only read the type and are
   allowed.
 
@@ -505,7 +503,7 @@ Closures **capture by reference**: the closure sees (and may mutate) the live
 binding, and mutations through the closure are visible outside. A closure's
 parameter and return types are inferred (annotations optional); a closure used
 polymorphically instantiates per call. A closure parameter shadows a global
-function of the same name — the local value is called.
+function of the same name; the local value is called.
 
 Closures cannot yet be **fallible**: a closure body that uses `error(...)` or
 a Result-operand `!` is not supported (it currently fails when the closure is
@@ -517,4 +515,4 @@ that from the closure.
 `spawn(f)` requires a zero-parameter closure and returns `void`; `with(c, f)`
 requires a one-parameter closure and returns the closure's result; `sync()`
 takes nothing. Ownership analysis of captured values happens after type
-checking — see the [concurrency reference](/references/concurrency/).
+checking; see the [concurrency reference](/references/concurrency/).

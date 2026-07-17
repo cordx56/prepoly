@@ -61,7 +61,7 @@ println("replace = {"a-b-c".replace("-", "+")}")
 ```
 
 `s.find(sub)` returns the byte offset of a substring as `int64?` (`null` when
-absent), and `s.chars()` splits into one-character strings — there is no
+absent), and `s.chars()` splits into one-character strings; there is no
 separate character type:
 
 ```brass
@@ -72,13 +72,13 @@ for c in "héllo".chars() {
 println("")   // h.é.l.l.o.
 ```
 
-Note that string positions are UTF-8 **byte** offsets: `len` and `find` agree
+String positions are UTF-8 **byte** offsets: `len` and `find` agree
 on byte positions, and a multibyte character counts as several bytes.
 
 ## HashMap
 
 `HashMap` lives in the nested standard-library module
-`std.collections`, which — unlike the top-level prelude — must be
+`std.collections`, which, unlike the top-level prelude, must be
 imported explicitly. `HashMap.new()` takes no arguments; the key and value
 types are inferred from the first insertion:
 
@@ -105,4 +105,4 @@ for pair in ages.pairs() {
 
 `keys()`, `values()`, `delete(k)`, `clear()`, and
 `HashMap.from_pairs([[k, v], ...])` round out the API. Keys may be any type
-that compares with `==` — integers, strings, even records.
+that compares with `==`: integers, strings, even records.

@@ -6,7 +6,7 @@ description: "match expressions, exhaustiveness, patterns, and if let."
 ## `match`
 
 `match` is an expression that takes a value apart. Over a sum type it is
-checked for **exhaustiveness** — forgetting a variant is a compile error:
+checked for **exhaustiveness**: forgetting a variant is a compile error:
 
 ```brass
 type Shape =
@@ -69,7 +69,7 @@ for n in [0, 1, 2, 9] {
 }
 ```
 
-Matching on strings works the same way — see the expression-tree example in
+Matching on strings works the same way; see the expression-tree example in
 [Types and methods](/guides/types/#sum-types), which matches on `"+"` and `"*"`.
 
 ## `if let`
@@ -92,7 +92,7 @@ fun radius_of(s) {
 ```
 
 `if let` is also the idiomatic way to consume nullable results such as
-`s.find(sub)` or `T.from(v)` (structural conversion) — the bound name is the
+`s.find(sub)` or `T.from(v)` (structural conversion); the bound name is the
 non-null value:
 
 ```brass

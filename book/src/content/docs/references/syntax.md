@@ -32,7 +32,7 @@ line comment, a file may begin with a shebang line
 
 A block comment that opens with `/**` is a **documentation comment**. Written
 directly above a `fun` or `type` declaration, it attaches to that declaration
-and is shown by editor tooling — the [language server](/installation/lsp/)
+and is shown by editor tooling: the [language server](/installation/lsp/)
 renders it on hover and in completion, below the signature:
 
 ```brass
@@ -61,8 +61,8 @@ leading `*` decoration removed; it is treated as markdown. Attachment rules:
   into paragraphs.
 - Doc comments attach to `fun` (including method implementations
   `fun T.m(...)`) and `type` declarations only. One written above anything
-  else — a top-level `let`/`const`, an import, a member signature inside a
-  type body — is ignored like an ordinary comment.
+  else, such as a top-level `let`/`const`, an import, or a member signature
+  inside a type body, is ignored like an ordinary comment.
 - A plain `/* ... */` (single asterisk) is never a doc comment, and the empty
   `/**/` is a plain comment.
 
@@ -99,7 +99,7 @@ let c = 0b1010      // binary (0b / 0B)
 let d = 0o755       // octal (0o / 0O)
 ```
 
-There are no type suffixes — the type of a literal is decided by inference
+There are no type suffixes: the type of a literal is decided by inference
 (see [Type system](/references/types/#literals)). A literal too large for `int64` is a
 lexing error.
 
@@ -130,7 +130,7 @@ let items = ["a", "b"]
 println("first = {items[0]}, count = {items.len()}")
 ```
 
-There is no character type — a character is a one-character string — and no
+There is no character type (a character is a one-character string) and no
 raw or multi-line string form (use `\n`).
 
 ### Statements and newlines
@@ -183,7 +183,7 @@ Notes:
   `?` operator and no optional chaining (`?.`); `?` appears only as the
   nullable _type_ suffix.
 - Assignment is a statement, not an expression. The assignment operators are
-  `=` `+=` `-=` `*=` `/=` `%=` — there are no bitwise or shift compound
+  `=` `+=` `-=` `*=` `/=` `%=`; there are no bitwise or shift compound
   assignments. The target may be a variable, a field (`a.b`), or an element
   (`a[i]`).
 - There is no general range operator. The bracket form `[lo..hi]` is an
@@ -193,13 +193,13 @@ Notes:
 ## Expressions
 
 - **Literals**: integers, floats, strings, `true`, `false`, `null`.
-- **Array/tuple literal** `[a, b, c]` — how a bracket literal is typed (fixed
+- **Array/tuple literal** `[a, b, c]`: how a bracket literal is typed (fixed
   array, growable array, or tuple) is described in the
   [type system](/references/types/#bracket-literals).
 - **Record construction** `TypeName { field: value, ... }`,
   `Self { ... }` inside methods, and variant construction
   `Type.Variant { ... }` (a unit variant is `Type.Variant` with no braces).
-- **Anonymous record literal** `{ field: value, ... }` — a structural record
+- **Anonymous record literal** `{ field: value, ... }`: a structural record
   with no declared type. At statement position an opening `{` starts a block;
   the literal form is recognized by the `name:` lookahead.
 - **`if` / `else`** is an expression and yields a value; `else if` chains.
@@ -262,7 +262,7 @@ continue
 ```
 
 The `for` head takes a single variable name (no destructuring). `break` and
-`continue` are bare — there are no labels.
+`continue` are bare; there are no labels.
 
 ### `return`
 
@@ -313,8 +313,8 @@ type Child: Parent = | V1 { .. } | V2   // sum with a declared parent (subtyping
 type Alias = Base { field: T, ... }     // refinement alias (see below)
 ```
 
-A member is either a **field** (`name` or `name: Type` — the annotation is
-optional), a **type slot** (`name: type` — a type parameter with no storage,
+A member is either a **field** (`name` or `name: Type`, the annotation is
+optional), a **type slot** (`name: type`, a type parameter with no storage,
 see [Type slots](/references/types/#type-slots-and-refinements)), or a **method
 signature** (`name(params) -> Ret` with no body). A method body inside a `type`
 block is a parse error: implementations go outside the type, as `fun T.m(...)`,

@@ -21,25 +21,25 @@ hero:
 
 ## Introduction
 
-The `.cz` extension of **Brass** source files is taken from _copper_ and _zinc_ -- the two metals that make up brass.
-Brass is a scripting language: you run a source file directly, with no
-build step. Under the hood it JIT-compiles your programs as it runs them and
-checks types just before each function is executed, so you don't wait for
-compilation but still get the full benefit of static type checking.
+The `.cz` extension of **Brass** source files comes from _copper_ and _zinc_,
+the two metals that make up brass. Brass is a scripting language: a source
+file runs directly, with no build step. Under the hood, it JIT-compiles the
+program and checks each function's types just before that function executes,
+so there is no compilation wait, yet the program still gets full static type
+checking.
 
-Brass's type system is built on flexible type inference, which reduces the
-burden of writing type annotations to nearly zero.
-You can still add annotations explicitly to constrain the types of variables
-when you want to.
+Brass's type system rests on flexible type inference, which reduces type
+annotations to nearly zero. Annotations remain available where a variable's
+type should be constrained explicitly.
 
-Features are summarized as follows:
+In short:
 
 - Just-in-time compilation
 - Per-function type checking, performed just before each function runs
 - Type inference for most types, resolved at execution time
 - Structural subtyping with interface definitions
 
-This book is organized in two parts: the **user guide** introduces the
-language feature by feature, with runnable examples, and the **references**
-describe the language exhaustively — the exact syntax, the type system rules,
-the standard library, and the execution model.
+This book has two parts. The **user guide** introduces the language feature
+by feature, with runnable examples. The **references** describe the language
+exhaustively: syntax, the type system, the standard library, and the
+execution model.

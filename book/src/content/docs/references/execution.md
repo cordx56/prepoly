@@ -7,7 +7,7 @@ description: "The compilation pipeline, the two back ends, and runtime behavior 
 
 `brass program.cz` parses the entry file, loads its imports transitively
 (plus the embedded standard library), lowers, and **type-checks the whole
-program** — but by default it checks **lazily**: type inference runs on a
+program**, but by default it checks **lazily**: type inference runs on a
 dedicated checker thread, starting from the program's entry (the module
 initializers, then `main`), while the main thread compiles and prepares
 execution in parallel. When compilation reaches a function whose check has
@@ -18,7 +18,7 @@ Compilation is as lazy as checking: only the entry (the initializers and
 `main`) compiles before execution starts. A call to a function whose
 signature is annotation-determined compiles into a _deferred site_; the
 first time execution actually reaches it, the function is monomorphized and
-compiled on the spot — waiting for the checker first if its body is still
+compiled on the spot, waiting for the checker first if its body is still
 being inferred. A `spawn` pre-compiles everything the spawned task could
 reach, since worker threads never compile.
 
@@ -27,12 +27,12 @@ A lazy run's verdict covers **what the run executes**:
 - A diagnostic in the entry (a module initializer, `main`, or top-level
   code) aborts the run before anything executes, with the same report the
   eager pipeline prints.
-- A function first reached mid-run is settled — at the concrete argument
-  types of the call that reached it — before it executes; a diagnostic in
+- A function first reached mid-run is settled, at the concrete argument
+  types of the call that reached it, before it executes; a diagnostic in
   it stops the run at that moment, non-zero (output already produced
   stands).
-- A function the run never calls — including one only reachable from a
-  branch the run never takes — keeps checking in the background while the
+- A function the run never calls, including one only reachable from a
+  branch the run never takes, keeps checking in the background while the
   program runs, and what that finds is saved for the next run; it does not
   affect this run's outcome. The complete whole-program verdict is `brass
   check`'s (or `--eager`'s) job.
@@ -42,7 +42,7 @@ A lazy run's verdict covers **what the run executes**:
 - A well-typed program behaves identically either way; code the run never
   reaches simply no longer delays it.
 
-`brass check` always checks **eagerly** — the whole program, on the calling
+`brass check` always checks **eagerly**: the whole program, on the calling
 thread, before reporting; it prints nothing when the program is well-typed.
 `--eager` gives a run the same check-everything-first behavior. The
 interpreter back end, `brass repl`, and a `.czcache` hit (an already-checked
@@ -55,8 +55,8 @@ is used with (**monomorphization**) and runs the program:
    dependency order;
 2. `main` is called, if defined.
 
-When a concrete type becomes known only at runtime — for example a reflective
-decode whose target arrives from external data — the needed specialization is
+When a concrete type becomes known only at runtime, for example a reflective
+decode whose target arrives from external data, the needed specialization is
 type-directed-compiled at that moment and cached. This is the "checked just
 before it runs" character of the language: checking is ahead of execution,
 per function instance.
@@ -88,7 +88,7 @@ interpreter.
   runtime error; the JIT panics with the same message. Signed
   `MIN / -1` is defined (wraps) rather than undefined.
 - **Shifts** are computed at 64 bits with the shift amount masked to
-  `0..63`, then truncated to the operand width — identical on both back ends
+  `0..63`, then truncated to the operand width, identical on both back ends
   (`1 << 40` on an `int32` is `0`, not undefined).
 - **Array indexing is bounds-checked**; an out-of-range index is a runtime
   trap, on both back ends.
@@ -105,9 +105,9 @@ interpreter.
 
 ## Environment
 
-- `BRASS_LOG` — tracing filter for compiler logs (`info`, `debug`, module
+- `BRASS_LOG`: tracing filter for compiler logs (`info`, `debug`, module
   filters).
-- `BRASS_LOG_TYPE` — comma-separated named dumps (e.g. `mir`).
+- `BRASS_LOG_TYPE`: comma-separated named dumps (e.g. `mir`).
 
 ## Tooling summary
 

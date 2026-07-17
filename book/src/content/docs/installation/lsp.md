@@ -21,12 +21,12 @@ configuration works everywhere.
 
 Type diagnostics are published when the file is **saved**, and when it is first
 opened. While you type, the server only re-parses, so syntax errors still appear
-immediately -- a half-typed line is a syntax error long before it is a type
+immediately: a half-typed line is a syntax error long before it is a type
 error.
 
 Type inference re-checks the whole module graph, which is too much work to redo
 on every keystroke. Editing clears the previous check's type diagnostics rather
 than leaving them behind: their positions no longer describe the text on screen.
 
-Hover, completion and go-to-definition are unaffected -- each request analyzes
+Hover, completion and go-to-definition are unaffected: each request analyzes
 the current text, saved or not.

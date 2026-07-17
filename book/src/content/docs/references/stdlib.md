@@ -5,16 +5,16 @@ description: "Every standard-library module and builtin, with signatures."
 
 The standard library has two layers:
 
-- **The implicit prelude** — the modules under `std/prelude/` (`io`, `array`,
+- **The implicit prelude**: the modules under `std/prelude/` (`io`, `array`,
   `string`, `math`, `conv`, `assert`) plus the runtime builtins. Their public
   names are in scope in every program with no import.
-- **Import-only modules** — everything else under `std/`
+- **Import-only modules**: everything else under `std/`
   (`std.collections`): imported explicitly, e.g.
   `import std.collections.{ HashMap }`, and loaded on demand.
 
 Most of the library is written in Brass itself, on top of a small set of
 runtime primitives. Identifiers beginning with `_` (e.g. `_string_bytes`,
-`_panic`) are those internals — do not call them directly.
+`_panic`) are those internals; do not call them directly.
 
 Reserved builtin names that cannot be redefined: `len`, `spawn`, `with`,
 `sync`, `error`, `fields`, `typeof`.
@@ -61,7 +61,7 @@ caller may also pass it explicitly.
 
 ## Type tests and defaults
 
-Each primitive type implements only its **own** `is_<type>` method —
+Each primitive type implements only its **own** `is_<type>` method:
 `is_string`, `is_bool`, `is_int8` … `is_int64`, `is_uint8` … `is_uint64`,
 `is_float32`, `is_float64`, and `is_array` on arrays. Calling one returns
 `true`; the point is the uncalled
@@ -168,8 +168,8 @@ that directory (one entry serves every library that lives there):
 BRASS_INCLUDE=/path/to/brass/libraries
 ```
 
-`Command` is a builder — each method mutates the command and returns it, so
-calls chain — and `spawn` starts the process. A standard stream configured as
+`Command` is a builder: each method mutates the command and returns it, so
+calls chain. `spawn` starts the process. A standard stream configured as
 `Stdio.Pipe` is reachable through the `Child` as a `File`
 (`read`/`write`/`close`); `Inherit` (the default) shares this process's stream
 and `Null` discards it.
@@ -193,7 +193,7 @@ accessors may be called repeatedly: each hands back the same `File`.
 
 `exit(code)` ends the running program itself rather than a child: it never
 returns, so nothing after it runs. Standard output and error are flushed on the
-way out, so a `print` still waiting for its newline is not swallowed — but
+way out, so a `print` still waiting for its newline is not swallowed, but
 nothing else is cleaned up (a spawned child is not waited for, and an open
 `File`'s own buffer is not written for it). On Unix only the low 8 bits reach
 the caller: `exit(256)` reports 0 and `exit(-1)` reports 255, so keep to
@@ -289,7 +289,7 @@ the body survives compilation, as described under
 
 A file's own location is not a method here. Every module is loaded with a
 private `_PATH` constant holding its absolute source path, so the path of the
-file you are writing is `Path.parse(_PATH)` — and an imported module reads its
+file you are writing is `Path.parse(_PATH)`; an imported module reads its
 own, not yours.
 
 ```brass norun
@@ -313,7 +313,7 @@ import fs.{ File, read_file, write_file, create_dir, remove_dir }
 ```
 
 File handles, byte I/O, and directories. Like the other libraries this is a
-plugin under `libraries/`, with the same setup — automatic for a distributed
+plugin under `libraries/`, with the same setup: automatic for a distributed
 toolchain, `libraries/build.sh` + `BRASS_INCLUDE` from a repo checkout.
 
 | Function / method            | Signature                                   | Behavior                                        |
@@ -338,47 +338,47 @@ toolchain, `libraries/build.sh` + `BRASS_INCLUDE` from a repo checkout.
 | `File.from_fd(fd)`           | `(int64) -> File`                           | adopt an open descriptor (a pipe, a socket)     |
 | `File.stdin/stdout/stderr()` | `() -> File`                                | the standard streams                            |
 
-`size()` is answered by the `path` library — a stat by name needs no open
-descriptor — so it works exactly for files opened by path; an adopted
+`size()` is answered by the `path` library (a stat by name needs no open
+descriptor), so it works exactly for files opened by path; an adopted
 descriptor or standard stream has no path to ask about and reports an error.
 `File.from_fd` is how the `process` and `net` libraries hand their pipes and
 sockets to the ordinary read/write/close methods.
 
-**Every path a function in this library takes may be a string or a `Path`** —
-`File.open`, `read_file`, `write_file`, `create_dir`, `remove_dir` — so a path
+**Every path a function in this library takes may be a string or a `Path`**:
+`File.open`, `read_file`, `write_file`, `create_dir`, `remove_dir`. A path
 built with the `path` library needs no `to_string()` on the way in. (The arm
 that fits the argument is the only one compiled, so neither form costs the
 other anything.)
 
 `copy_file` and `move_file` both **replace** an existing target. A move within
 one filesystem is a rename (atomic, the contents are never read); across
-filesystems — and a temporary directory very often _is_ another filesystem —
+filesystems (and a temporary directory very often _is_ another filesystem)
 a rename cannot work, so it falls back to a copy followed by a delete, which is
 not atomic. A directory is refused by both `move_file` and `remove_file`: a
 tree is `remove_dir`'s business, and a directory move would succeed on one
 filesystem and fail across two.
 
-Removing a file that is not there is an **error**, not a quiet success — a typo
+Removing a file that is not there is an **error**, not a quiet success: a typo
 in a destructive call must not read as "done". `remove_file` on a symbolic link
 removes the _link_; what it points at is untouched.
 
 The directory forms part ways with the file forms on one point: `copy_dir` and
 `move_dir` **refuse an existing target** rather than replacing it. Replacing a
-tree would delete files the copy never mentioned — not something a copy should
-do behind your back; call `remove_dir` first if that is what you want. A target
+tree would delete files the copy never mentioned, which a copy should not do
+behind your back; call `remove_dir` first if that is what you want. A target
 _inside_ the source is refused too (the walk would never finish), and a symbolic
 link in the tree is recreated as a link rather than followed, as `cp -R` does.
 
 `copy` and `move` take **either kind**, dispatching on what `source` turns out
-to be — handy when the caller does not know or does not care. Each half keeps
-its own rule about an existing target (a file is replaced, a tree is refused),
-so reach for the specific call when it matters which one you are doing.
+to be, which is handy when the caller does not know or does not care. Each half
+keeps its own rule about an existing target (a file is replaced, a tree is
+refused), so reach for the specific call when it matters which one you are doing.
 
 `create_dir` and `remove_dir` are both recursive: `create_dir` makes every missing parent
 and treats an existing directory as success, while `remove_dir` takes the whole
 tree, removing a symbolic link inside it as a link rather than following it. A
-directory that is not there is an **error** for `remove_dir`, not a silent
-success — a typo in a destructive call must not read as "done".
+directory that is not there is an **error** for `remove_dir` too, matching
+`remove_file`.
 
 File I/O runs on both back ends: the plugin executes natively whether the
 program is JIT-compiled or interpreted, so the old "the REPL refuses file
@@ -393,7 +393,7 @@ import env.{ args, var, vars, path_separator, current_dir }
 
 The process environment: command-line arguments, environment variables, and
 the working directory. A plugin under `libraries/`, with the same setup as
-the others — automatic for a distributed toolchain, `libraries/build.sh` +
+the others: automatic for a distributed toolchain, `libraries/build.sh` +
 `BRASS_INCLUDE` from a repo checkout. Not runnable in the playground.
 
 | Function           | Signature             | Behavior                                           |
@@ -405,13 +405,13 @@ the others — automatic for a distributed toolchain, `libraries/build.sh` +
 | `current_dir()`    | `() -> Path!`         | the working directory, as a `path` `Path`          |
 
 Everything after the program file on the command line belongs to the
-program, verbatim — flags included, no separator needed:
+program, verbatim, flags included, with no separator needed:
 
 ```sh
 brass main.cz --verbose input.txt
 ```
 
-gives `args() == ["main.cz", "--verbose", "input.txt"]` — the program file
+gives `args() == ["main.cz", "--verbose", "input.txt"]`: the program file
 as written, then the arguments (index `0` is the program, as in C's `argv`).
 The same holds for `brass repl main.cz ...`. In an interactive REPL
 session, or under an embedder that passes no arguments, `args()` is empty.
@@ -423,8 +423,8 @@ import hash.{ sha256, hmac_sha256, hex, equal, Hasher }
 ```
 
 Message digests (MD5, SHA-1, SHA-2) and HMAC. A plugin under `libraries/`
-wrapping the RustCrypto implementations — these algorithms are built from
-wrapping 32/64-bit arithmetic, which Brass does not have, so a Brass
+wrapping the RustCrypto implementations, since these algorithms are built
+from wrapping 32/64-bit arithmetic, which Brass does not have; a Brass
 implementation would be a hand-masked emulation whose failure mode is a
 silently wrong digest.
 
@@ -448,8 +448,8 @@ println(hex(sha256(to_bytes("abc"))))
 | `equal(a, b)`                  | `(uint8[], uint8[]) -> bool`    | constant-time    |
 
 For input that is not in memory at once (a file read in chunks, a socket
-stream), `Hasher` is the incremental form. `finalize` **consumes** the hasher
-— a digest cannot be resumed once taken, so a second call is an error rather
+stream), `Hasher` is the incremental form. `finalize` **consumes** the hasher:
+a digest cannot be resumed once taken, so a second call is an error rather
 than a meaningless second answer:
 
 ```brass norun
@@ -466,7 +466,7 @@ Prefer `sha256`/`sha512`. Authenticate a message with `hmac_sha256`, not
 `sha256(key + data)` (which is forgeable by length extension). Compare a
 digest or MAC against an attacker-supplied one with `equal`, not `==`: an
 early-exit comparison leaks how many leading bytes of a forgery were right.
-All of these are **fast** hashes — storing a password needs a purpose-built
+All of these are **fast** hashes: storing a password needs a purpose-built
 slow KDF (argon2, scrypt, bcrypt), which this library deliberately does not
 offer, so that a fast hash cannot be mistaken for one.
 
@@ -477,7 +477,7 @@ import regex.{ Regex, escape }
 ```
 
 Regular expressions, on Rust's `regex` engine: a finite automaton, so matching
-is **linear** in the subject's length however the pattern is written — a regex
+is **linear** in the subject's length however the pattern is written: a regex
 over untrusted input cannot blow up the way a backtracking engine does. The
 price is that **backreferences (`\1`) and lookaround (`(?=..)`, `(?<=..)`) do
 not exist**; a pattern using one fails to compile rather than quietly meaning
@@ -492,8 +492,8 @@ A Brass string literal is **not raw**: it interprets `\` and it interpolates
 `{expr}`. A pattern therefore needs two escapes, and the second one bites
 silently:
 
-- a backslash doubles — `\\d`, `\\w`, `\\b`;
-- an opening brace is escaped `\{` — `"\\d{4}"` does **not** mean "four
+- a backslash doubles: `\\d`, `\\w`, `\\b`;
+- an opening brace is escaped `\{`: `"\\d{4}"` does **not** mean "four
   digits": the `{4}` interpolates to the text `4`, so the pattern compiles as
   `\d4` (a digit, then the character `4`). Write `"\\d\{4}"`. A closing brace
   needs nothing, and a quantifier with a comma (`{2,3}`) is a syntax error
@@ -536,9 +536,9 @@ when the group did not participate (the `(a)` of `(a)|(b)` against `"b"`) or
 the pattern has no such group. A `Group` is `{ text, start, end }`.
 
 A compiled `Regex` is never released (the language has no destructors), so
-compile a pattern **once** and keep it — compiling inside a loop grows the
-process. That is the right way to use any regex engine: compilation costs far
-more than matching.
+compile a pattern **once** and keep it: compiling inside a loop grows the
+process. That is the right way to use any regex engine, since compilation
+costs far more than matching.
 
 ## `semver` (a library, not `std`)
 
@@ -547,8 +547,8 @@ import semver.{ Version, sort }
 ```
 
 [Semantic Versioning 2.0.0](https://semver.org): parse a version, render it
-back, and order two of them. Pure Brass on top of `regex` — it has no native
-half of its own — and it parses with the **official pattern from semver.org
+back, and order two of them. Pure Brass on top of `regex` (it has no native
+half of its own), and it parses with the **official pattern from semver.org
 verbatim**, so what it accepts is exactly what the spec defines: no leading
 zeros, an optional dot-separated pre-release, optional build metadata, and
 nothing else in the string (`v1.0.0` and `1.0` are rejected).
@@ -560,8 +560,8 @@ println(v.prerelease)                           // rc.1  (null when absent)
 println(v.compare(Version.parse("1.4.2")!))     // -1: a pre-release is LOWER
 ```
 
-`Version` is `{ major, minor, patch: int64, prerelease, build: string? }` —
-the optional components are `null` when absent, which the grammar keeps
+`Version` is `{ major, minor, patch: int64, prerelease, build: string? }`.
+The optional components are `null` when absent, which the grammar keeps
 distinct from empty.
 
 | Method / function                         | Signature                          | Behavior                                   |
@@ -577,10 +577,10 @@ distinct from empty.
 
 **Precedence** follows §11: major/minor/patch numerically, then a version with
 a pre-release _precedes_ the same version without one (`1.0.0-rc.1 < 1.0.0`).
-Pre-release identifiers compare left to right — numeric ones numerically (so
+Pre-release identifiers compare left to right: numeric ones numerically (so
 `beta.2 < beta.11`, not lexically) and before alphanumeric ones, which compare
 in ASCII order; if all shared identifiers are equal, the shorter list precedes.
-**Build metadata is ignored** (§10), so `1.0.0+a` and `1.0.0+b` compare equal —
+**Build metadata is ignored** (§10), so `1.0.0+a` and `1.0.0+b` compare equal;
 compare `to_string()` if textual identity is what you want.
 
 ## `net` (a library, not `std`)
@@ -592,15 +592,15 @@ import net.{ Tcp, TcpListener, Udp, TlsStream }
 TCP and UDP sockets plus TLS client connections. Like `process` and `path`
 this is a library: talking to the operating system's sockets needs native
 code, which arrives as a plugin under `libraries/`, and the setup is the
-same — automatic for a distributed toolchain, `libraries/build.sh` +
+same: automatic for a distributed toolchain, `libraries/build.sh` +
 `BRASS_INCLUDE` from a repo checkout. Networking does not run in the
 playground.
 
 Under the hood a plain socket is a `File` (an OS file descriptor) held
-privately by each record — a connection cannot `accept` and a listener
+privately by each record: a connection cannot `accept` and a listener
 cannot `read`.
 
-**`Tcp`** — a bidirectional byte-stream connection:
+**`Tcp`**: a bidirectional byte-stream connection:
 
 | Method                                   | Signature                 | Behavior                                         |
 | ---------------------------------------- | ------------------------- | ------------------------------------------------ |
@@ -611,7 +611,7 @@ cannot `read`.
 | `conn.set_timeout(ms)`                   | `(int64) -> void!`        | read/write timeout; 0 clears it                  |
 | `conn.close()`                           | `() -> void!`             |                                                  |
 
-**`TcpListener`** — produces `Tcp` connections:
+**`TcpListener`**: produces `Tcp` connections:
 
 | Method                         | Signature                         | Behavior                                        |
 | ------------------------------ | --------------------------------- | ----------------------------------------------- |
@@ -620,7 +620,7 @@ cannot `read`.
 | `listener.local_addr()`        | `() -> string!`                   | reads back an OS-picked port                    |
 | `listener.close()`             | `() -> void!`                     |                                                 |
 
-**`Udp`** — a datagram socket:
+**`Udp`**: a datagram socket:
 
 | Method                           | Signature                            | Behavior                                    |
 | -------------------------------- | ------------------------------------ | ------------------------------------------- |
@@ -631,7 +631,7 @@ cannot `read`.
 | `sock.set_timeout(ms)`           | `(int64) -> void!`                   |                                             |
 | `sock.close()`                   | `() -> void!`                        |                                             |
 
-`Datagram` is `{ data: uint8[], addr: string }` — one received datagram with
+`Datagram` is `{ data: uint8[], addr: string }`: one received datagram with
 its sender's address. The prelude helpers `to_bytes(s) -> uint8[]` and
 `to_text(bytes) -> string!` convert between strings and socket bytes.
 
@@ -647,13 +647,13 @@ client.write(to_bytes("hello"))!
 println(to_text(server.read(64)!)!)   // hello
 ```
 
-Two practical notes for concurrent servers: a spawned closure should capture
-the **port** (a copied scalar), not the listener — a shared listener is
-auto-guarded by a cown lock that a blocking `accept` would then hold — and
+Two practical notes for concurrent servers. A spawned closure should capture
+the **port** (a copied scalar), not the listener: a shared listener is
+auto-guarded by a cown lock that a blocking `accept` would then hold. And
 TCP is a byte stream: one `read` may return less than what the peer wrote,
 so frame messages or read in a loop.
 
-**`TlsStream`** — TLS **client** connections, backed by rustls inside the
+**`TlsStream`**: TLS **client** connections, backed by rustls inside the
 plugin. Certificate verification uses the bundled Mozilla root set with the
 server name taken from `host`; there are no configuration knobs (no custom
 CAs, no server side yet). `TlsStream` mirrors `Tcp`, so code written against
@@ -675,7 +675,7 @@ println(to_text(conn.read(16)!)!)   // HTTP/1.1 200 OK
 conn.close()!
 ```
 
-Back ends: everything here runs on either back end — sockets are `fs`
+Everything here runs on either back end: sockets are `fs`
 `File`s and the plugins execute natively under the interpreter too.
 
 ## `std.collections`
@@ -687,7 +687,7 @@ import std.collections.{ HashMap }
 An open-addressing (linear-probing) hash map. Keys may be of any type that
 renders to a stable string and compares with `==` (integers, strings,
 records, ...); values may be of any type. `HashMap.new()` takes **no
-arguments** — the key/value types are inferred from the first `set` or
+arguments**: the key/value types are inferred from the first `set` or
 `from_pairs`, so `let m = HashMap.new(); m.set("a", 1)` is a
 `string -> int32` map with no annotations.
 
@@ -715,7 +715,7 @@ import data.json.{ JsonValue }
 A JSON value tree, parser, accessors, serializer, and a reflective decoder.
 The whole surface hangs off `JsonValue`, so the type is the only name to import.
 A pure-brass library (no plugin) under `libraries/`, with the same setup
-as the others — automatic for a distributed toolchain, `BRASS_INCLUDE`
+as the others: automatic for a distributed toolchain, `BRASS_INCLUDE`
 from a repo checkout.
 
 ```brass norun

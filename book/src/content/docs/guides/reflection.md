@@ -9,7 +9,7 @@ information is involved, and everything stays fully type-checked.
 ## Walking fields
 
 `fields(x)` iterates the declared fields of `x`'s record type inside a `for`
-loop. The loop variable is the field **name** (a string) — except in the
+loop. The loop variable is the field **name** (a string), except in the
 indexing form `x[field]`, which projects the field's **value**:
 
 ```brass
@@ -67,7 +67,7 @@ let k = typeof(n).from(3.9)!   // int32.from — k is 3
 println("{m} {k}")
 ```
 
-These pieces combine into reflective _deserialization_ — filling a struct from
+These pieces combine into reflective _deserialization_: filling a struct from
 name-keyed data, or a whole JSON-to-struct decoder written once as
 `fun Json.into(self) -> infer!`. See the
 [reflection reference](/references/reflection/) for the complete rules and

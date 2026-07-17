@@ -9,9 +9,9 @@ Every Brass run type-checks the whole program before executing anything (see
 [Execution model](/references/execution/)). On a library-heavy program that
 check dominates start-up: parsing and HIR lowering are single-digit
 milliseconds, MIR lowering and monomorphization a few more, while type
-inference takes hundreds of milliseconds — and a program using reflective
+inference takes hundreds of milliseconds, and a program using reflective
 (`-> infer!`) decoding runs the whole front end twice. The two tools below
-exist to see that cost and to stop paying it repeatedly.
+make that cost visible and avoid paying it repeatedly.
 
 ## Timing logs
 
@@ -58,28 +58,28 @@ the target is disabled, so the instrumentation costs nothing in ordinary runs.
 
 ## The context seed (`.czctx`)
 
-The `.czcache` above only helps while NOTHING changed. The context seed
-handles the other case — the entry file changed, its dependencies did not —
-which is every ordinary edit-run cycle and every save in the editor.
+The `.czcache` above only helps while nothing changed. The context seed
+handles the other case, where the entry file changed but its dependencies
+did not, which is every ordinary edit-run cycle and every save in the editor.
 
 A program's **context** is every module except the entry: the standard
 library, the libraries, the project's dependencies. On a library-heavy program
 that context is where almost all inference time goes, and it does not depend
 on the entry at all. So the front end checks in two stages: the context alone
-(once), and then the entry against the context's saved **inference tables** —
+(once), and then the entry against the context's saved **inference tables**:
 its type schemes, inferred function and method returns, and globals. With the
 tables in hand, the entry-stage run skips every context body and costs roughly
 what checking the entry alone costs.
 
 - `brass` stores the tables as `ctx-<hash>.czctx` under the user cache
-  directory (`$XDG_CACHE_HOME/brass` or `~/.cache/brass`) — per user, not
-  per project, because one context (say, the standard library plus `http`) is
-  shared by every program that imports it.
+  directory (`$XDG_CACHE_HOME/brass` or `~/.cache/brass`), per user rather
+  than per project, because one context (say, the standard library plus
+  `http`) is shared by every program that imports it.
 - `czls` keeps them in memory for the session *and* shares the same on-disk
   store, so a save re-checks only the document: the mechanism is one crate
   (`brass_cache` + the seed support in `brass_typeck`), used by both.
 - The key is the compiler tag plus the module names and content hashes of
-  every context source — the entry's bytes are deliberately not part of it.
+  every context source; the entry's bytes are deliberately not part of it.
   A reflective (`-> infer!`) program's second pass gets its own entry, keyed
   additionally by the requested specialization set, so it too is skipped when
   the same decoders are requested again.
@@ -94,7 +94,7 @@ reflective program): an entry edit re-checks in ~0.3s (was ~2.2s).
 
 ## The analysis cache (`.czcache`)
 
-A clean run writes the front end's results next to the entry file —
+A clean run writes the front end's results next to the entry file:
 `app.cz` produces `app.czcache` (an extension-less script such as `czpm`
 produces `czpm.czcache`). The next run of the same entry reuses it and skips
 type checking entirely, going straight from a cheap re-lowering to MIR:
@@ -120,15 +120,15 @@ The cache stores what the checker computed, not what the cheap phases produce:
 
 ### When the cache is reused
 
-A `.czcache` records every on-disk source file the build read — the entry
+A `.czcache` records every on-disk source file the build read: the entry
 file and each dependency, transitively. Each is identified by **contents**
 (length and SHA-1) and by an **origin-relative reference**, never by machine
 path or modification time:
 
 - a project file is recorded relative to the entry file's directory;
 - a library file relative to *some* include root (validation walks the current
-  roots — `BRASS_INCLUDE`, then the distribution's implicit
-  `<bin>/../libraries` — in resolution order, and judges the first candidate
+  roots, `BRASS_INCLUDE` then the distribution's implicit
+  `<bin>/../libraries`, in resolution order, and judges the first candidate
   that exists, so a file that would shadow the recorded one is the one
   checked);
 - a package file relative to the named `BRASS_PACKAGES` root.
@@ -141,7 +141,7 @@ contents. Any mismatch falls back to the full pipeline silently, so a cache
 can never make a build wrong, only faster.
 
 Content is what makes the scheme sound *and* portable: whichever file the
-current roots resolve a reference to, equal bytes are the identical program —
+current roots resolve a reference to, equal bytes are the identical program,
 so the whole project can move, the include root can move, and the resolution
 environment's *values* need not match the build machine's. It also makes the
 stamp exact rather than conservative: rewriting a file with the same bytes (a
@@ -168,9 +168,9 @@ Per-module caches were considered and measured, and the unit deliberately
 stays the entry program. Type inference in Brass is whole-program: spans are
 offsets into one concatenated source map whose layout depends on the entry's
 import order, inference variables come from one shared counter, and a type's
-scheme links variables across every module that touches it — a module's
+scheme links variables across every module that touches it, so a module's
 inference results are meaningless outside the exact program they were computed
-in. What *is* per-module — parsing and loading — measures 3–7ms of a 300ms–2s
+in. What is per-module, parsing and loading, measures 3–7ms of a 300ms–2s
 build, about two percent, so a per-module cache could never repay its
 complexity. The per-module idea survives in the validation instead: every
 module's source is stamped individually, and any one changing invalidates
@@ -179,7 +179,7 @@ exactly as a per-module chain would.
 ### Shared with the language server
 
 `czls` consults the same file: when a document's buffer matches the file on
-disk and a valid `.czcache` exists, the full diagnostic pass is skipped — the
+disk and a valid `.czcache` exists, the full diagnostic pass is skipped. The
 cache is only written after an error-free check, so the document is known
 clean. The server never *writes* the cache, because its pipeline skips the
 driver-only rewrites (spawn auto-acquire, keyed specialization); what it
@@ -199,7 +199,7 @@ payload                          postcard-encoded body
 
 The payload is a [postcard](https://docs.rs/postcard/)-serialized structure
 (varint-packed serde, no field names, no schema): the resolution environment,
-the dependency stamps, the module ASTs, and the checker channels — see
+the dependency stamps, the module ASTs, and the checker channels. See
 `crates/brass_cache` for the authoritative definition. Because postcard
 carries no schema, the header is the only compatibility gate: a tag mismatch
 discards the file, and `FORMAT_VERSION` is bumped whenever the payload layout

@@ -10,7 +10,7 @@ only; the REPL interpreter refuses `spawn`/`with`/`sync` at runtime.
 
 ## The primitives
 
-The complete programmer-facing surface is three builtin functions — there is
+The complete programmer-facing surface is three builtin functions. There is
 no `async`/`await`, no explicit locks, threads, or channels, and no ownership
 annotations:
 
@@ -29,8 +29,8 @@ The compiler decides how each captured value crosses the spawn boundary; the
 programmer never writes `move`/`freeze`/`cown`:
 
 - a captured **primitive** (number, bool) is copied by value into the task;
-- a captured **heap object** (record, array, ...) that is shared with — and
-  mutated by — concurrent code is promoted to a _cown_ (concurrent owner): a
+- a captured **heap object** (record, array, ...) that is shared with (and
+  mutated by) concurrent code is promoted to a _cown_ (concurrent owner): a
   guarded object whose accesses are serialized by its lock;
 - when the spawning function itself keeps using a promoted object, every one
   of its accesses is auto-guarded by the same lock, and the compiler emits a
@@ -46,7 +46,7 @@ A single-cown `with` scope is also a **region**: objects stored into the
 guarded object while the scope runs belong to it, and references reaching into
 the region from outside (a module global, an object that outlives the scope)
 are counted. Leaving the scope while such a reference survives is a runtime
-error — ``region not closed: a reference escaped a `with` scope`` — because
+error, ``region not closed: a reference escaped a `with` scope``, because
 the escaped reference could later be used without holding the lock.
 Overwriting the escaping slot (e.g. setting the field back to `null`) before
 the scope ends releases the reference, and the scope closes normally.
@@ -56,7 +56,7 @@ the scope ends releases the reference, and the scope closes normally.
 These are compile errors today:
 
 - `spawn`'s argument must be a **closure literal**, or a local variable
-  directly bound to one — not a function reference, a call result, or a
+  directly bound to one, not a function reference, a call result, or a
   parameter (the ownership pass must see the closure body).
 - The closure must take **zero parameters**; `with`'s closure exactly one.
 - A spawned task may not read or write a **module global** that any code

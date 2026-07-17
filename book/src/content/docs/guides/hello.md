@@ -3,9 +3,9 @@ title: "Hello, world!"
 description: "Your first Brass program: printing, running, and checking."
 ---
 
-Let's write your first Brass program!
+This chapter walks through a first Brass program.
 
-Write the following program into a `hello.cz` file.
+Write the following into a `hello.cz` file.
 
 ```brass
 println("Hello, world!")
@@ -17,7 +17,7 @@ Then, execute the program:
 brass hello.cz
 ```
 
-The output is as follows:
+This prints:
 
 ```
 Hello, world!
@@ -33,7 +33,7 @@ fun main() {
 }
 ```
 
-The execution result is the same as the previous one.
+This produces the same output.
 
 ## Checking without running
 
@@ -67,17 +67,17 @@ reports the error in `broken`.
 
 What this means in practice:
 
-- **A green run is not a full type check.** Use `brass check` where you want
-  the whole-program verdict — in CI, before a commit, after a refactor.
-- Errors in code the run does need still stop it: an error in the top-level
-  statements or in `main` aborts before anything executes, and an error in a
-  function first reached mid-run stops the run right there — output already
-  produced by then stands, and the run exits non-zero. The unit is the whole
+- **A green run is not a full type check.** Use `brass check` for the
+  whole-program verdict, e.g. in CI, before a commit, or after a refactor.
+- Errors in code the run does need still stop it. An error in the top-level
+  statements or in `main` aborts before anything executes; an error in a
+  function first reached mid-run stops the run right there, though output
+  already produced stands and the run exits non-zero. The unit is the whole
   function: an error anywhere in a function the run calls counts, even in a
   branch execution would never take.
-- The unused code keeps checking in the background while your program runs;
-  what it finds is remembered to speed up later runs, but it never changes
-  the current run's outcome.
+- The unused code keeps checking in the background while the program runs.
+  What it finds is remembered to speed up later runs, but never changes the
+  current run's outcome.
 - `brass --eager hello.cz` runs with the check-everything-first behavior
   (identical to `brass check` followed by the run). The REPL and the
   interpreter back end always check eagerly.
@@ -107,10 +107,8 @@ shebangs at all.
 
 ## GCD: Greatest Common Divisor
 
-Next, let's write a practical example.
-
-We can write a `gcd` function, which calculates the greatest common divisor,
-as follows:
+A slightly more practical example: a `gcd` function computing the greatest
+common divisor.
 
 ```brass
 fun gcd(a, b) {
@@ -124,16 +122,15 @@ fun gcd(a, b) {
 println(gcd(48, 36))
 ```
 
-This outputs `12`, which is correct!
+This outputs `12`.
 
-Note that we didn't write a single type annotation: parameter and return types
-are inferred. The program is still statically typed — passing a string to
-`gcd` would be rejected before execution.
+No type annotation was written: parameter and return types are inferred. The
+program is still statically typed, so passing a string to `gcd` would be
+rejected before execution.
 
 ## Variables and arrays
 
-We can use `const` to declare an immutable variable and `let` to declare a
-mutable variable.
+`const` declares an immutable variable, `let` a mutable one.
 
 ```brass
 const pi = 3.14159   // reassigning is a compile error
@@ -165,6 +162,5 @@ This program outputs `GCD is 4`.
 The `{result}` inside the string is **string interpolation**: `{expr}`
 evaluates the expression and inserts its text into the string.
 
-Now you have seen a complete little program. The following chapters introduce
-each language feature the same way — by example. For exhaustive rules, see the
-[references](/references/syntax/).
+The following chapters introduce each language feature the same way, by
+example. For exhaustive rules, see the [references](/references/syntax/).

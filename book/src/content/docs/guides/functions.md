@@ -6,7 +6,7 @@ description: "Type-inferred functions, closures, higher-order functions, and par
 ## Type inference
 
 Functions are declared with `fun`. Parameter and return annotations are
-optional — when omitted, they are inferred:
+optional; when omitted, they are inferred:
 
 ```brass
 fun add(a, b) {
@@ -71,7 +71,7 @@ let inc = (n: int32) -> n + 1
 println(apply_twice(inc, 10))   // 12
 ```
 
-The array helpers of the standard library are the everyday use of this — a
+The array helpers of the standard library are the everyday use of this. A
 chain may be broken across lines when the next line starts with `.`:
 
 ```brass
@@ -102,7 +102,7 @@ println(arr)   // [1, 2, 3] — double worked on its own copy
 ```
 
 To mutate the caller's value through a function, annotate the parameter
-`ref(mut(T))` — a mutable reference writes through:
+`ref(mut(T))`; a mutable reference writes through:
 
 ```brass
 fun double_through(a: ref(mut(int32[]))) {

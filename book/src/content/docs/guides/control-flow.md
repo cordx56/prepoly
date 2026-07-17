@@ -5,7 +5,7 @@ description: "if as an expression, while, for over arrays and ranges, break and 
 
 Brass has the usual control-flow constructs: `if`/`else`, `while`, `for`,
 `break`, and `continue`. A distinctive point is that `if` (and `match`, covered
-in [Pattern matching](/guides/pattern-matching/)) are _expressions_ — they yield a
+in [Pattern matching](/guides/pattern-matching/)) are _expressions_: they yield a
 value.
 
 ## `if` is an expression
@@ -36,7 +36,7 @@ fun size_of(n) {
 
 ## `while`
 
-Here is the Collatz step counter — `while` runs as long as the condition holds:
+Here is the Collatz step counter, where `while` runs as long as the condition holds:
 
 ```brass
 fun collatz_steps(n) {
@@ -92,5 +92,5 @@ println("sum of evens up to 6 = {sum}")   // 12
 
 There is no statement terminator: a newline ends a statement. A line continues
 onto the next when it ends with a binary operator or when the next line starts
-with `.` (a method chain) — see [Syntax](/references/syntax/) for the exact
+with `.` (a method chain). See [Syntax](/references/syntax/) for the exact
 rules.

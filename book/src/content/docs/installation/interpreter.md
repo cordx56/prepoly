@@ -3,7 +3,7 @@ title: "Installing Brass"
 description: "Build and install the Brass command-line driver."
 ---
 
-Here we describe how to build and install the Brass command-line driver.
+This page covers building and installing the Brass command-line driver.
 
 ## Clone the repository
 
@@ -15,8 +15,7 @@ git clone https://github.com/brass-cz/brass.git
 
 ## Install the Rust compiler
 
-Brass is written in the Rust language.
-So first you have to install the Rust compiler.
+Brass is written in Rust, so you need the Rust compiler installed first.
 
 You can learn how to install Rust here: [https://rust-lang.org/tools/install/](https://rust-lang.org/tools/install/)
 
@@ -47,7 +46,7 @@ Run the following command to install the default native driver:
 ./x cargo install --path crates/brass_driver
 ```
 
-Note that you have to add the path where the `brass` binary is placed to `$PATH`.
+Add the path where the `brass` binary is installed to `$PATH`.
 
 ## Usage
 

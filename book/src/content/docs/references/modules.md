@@ -34,7 +34,7 @@ Three forms:
   dropped; the variant resolves against the scrutinee).
   The qualifier defaults to the last path segment; `import path as name`
   overrides it (e.g. `import geometry.vec as g` uses `g.dot(..)`). Two
-  module imports whose qualifiers collide are rejected — rename one with
+  module imports whose qualifiers collide are rejected; rename one with
   `as` or import names directly.
 
 The two brace-less forms are distinguished by what exists: if the whole path
@@ -50,13 +50,13 @@ Import paths resolve **relative to the importing file's directory**: inside
 Paths starting with `std` are global and refer to the embedded standard
 library instead of files on disk. Import cycles are detected and reported.
 
-Importing a type brings its methods with it — `import geometry.vec.{ Vec2 }`
+Importing a type brings its methods with it: `import geometry.vec.{ Vec2 }`
 makes both `Vec2.new(...)` and `v.add(w)` available; methods are in scope
 wherever their type is. The import also gates
 [anonymous-record dispatch](/references/types/#anonymous-record-method-dispatch):
 a literal like `{ x: 1.0, y: 2.0 }` only adopts a type the module declares or
-imports, while a value that already carries a nominal type — an imported
-function's return, say — dispatches its methods without the type's name being
+imports, while a value that already carries a nominal type, an imported
+function's return say, dispatches its methods without the type's name being
 imported.
 
 ## Visibility
@@ -79,7 +79,7 @@ println(_PATH)          // /home/you/project/src/main.cz
 ```
 
 The path is absolute, so it does not depend on where the program was started.
-`_PATH` follows the visibility rule above -- its leading `_` makes it private --
+`_PATH` follows the visibility rule above: its leading `_` makes it private,
 so a module always reads its own, never an importer's, and no module can export
 one. A module with no file on disk (an embedded `std` module, a plugin's
 synthesized wrapper) reads its diagnostic label instead, such as `<std/io>`.
@@ -94,7 +94,7 @@ The `std/prelude/` modules (`io`, `array`, `string`, `math`, `conv`,
 everywhere without an import. They can also be imported explicitly by their
 bare name (`import io.{ ... }`) or `std` path.
 
-The other standard-library modules — `std.collections` —
+Other standard-library modules, such as `std.collections`,
 are **not** in the prelude. They are embedded in the
 compiler but loaded only when a module imports them (transitively: a nested
 std module may import another). See the

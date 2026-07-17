@@ -92,7 +92,7 @@ putting either one directly in a path. `rev` may name any revision Git accepts;
 when omitted it defaults to `HEAD`, though an immutable commit is recommended
 for repeatable builds.
 
-A `path` dependency is used in place — nothing is copied or fetched. The
+A `path` dependency is used in place: nothing is copied or fetched. The
 path is resolved relative to the `package.toml` that declares it, including for
 transitive dependencies, and must point at the dependency project's root
 directory. Edits to the dependency are picked up on the next `czpm run`/`czpm
@@ -117,7 +117,7 @@ import geometry
 ```
 
 The package root file is `<package-name>.cz` inside the dependency directory,
-and sub-modules live under the `<package-name>/` directory — the same
+and sub-modules live under the `<package-name>/` directory: the same
 layout that `czpm new` creates.
 
 ## Writing a library package
@@ -147,7 +147,7 @@ BRASS_PACKAGES=geometry=/home/user/.brass/packages/git/0123abcd:utils=/home/user
 ```
 
 An import whose first segment is a declared name resolves under that entry's
-directory — and only there. The manifest therefore scopes exactly which
+directory, and only there. The manifest therefore scopes exactly which
 external modules the project sees, and a declared name cannot be shadowed by a
 same-named local file. Resolution rejects a dependency whose manifest package
 name differs from its dependency-table key, as well as two transitive
@@ -157,7 +157,7 @@ completions work for dependencies too.
 
 ## Include paths
 
-Outside of `czpm` projects — or alongside them — the compiler also honors
+Outside of `czpm` projects (or alongside them), the compiler also honors
 `BRASS_INCLUDE`, an OS path list of plain directories. This Unix example uses
 `:`; use `;` on Windows:
 
@@ -179,6 +179,6 @@ Finally, the toolchain binaries (`brass` and `czls`) append one
 implicit include entry: the `libraries/` directory sitting beside their own
 `bin/` directory (`<bin>/../libraries`), when it exists. A distributed
 toolchain therefore serves its bundled libraries (`process`, `path`, ...)
-with no environment setup at all — in the compiler and in the editor alike —
-and explicit include paths and package declarations always take precedence
-over it.
+with no environment setup at all, in the compiler and in the editor alike.
+Explicit include paths and package declarations always take precedence over
+it.

@@ -34,7 +34,7 @@ if !none {
 }
 ```
 
-Using a nullable value without a check — say `found + 1` before the `if` — is
+Using a nullable value without a check (say `found + 1` before the `if`) is
 a compile error. An early-return guard also narrows: after
 `if !x { return ... }`, the value `x` is a plain `T` for the rest of the
 function.
@@ -122,7 +122,7 @@ start_server()!
 
 No plumbing is needed: `error` and `context` pick up their call site through
 an implicit `Location` argument the compiler fills in. When you handle the
-error yourself, the same information is on the `Error` record — `error.value`
+error yourself, the same information is on the `Error` record: `error.value`
 is the raised value, `error.location` the position, and `error.display()`
 renders the trace text above. A failure that never went through
 `error(..)`/`context` (a plain builtin error hit at the top level) keeps the
@@ -169,7 +169,7 @@ fun main() {
 
 Matching the `Lookup` itself keeps the extra `source` field; going through
 `!` trades it for plain-`Result` interoperability. Two structurally
-identical sums that do **not** declare the relationship stay unrelated — see
+identical sums that do **not** declare the relationship stay unrelated. See
 [the reference](/references/syntax-sugar/#declared-sum-subtyping) for the
 exact rules, including how a module can instead shadow `Result` outright.
 
@@ -189,9 +189,8 @@ let s = string.from(true)           // "true" — string.from always succeeds
 println("{n} {f} {s}")
 ```
 
-Note the difference: `intN.from` and `T.parse` return `T!` because they can
-fail, while `float64.from` and `string.from` are total and return the plain
-value. The
+`intN.from` and `T.parse` return `T!` because they can fail, while
+`float64.from` and `string.from` are total and return the plain value. The
 [type system reference](/references/types/#numeric-conversions) lists the
 whole conversion family, including the implicit value-preserving conversions
 between numeric types.
@@ -227,7 +226,7 @@ if d {
 }
 ```
 
-A body can mix all three return kinds -- plain values, `error(...)`, and a
+A body can mix all three return kinds: plain values, `error(...)`, and a
 nullable `!`. The plain and error returns make it a `Result`, and the null
 propagation wraps that in `?`:
 
@@ -256,13 +255,14 @@ if r {
 
 At the top level and in `main`, a `null` hit by `!` stops the program the
 same way an `Err` does: it aborts with
-`` unhandled error: null value propagated by `!` `` and a non-zero exit --
-the null has nowhere to go, and silently succeeding would hide the failure.
+`` unhandled error: null value propagated by `!` `` and a non-zero exit,
+since the null has nowhere to go and silently succeeding would hide the
+failure.
 
 ## Absent fields become `null` in conditions
 
-Inside a conditional, an inference failure — such as accessing a field the
-value does not have — becomes `null` instead of a compile error. This lets a
+Inside a conditional, an inference failure (such as accessing a field the
+value does not have) becomes `null` instead of a compile error. This lets a
 structurally typed function probe for optional fields:
 
 ```brass
