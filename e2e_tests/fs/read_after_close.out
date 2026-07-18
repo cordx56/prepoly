@@ -1,7 +1,7 @@
 read after close: Error {
     value: "file is closed",
     location: Location {
-        file: "<plugin:std/libfs.so>",
+        file: "<plugin:std.libfs>",
         line: 17,
         col: 12,
     },
