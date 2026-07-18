@@ -3,72 +3,66 @@ title: "Execution model"
 description: "The compilation pipeline, the two back ends, and runtime behavior guarantees."
 ---
 
-## The pipeline
+## Default native run
 
-`brass program.cz` parses the entry file, loads its imports transitively
-(plus the embedded standard library), lowers, and **type-checks the whole
-program**, but by default it checks **lazily**: type inference runs on a
-dedicated checker thread, starting from the program's entry (the module
-initializers, then `main`), while the main thread compiles and prepares
-execution in parallel. When compilation reaches a function whose check has
-not finished, it sends the function's path and the concrete argument types
-of the call to the checker, which settles that body next.
+`brass program.cz` parses the entry file, loads its imports and embedded
+`core` modules, and lowers them into one statically typed program. The default
+native run then overlaps two demand-driven tasks:
 
-Compilation is as lazy as checking: only the entry (the initializers and
-`main`) compiles before execution starts. A call to a function whose
-signature is annotation-determined compiles into a _deferred site_; the
-first time execution actually reaches it, the function is monomorphized and
-compiled on the spot, waiting for the checker first if its body is still
-being inferred. A `spawn` pre-compiles everything the spawned task could
-statically reach before the spawn runs, since worker threads never compile;
-code only the main thread can reach stays on demand.
+- The checker starts from module initializers and `main`, and continues on a
+  dedicated thread. When execution needs a function whose body is not yet
+  settled for the call's argument types, it waits for that body to be checked.
+- Native compilation starts from the same entry points. A reachable function
+  is monomorphized, optimized, and translated to native code when it is first
+  needed instead of before the run starts.
 
-A lazy run's verdict covers **what the run executes**:
+This scheduling changes latency, not the type system: no function body can
+execute with unresolved or rejected types.
 
-- A diagnostic in the entry (a module initializer, `main`, or top-level
-  code) aborts the run before anything executes, with the same report the
-  eager pipeline prints.
-- A function first reached mid-run is settled, at the concrete argument
-  types of the call that reached it, before it executes; a diagnostic in
-  it stops the run at that moment, non-zero (output already produced
-  stands).
-- A function the run never calls, including one only reachable from a
-  branch the run never takes, keeps checking in the background while the
-  program runs, and what that finds is saved for the next run; it does not
-  affect this run's outcome. The complete whole-program verdict is `brass
-  check`'s (or `--eager`'s) job.
-- The unit of this verdict is the **function body**: a diagnostic anywhere
-  in a body the run needs is fatal, even inside a branch of it execution
-  would never take.
-- A well-typed program behaves identically either way; code the run never
-  reaches simply no longer delays it.
+### The verdict of a normal run
 
-`brass check` always checks **eagerly**: the whole program, on the calling
-thread, before reporting; it prints nothing when the program is well-typed.
-`--eager` gives a run the same check-everything-first behavior and also
-compiles the whole program as one optimized unit before running it. The
-interpreter back end and `brass repl` are eager too.
+A normal run reports errors in the code it needs:
 
-A `.czcache` hit (an already-checked program, see
-[Performance & caching](/references/performance/)) skips checking entirely
-but keeps compilation demand-driven: monomorphization starts from the
-initializers and `main` only, and each reachable function is optimized and
-translated to native code the first time execution calls it. See the
-[performance guide](/guides/performance/) for choosing between the lazy
-default and `--eager`.
+- An error in a module initializer, top-level statement, or `main` prevents
+  execution from starting.
+- An error in a function reached later stops the run before that function
+  executes. Output already produced remains visible and the process exits
+  non-zero.
+- The unit is a complete function body. An error in an untaken branch of a
+  called function still rejects that function.
+- An uncalled function does not affect the current run. Its check may continue
+  in the background and a partial result may be cached for a later run.
 
-Execution then instantiates every reachable function at the concrete types it
-is used with (**monomorphization**) and runs the program:
+Consequently, a successful run is not a complete whole-program verdict. Use
+`brass check` in CI and whenever all code must be validated.
 
-1. every module initializer (the top-level statements of each module) runs, in
-   dependency order;
-2. `main` is called, if defined.
+### Complete checking and compilation
 
-When a concrete type becomes known only at runtime, for example a reflective
-decode whose target arrives from external data, the needed specialization is
-type-directed-compiled at that moment and cached. This is the "checked just
-before it runs" character of the language: checking is ahead of execution,
-per function instance.
+`brass check program.cz` checks the complete program without running it and
+prints nothing on success. `brass --eager program.cz` performs the same
+complete check, compiles the program as one optimized unit, and then runs it.
+The interpreter and REPL also check eagerly.
+
+A valid full `.czcache` skips checking on an unchanged program. A partial
+cache instead resumes an interrupted background check. Neither changes the
+program's semantics; see [Performance and caching](/references/performance/).
+
+### Monomorphization and reflection
+
+A polymorphic function is instantiated for each concrete set of argument
+types it is called with. Reflective `-> infer!` functions are different: the
+target type must be known from the expected type at the call site, and the
+front end specializes the reflective operation before execution. Native code
+for either kind of concrete function may still be compiled on first use.
+
+After preparation, execution order is:
+
+1. module initializers, in dependency order;
+2. `main`, if it is defined.
+
+A `spawn` is an exception to first-use compilation: every function the new
+task can statically reach is compiled before the task starts because worker
+threads do not compile.
 
 ## Two back ends
 
@@ -78,7 +72,7 @@ per function instance.
 | Used by                                  | `brass file.cz`        | `brass repl`, wasm/playground, `--no-default-features` builds |
 | Library plugins (fs, process, net, path) | yes                    | yes (the plugins execute natively either way)                 |
 | Concurrency                              | yes                    | refused at runtime                                            |
-| Runtime specialization                   | yes                    | refused at runtime                                            |
+| On-demand native compilation             | yes                    | not applicable                                                |
 
 Both back ends implement the same semantics for the sequential language
 surface and are tested against each other. The driver is built with the `jit`

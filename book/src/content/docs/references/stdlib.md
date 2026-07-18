@@ -1,6 +1,6 @@
 ---
 title: "Standard library"
-description: "Every standard-library module and builtin, with signatures."
+description: "The public core and std APIs intended for application code."
 ---
 
 The standard library has two layers:
@@ -15,12 +15,14 @@ The standard library has two layers:
   `regex`, `semver`, `url`, `http`, `data.json`, `data.toml`, ...), imported
   explicitly with the `std.` prefix, e.g. `import std.fs.{ read_file }`.
   Native parts arrive as plugins, so `std` lives on disk rather than in the
-  compiler; a distributed toolchain binds it automatically (see
-  [Packages](/guides/packages/)).
+  compiler. The complete toolchain binds it automatically; see
+  [Installing Brass](/installation/interpreter/).
 
 Most of the library is written in Brass itself, on top of a small set of
 runtime primitives. Identifiers beginning with `_` (e.g. `_string_bytes`,
-`_panic`) are those internals; do not call them directly.
+`_panic`) are internal. The `std.package_manager` modules implement `czpm`;
+their command-line interface is documented in the
+[package-manager guide](/guides/packages/).
 
 Reserved builtin names that cannot be redefined: `len`, `spawn`, `with`,
 `sync`, `error`, `fields`, `typeof`.
@@ -109,6 +111,26 @@ Methods on any array (`fun infer[].m`), so `arr.map(f)` works with no import:
 These return new arrays; only the builtin `push`/`pop`/`insert`/`remove`
 mutate in place.
 
+## `core.collections`
+
+Part of the implicit prelude: `HashMap` needs no import. Keys may be of any
+type that renders to a stable string and compares with `==`; values may be of
+any type. Key and value types are inferred from `set` or `from_pairs`.
+
+| Method | Signature | Behavior |
+| --- | --- | --- |
+| `HashMap.new()` | `() -> HashMap` | empty map |
+| `HashMap.from_pairs(pairs)` | `([[K, V]]) -> HashMap` | build from `[key, value]` pairs |
+| `m.set(k, v)` | `(K, V) -> void` | insert or replace |
+| `m.get(k)` | `(K) -> V?` | `null` when absent |
+| `m.get_or(k, default)` | `(K, V) -> V` | stored value or fallback |
+| `m.contains_key(k)` | `(K) -> bool` | whether a key exists |
+| `m.delete(k)` | `(K) -> bool` | remove and report whether it existed |
+| `m.size()` / `m.is_empty()` | `() -> int64` / `() -> bool` | map size queries |
+| `m.keys()` / `m.values()` | `() -> K[]` / `() -> V[]` | unspecified slot order |
+| `m.pairs()` | `() -> [K, V][]` | same order as `keys()` |
+| `m.clear()` | `() -> void` | remove all pairs, retaining inferred types |
+
 ## `core.string`
 
 String positions are UTF-8 **byte** offsets throughout: `len`, `find`, and
@@ -161,17 +183,10 @@ generic message.
 ```brass norun
 import std.process.{ Command, Stdio }
 ```
-Spawn and control child processes. Unlike the `core` modules above this
-lives in the on-disk `std` tree: its native half is a Rust plugin (a
-`cdylib` built against the `brass_plugin` crate) rather than a runtime
-builtin. A distributed toolchain binds the `std` package automatically
-(`<bin>/../std`); when running from a repo checkout, build the plugins once
-with `std/build.sh` and declare the package (the path is the directory
-CONTAINING `std/`; one entry serves the whole tree):
-
-```
-BRASS_PACKAGES=std=/path/to/brass
-```
+Spawn and control child processes. Its native implementation is included in
+the complete toolchain and the installed `std` package resolves automatically.
+It is unavailable in the browser playground. See
+[Installing Brass](/installation/interpreter/) for the supported build layout.
 `Command` is a builder: each method mutates the command and returns it, so
 calls chain. `spawn` starts the process. A standard stream configured as
 `Stdio.Pipe` is reachable through the `Child` as a `File`
@@ -246,9 +261,9 @@ and the fs plugin executes natively under the interpreter too.
 ```brass norun
 import std.path.{ Path }
 ```
-Filesystem paths. Like `std.process` this lives on disk rather than in the
-compiler: asking the operating system what exists needs native code, so its
-other half is a plugin built by `std/build.sh`.
+Filesystem paths. Operating-system queries use the native plugin included in
+the complete toolchain; lexical operations such as `parse`, `join`, and
+`normalize` do not access the filesystem.
 A `Path` is a sequence of components, absolute exactly when its first component
 is the root `/`. Empty and repeated separators are dropped when a path is
 parsed, so `/usr//lib/` and `/usr/lib` are the same path. Every method that
@@ -306,10 +321,8 @@ for entry in here.join("assets").entries()! {
 ```brass norun
 import std.fs.{ File, read_file, write_file, create_dir, remove_dir }
 ```
-File handles, byte I/O, and directories. Like the other native-backed
-modules this is a plugin under `std/`, with the same setup: automatic for a
-distributed toolchain, `std/build.sh` + `BRASS_PACKAGES=std=...` from a
-repo checkout.
+File handles, byte I/O, and directories. Native file access is included in the
+complete toolchain and unavailable in the browser playground.
 
 | Function / method            | Signature                                   | Behavior                                        |
 | ---------------------------- | ------------------------------------------- | ----------------------------------------------- |
@@ -386,10 +399,8 @@ filesystem, so the examples here are not runnable in it.
 import std.env.{ args, var, vars, path_separator, current_dir }
 ```
 The process environment: command-line arguments, environment variables, and
-the working directory. A plugin under `std/`, with the same setup as the
-others: automatic for a distributed toolchain, `std/build.sh` +
-`BRASS_PACKAGES=std=...` from a repo checkout. Not runnable in the
-playground.
+the working directory. These operating-system calls are unavailable in the
+browser playground.
 
 | Function           | Signature             | Behavior                                           |
 | ------------------ | --------------------- | -------------------------------------------------- |
@@ -575,11 +586,9 @@ compare `to_string()` if textual identity is what you want.
 ```brass norun
 import std.net.{ Tcp, TcpListener, Udp, TlsStream }
 ```
-TCP and UDP sockets plus TLS client connections. Like `std.process` and
-`std.path` this needs native code, which arrives as a plugin under `std/`,
-and the setup is the same: automatic for a distributed toolchain,
-`std/build.sh` + `BRASS_PACKAGES=std=...` from a repo checkout. Networking
-does not run in the playground.
+TCP and UDP sockets plus TLS client connections. The native networking plugin
+is included in the complete toolchain. Networking does not run in the browser
+playground.
 
 Under the hood a plain socket is a `File` (an OS file descriptor) held
 privately by each record: a connection cannot `accept` and a listener
@@ -661,31 +670,100 @@ conn.close()!
 Everything here runs on either back end: sockets are `fs`
 `File`s and the plugins execute natively under the interpreter too.
 
-## `core.collections`
+## `std.url`
 
-Part of the implicit prelude: `HashMap` needs no import.
+```brass norun
+import std.url.URI
+```
 
-An open-addressing (linear-probing) hash map. Keys may be of any type that
-renders to a stable string and compares with `==` (integers, strings,
-records, ...); values may be of any type. `HashMap.new()` takes **no
-arguments**: the key/value types are inferred from the first `set` or
-`from_pairs`, so `let m = HashMap.new(); m.set("a", 1)` is a
-`string -> int32` map with no annotations.
+RFC 3986 URI parsing and reference resolution, implemented in pure Brass.
+Parsed components retain percent-encoding so delimiters remain unambiguous.
+An absent component is `null`, which differs from an empty component: the
+query in `http://host/path` is absent, while the query in
+`http://host/path?` is empty.
 
-| Method                      | Signature               | Behavior                        |
-| --------------------------- | ----------------------- | ------------------------------- |
-| `HashMap.new()`             | `() -> HashMap`         | empty map                       |
-| `HashMap.from_pairs(pairs)` | `([[K, V]]) -> HashMap` | build from `[key, value]` pairs |
-| `m.set(k, v)`               | insert or overwrite     |                                 |
-| `m.get(k)`                  | `-> V?`                 | `null` when absent              |
-| `m.get_or(k, dflt)`         | `-> V`                  | non-nullable                    |
-| `m.contains_key(k)`         | `-> bool`               |                                 |
-| `m.delete(k)`               | `-> bool`               | whether the key was present     |
-| `m.size()`                  | `-> int64`              | live pair count                 |
-| `m.is_empty()`              | `-> bool`               |                                 |
-| `m.keys()` / `m.values()`   | `-> K[]` / `-> V[]`     | unspecified (slot) order        |
-| `m.pairs()`                 | `-> [K, V][]`           | same order as `keys`            |
-| `m.clear()`                 | remove every pair       | keeps capacity and types        |
+```brass norun
+type URI = {
+    scheme: string?
+    authority: Authority?
+    path: string
+    query: string?
+    fragment: string?
+}
+```
+
+| Method | Signature | Behavior |
+| --- | --- | --- |
+| `URI.parse(text)` | `(string) -> URI!` | parse an absolute URI; a scheme is required |
+| `URI.parse_reference(text)` | `(string) -> URI!` | also accepts relative references |
+| `uri.to_string()` | `() -> string` | reassemble without decoding components |
+| `uri.authority_string()` | `() -> string?` | serialized authority, or `null` |
+| `uri.resolve(reference)` | `(string) -> URI!` | resolve a relative or absolute reference against an absolute base |
+| `uri.path_segments()` | `() -> string[]!` | split and percent-decode path segments |
+| `uri.query_pairs()` | `() -> QueryPair[]!` | decode the query as form-style key/value pairs |
+
+The public supporting modules are:
+
+| Import | API |
+| --- | --- |
+| `std.url.authority.Authority` | `{ userinfo: string?, host: string, port: uint16? }`; `parse`, `is_ip_literal`, `to_string` |
+| `std.url.query.QueryPair` | `{ key: string, value: string }`; `parse_all(query)`, `format_all(pairs)` |
+| `std.url.percent` | `decode(text) -> string!`, `encode(text, extra) -> string`, `encode_component(text) -> string` |
+| `std.url.validate` | `CharClass`, `validate(text, class) -> string!`; low-level component validation |
+| `std.url.charset` | RFC character predicates such as `is_unreserved` and `is_path_char` |
+| `std.url.text` | character-array helpers `substr` and `index_of` used by URI parsers |
+
+`QueryPair` parsing treats `&` as the pair separator, the first `=` as the
+key/value separator, and `+` as a space. Formatting emits percent-encoded
+pairs and uses `%20` for spaces.
+
+## `std.http`
+
+```brass norun
+import std.http.{ fetch, HttpClient, HttpRequest, HttpResponse, Header }
+```
+
+An HTTP/1.x client and message parser over [`std.net`](#stdnet). `fetch`
+supports HTTP and HTTPS, follows relative or absolute redirects, and returns
+the final response.
+
+```brass norun
+type Header = { name: string, value: string }
+type HttpRequest = {
+    method: string
+    path: string
+    version: string
+    headers: Header[]
+    body: uint8[]
+}
+type HttpResponse = {
+    version: string
+    status: int32
+    reason: string
+    headers: Header[]
+    body: uint8[]
+}
+```
+
+| Function / method | Signature | Behavior |
+| --- | --- | --- |
+| `fetch(url)` | `(string) -> HttpResponse!` | GET an HTTP(S) URL; follows at most `MAX_REDIRECTS` redirects |
+| `request(req)` | `(HttpRequest) -> HttpResponse!` | plain HTTP using the request's `Host` header |
+| `HttpClient.http(host, port)` | `(string, int32) -> HttpClient` | create a plain client |
+| `HttpClient.https(host, port)` | `(string, int32) -> HttpClient` | create a TLS client |
+| `client.fetch(path)` | `(string) -> HttpResponse!` | GET a path on that client |
+| `client.request(req)` | `(HttpRequest) -> HttpResponse!` | send a request on that client |
+| `HttpRequest.parse(raw)` | `(string) -> HttpRequest!` | parse a complete request string |
+| `request.serialize()` | `() -> uint8[]` | serialize the request line, headers, and body |
+| `HttpResponse.parse(raw)` | `(string) -> HttpResponse!` | parse a complete response string |
+| `response.serialize()` | `() -> uint8[]` | serialize the status line, headers, and body |
+| `response.body_text()` | `() -> string!` | decode the body as UTF-8 |
+
+The client reads a body using `Content-Length`, or until connection close when
+that header is absent. It does not decode chunked transfer coding. Serializing
+a message does not add `Host`, `Content-Length`, or other headers; callers that
+construct requests or responses must supply the required headers themselves.
+Networking is unavailable in the browser playground.
 
 ## `std.data.json`
 
@@ -694,9 +772,7 @@ import std.data.json.{ JsonValue }
 ```
 A JSON value tree, parser, accessors, serializer, and a reflective decoder.
 The whole surface hangs off `JsonValue`, so the type is the only name to import.
-A pure-brass module (no plugin) under `std/`, with the same setup as the
-others: automatic for a distributed toolchain, `BRASS_PACKAGES=std=...`
-from a repo checkout.
+A pure-Brass module under the installed `std` package.
 
 ```brass norun
 type JsonValue =
@@ -734,3 +810,48 @@ const src = "\{\"name\": \"Aki\", \"age\": 30, \"address\": \{\"city\": \"Tokyo\
 const u: User = JsonValue.parse(src)!.into()!
 println("{u.name} {u.age} {u.address.city}")   // Aki 30 Tokyo
 ```
+
+## `std.data.toml`
+
+```brass norun
+import std.data.toml.TomlValue
+```
+
+A pure-Brass TOML value tree, parser, serializer, and reflective decoder.
+
+```brass norun
+type TomlValue =
+    | String { value: string }
+    | Integer { value: int64 }
+    | Float { value: float64 }
+    | Bool { value: bool }
+    | Datetime { value: string }
+    | Array { value: TomlValue[] }
+    | Table { values }            // string -> TomlValue HashMap
+```
+
+| Function / method | Signature | Behavior |
+| --- | --- | --- |
+| `TomlValue.parse(text)` | `(string) -> TomlValue!` | parse a complete TOML document; the root is a table |
+| `value.stringify()` | `() -> string` | serialize as TOML; nested containers use inline form |
+| `value.as_string()` | `() -> string!` | extract a string |
+| `value.as_integer()` | `() -> int64!` | extract an integer |
+| `value.as_float()` | `() -> float64!` | extract a float |
+| `value.as_bool()` | `() -> bool!` | extract a boolean |
+| `value.as_datetime()` | `() -> string!` | extract the original date/time text |
+| `value.is_table()` | `() -> bool` | whether the value is a table |
+| `value.get(key)` | `(string) -> TomlValue!` | table entry or an error |
+| `value.at(index)` | `(int64) -> TomlValue!` | range-checked array element |
+| `value.as_array()` | `() -> TomlValue[]!` | array elements or an error |
+| `value.keys()` | `() -> string[]!` | table keys in unspecified map order |
+| `value.into()` | `() -> infer!` | decode a scalar or record into the call site's expected type |
+
+The parser supports comments, bare and quoted dotted keys, basic and literal
+strings, decimal and radix integers, floats, booleans, arrays, inline tables,
+table headers, and arrays of tables. Date and time values are retained as
+source text without calendar validation. Tables use `HashMap`, so key order is
+not preserved by `keys()` or `stringify()`.
+
+Reflective decoding supports scalar and record targets recursively. It does
+not decode a TOML array directly into a typed array; use `as_array()` and
+decode its elements individually.

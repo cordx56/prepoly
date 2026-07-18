@@ -1,6 +1,6 @@
 ---
 title: Brass
-description: A statically type-checked scripting language that requires only minimal type annotations and compiles programs just in time.
+description: A statically typed scripting language that requires only minimal type annotations and compiles programs just in time.
 template: splash
 hero:
   title: |
@@ -23,10 +23,10 @@ hero:
 
 The `.cz` extension of **Brass** source files comes from _copper_ and _zinc_,
 the two metals that make up brass. Brass is a scripting language: a source
-file runs directly, with no build step. Under the hood, it JIT-compiles the
-program and checks each function's types just before that function executes,
-so there is no compilation wait, yet the program still gets full static type
-checking.
+file runs directly, with no build step. The default runtime compiles native
+code on demand, while the static type checker validates every function before
+that function can execute. Use `brass check` when you need a complete
+whole-program verdict without running the program.
 
 Brass's type system rests on flexible type inference, which reduces type
 annotations to nearly zero. Annotations remain available where a variable's
@@ -35,8 +35,8 @@ type should be constrained explicitly.
 In short:
 
 - Just-in-time compilation
-- Per-function type checking, performed just before each function runs
-- Type inference for most types, resolved at execution time
+- Static type checking with a demand-driven default run
+- Type inference that keeps annotations optional in most code
 - Structural subtyping with interface definitions
 
 This book has two parts. The **user guide** introduces the language feature

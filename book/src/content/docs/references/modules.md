@@ -45,10 +45,9 @@ c's definition and `b.X` resolving to a.b's. A local binding shadows a
 qualifier (`let vec = ...` makes a later `vec.x` a field access), and a
 qualifier that collides with a declared or imported name is rejected.
 
-Import paths resolve **relative to the importing file's directory**: inside
-`app/main.cz`, `import geometry.vec.{...}` refers to `app/geometry/vec.cz`.
-Paths starting with `std` are global and refer to the embedded standard
-library instead of files on disk. Import cycles are detected and reported.
+Import paths are resolved according to the rules in
+[Module resolution](#module-resolution). Import cycles are detected and
+reported.
 
 Importing a type brings its methods with it: `import geometry.vec.{ Vec2 }`
 makes both `Vec2.new(...)` and `v.add(w)` available; methods are in scope
@@ -58,6 +57,48 @@ a literal like `{ x: 1.0, y: 2.0 }` only adopts a type the module declares or
 imports, while a value that already carries a nominal type, an imported
 function's return say, dispatches its methods without the type's name being
 imported.
+
+## Module resolution
+
+The compiler resolves an import in this order:
+
+1. `core.*` and bare prelude module names refer to the embedded `core`
+   library. They never load files from disk.
+2. If the first segment is a name in `BRASS_PACKAGES`, the complete path is
+   resolved only below that package root. A missing module does not fall
+   through to local or include files.
+3. Every other path is interpreted relative to the importing module. From
+   `app/main.cz`, `import geometry.vec` first means
+   `app/geometry/vec.cz`.
+4. The relative path is searched below the project root, then below each
+   `BRASS_INCLUDE` directory in order. A project file therefore shadows an
+   include file, and an earlier include directory shadows a later one.
+5. From a nested module, if the relative path does not exist, the path as
+   written is also tried from those roots. This lets a file such as
+   `app/features/view.cz` import a top-level `geometry` module.
+
+`BRASS_PACKAGES` is an OS path list of `name=directory` entries. The
+directory is the parent below which that package name resolves. On Unix the
+entries are separated by `:`, and on Windows by `;`:
+
+```text
+BRASS_PACKAGES=geometry=/opt/geometry:std=/opt/brass
+```
+
+`BRASS_INCLUDE` is an OS path list of open module roots:
+
+```text
+BRASS_INCLUDE=/opt/brass-extras:/home/user/brass-modules
+```
+
+Avoid overlapping include roots: the same source can otherwise be loaded
+under two module paths. Package bindings take precedence over all local and
+include paths, so a declared dependency cannot be shadowed accidentally.
+
+A distributed toolchain supplies an implicit `std` package rooted beside its
+`bin/` directory. An explicit `std=...` entry in `BRASS_PACKAGES` overrides
+it. Repository builds do not have this installed layout; use the packaged
+toolchain or provide `std` explicitly.
 
 ## Visibility
 
@@ -96,8 +137,8 @@ prelude**: their public names are in scope everywhere without an import,
 (`import io.{ ... }`) or `core` path (`import core.io.{ ... }`), to alias or
 qualify a name.
 
-The shipped `std/` tree (`fs`, `net`, `process`, `data.json`, ...) is NOT
-embedded: it resolves as the package named `std`, which a distributed
+The shipped `std/` tree (`fs`, `net`, `process`, `data.json`, ...) is not
+embedded. It resolves as the package named `std`, which an installed
 toolchain binds automatically, and imports with the `std.` prefix
 (`import std.fs.{ read_file }`). See the
 [standard library reference](/references/stdlib/).

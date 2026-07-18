@@ -37,8 +37,9 @@ This produces the same output.
 
 ## Checking without running
 
-Every function is fully type-checked before it runs. To type-check a program
-without executing it, use `brass check`:
+An ordinary run checks each function before that function can execute, but it
+does not wait for unused functions. To check the whole program without
+executing it, use `brass check`:
 
 ```bash
 brass check hello.cz
@@ -75,9 +76,9 @@ What this means in practice:
   already produced stands and the run exits non-zero. The unit is the whole
   function: an error anywhere in a function the run calls counts, even in a
   branch execution would never take.
-- The unused code keeps checking in the background while the program runs.
-  What it finds is remembered to speed up later runs, but never changes the
-  current run's outcome.
+- Unused code may continue checking in the background. A stopped check can be
+  resumed from the analysis cache on a later run, but its diagnostics never
+  change the current run's outcome.
 - `brass --eager hello.cz` runs with the check-everything-first behavior
   (identical to `brass check` followed by the run). The REPL and the
   interpreter back end always check eagerly.

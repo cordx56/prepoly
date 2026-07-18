@@ -30,10 +30,10 @@ mkdir myapp && cd myapp
 czpm init myapp
 ```
 
-Package and dependency names must be ASCII identifiers: they begin with a
-letter or `_` and continue with letters, digits, or `_`. `new` refuses an
-existing destination directory, while `init` refuses to overwrite an existing
-`package.toml` or package root file.
+The name passed to `new` or `init` must be an ASCII identifier: it begins with
+a letter or `_` and continues with letters, digits, or `_`. Dependency keys
+use the same form. `new` refuses an existing destination directory, while
+`init` refuses to overwrite an existing `package.toml` or package root file.
 
 The generated `package.toml` looks like this:
 
@@ -60,9 +60,10 @@ czpm check    # type-check only
 czpm fmt      # format every owned .cz file below the project directory
 ```
 
-Both commands read `package.toml`, fetch any missing dependencies, set the
-`BRASS_PACKAGES` environment variable, and invoke `brass` on the root
-file (`<package-name>.cz`).
+All three commands read `package.toml` and resolve its dependencies. `run`
+invokes `brass` on the package root (`<package-name>.cz`); `check` checks every
+owned `.cz` file so errors in unused modules are reported too; `fmt` formats
+those files in place.
 
 ## The language server in a project
 
@@ -136,58 +137,13 @@ mylib/
   package.toml
 ```
 
-## How it works
+## Dependency resolution
 
-`czpm` sets the environment variable `BRASS_PACKAGES` before invoking `brass`.
-It is an OS path list of `name=path` entries: entries are separated by `:` on
-Unix and `;` on Windows. For example, on Unix:
+`czpm` passes the resolved dependency roots to `brass` and `czls`, so imports,
+editor diagnostics, and completion all use the same packages. It also keeps
+the installed `std` package available. You normally do not need to configure
+the environment yourself.
 
-```
-BRASS_PACKAGES=geometry=/home/user/.brass/packages/git/0123abcd:utils=/home/user/.brass/packages/git/4567cdef
-```
-
-An import whose first segment is a declared name resolves under that entry's
-directory, and only there. The manifest therefore scopes exactly which
-external modules the project sees, and a declared name cannot be shadowed by a
-same-named local file. Resolution rejects a dependency whose manifest package
-name differs from its dependency-table key, as well as two transitive
-dependencies that give the same name different locations. Both the compiler
-and the language server read the variable at startup, so editor diagnostics and
-completions work for dependencies too.
-
-The **standard library is itself the package named `std`**: an entry
-`std=/path/to/toolchain` (the directory containing `std/`) is what makes
-`import std.fs` resolve. A distributed toolchain binds it implicitly (see
-below), and `czpm` passes the parent process's `BRASS_PACKAGES` on to the
-compiler it spawns with the manifest's dependencies appended, so the `std`
-binding survives inside a project while a manifest-declared name still wins
-on a collision.
-
-## Include paths
-
-Outside of `czpm` projects (or alongside them), the compiler also honors
-`BRASS_INCLUDE`, an OS path list of plain directories. This Unix example uses
-`:`; use `;` on Windows:
-
-```
-BRASS_INCLUDE=/opt/brass-extras:/home/user/brass-modules
-```
-
-Any `.cz` file, module directory, or plugin under an include path is
-importable directly, no manifest required. An import is resolved relative to
-the importing file first, searched across the project root and then each
-include path in list order; the first directory that serves the path wins. A
-file in the project therefore shadows an include module of the same path, an
-earlier include entry shadows a later one, and a `BRASS_PACKAGES` name
-always binds before the include search. Include entries should not nest
-inside each other (or inside the project): a file reachable from two roots
-can be loaded twice under two module paths.
-
-Finally, the toolchain binaries (`brass` and `czls`) bind one implicit
-package: `std`, rooted at the directory beside their own `bin/`
-(`<bin>/..`) when `std/` exists there. A distributed toolchain therefore
-serves the standard library (`import std.process`, `import std.path`, ...)
-with no environment setup at all, in the compiler and in the editor alike.
-An explicit `std=...` entry in `BRASS_PACKAGES` takes precedence over the
-implicit binding, so an environment can point the standard library
-elsewhere.
+For the exact `BRASS_PACKAGES` format, `BRASS_INCLUDE`, precedence, and the
+implicit `std` binding, see
+[Module resolution](/references/modules/#module-resolution).

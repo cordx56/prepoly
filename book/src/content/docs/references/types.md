@@ -3,9 +3,11 @@ title: "Type system"
 description: "The type system in full: literals, conversions, parameter passing, structural typing, nullable, Result, and inference."
 ---
 
-Brass is statically typed with flexible type inference. The whole program
-is checked before anything runs; annotations constrain, they are never
-required for safety.
+Brass is statically typed with flexible type inference. Every function body
+is checked before it can execute; `brass check` produces the complete
+whole-program verdict. Annotations constrain types, but are never required
+for safety. See [Execution model](/references/execution/) for when the default
+run performs each check.
 
 The inference is Hindley-Milner-**style**, unification over type variables,
 but deliberately not textbook HM; it deviates where a scripting language
@@ -404,8 +406,9 @@ Separately, returns of `null` and returns of `T` in one function join to
 - **`fun T.m(self) -> infer!`** declares a reflective template whose result
   type is fixed by each call site's expected type; see
   [Compile-time reflection](/references/reflection/#generic-decoders-with---infer).
-- When a concrete type is only known at runtime (e.g. decoding external
-  data), the needed specialization is compiled at that moment; this is
+- A reflective `-> infer!` target is fixed by the expected type at its call
+  site and specialized during front-end compilation. Native code for the
+  resulting concrete function may still be compiled on first use; this is
   invisible to the type rules.
 
 There is **no explicit type-parameter syntax** (`<T>` does not exist).

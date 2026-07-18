@@ -80,9 +80,9 @@ return break continue null true false self Self import
 ```
 Everything else is an ordinary identifier. In particular `ref`, `mut`,
 `infer`, `typeof`, `anonymous` are recognized contextually in type position;
-`spawn`, `with`, `sync`, `error`, `print`, `println`, `len`, `open`, `assert`
-are functions (the builtin ones cannot be redefined); and there is no `loop`,
-`defer`, `pub`, `impl`, or `trait`.
+`print`, `println`, and `assert` are prelude functions. The compiler-owned
+function names `len`, `spawn`, `with`, `sync`, `error`, `fields`, and `typeof`
+cannot be redefined. There is no `loop`, `defer`, `pub`, `impl`, or `trait`.
 
 ### Integer literals
 

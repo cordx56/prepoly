@@ -38,9 +38,7 @@ println("Hello, {name}!")
 ## Files
 
 Whole-file text I/O lives in `std.fs`, not in the implicit prelude.
-Import it first; from a repo checkout, build the plugins with `std/build.sh`
-and declare the `std` package as described in the
-[standard library reference](/references/stdlib/#stdfs).
+Import it explicitly; the complete toolchain includes the native file plugin.
 `read_file(path)` and `write_file(path, content)` both return a Result. In a
 quick script, unwrap with `!` and let a failure stop the program:
 
@@ -62,7 +60,7 @@ import std.fs.read_file
 
 match read_file("missing.txt") {
     Ok { value } => println(value),
-    Err { error } => println("read failed: {error}"),
+    Err { error } => println("read failed: {error.display()}"),
 }
 ```
 

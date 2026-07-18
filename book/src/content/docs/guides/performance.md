@@ -3,54 +3,31 @@ title: "Performance"
 description: "What a run pays at start-up, how compiled code runs, and when --eager is the right tool."
 ---
 
-Brass optimizes for the edit-run cycle: a run starts executing before the
-whole program is checked or compiled, and analysis results are cached so the
-next run skips them. This chapter explains what that buys, what it costs, and
-when to reach for `--eager` instead.
+The default command is tuned for short edit-run cycles. Start with
+`brass app.cz`; use `brass check` when you need a complete check, and add
+`--eager` only when a long-running workload benefits from whole-program
+optimization.
 
 ## What a run pays at start-up
 
-`brass app.cz` interleaves everything it can:
+`brass app.cz` avoids waiting for work the run may not need:
 
-- **Checking is lazy.** Type inference starts at the entry and settles other
-  functions as compilation demands them; code the run never needs is checked
-  in the background without delaying it (see
-  [Execution model](/references/execution/)).
-- **Compilation is lazy too.** A function is optimized and translated to
-  native code the first time execution reaches it. A branch the run never
-  takes is never compiled.
-- **Analysis is cached.** A clean run (or `brass check`) writes
-  `app.czcache`; later runs of the unchanged program skip type checking
-  entirely and go straight to compiling on demand (see
-  [Performance & caching](/references/performance/)).
+- Each function is checked before it can execute. Unused functions do not
+  delay the current run, so a successful run is only a verdict on the code it
+  needed. Use `brass check` to check every function.
+- Native code is compiled when it is needed. Code behind an untaken branch
+  may never be compiled during that run.
+- Analysis is cached. A completed check can be reused in full; if background
+  checking stops when the program exits, the next run can resume from the
+  partial result.
 
-So a warm run pays milliseconds of start-up plus native compilation of
-exactly the functions it executes.
+These details normally require no tuning. The practical commands are:
 
 ```bash
-brass app.cz          # first run: checks and compiles as it executes
-brass check app.cz    # whole-program verdict; writes app.czcache
-brass app.cz          # warm run: no checking, compiles on demand
+brass app.cz          # run with low start-up latency
+brass check app.cz    # check the complete program without running it
+brass --eager app.cz  # check and optimize the complete program, then run
 ```
-
-## How compiled code runs
-
-Native code is optimized identically in every mode; what differs is the
-**compilation unit**:
-
-- On the default lazy run, each function is compiled separately, behind a
-  small indirection that lets it compile on first call. Calls between
-  functions stay indirect, and a function is never inlined into its callers.
-- Under `--eager`, the whole program is compiled as one unit before it runs:
-  calls are direct, and small hot functions inline away.
-
-For most programs -- scripts, I/O-bound tools, anything whose time goes into
-the runtime or the standard library -- the difference is not measurable. It
-shows on **hot loops making very frequent calls to tiny functions**, where
-the call indirection becomes the loop body: a tight loop calling a two-line
-helper fifty million times ran about three times faster under `--eager` in
-our measurements. Self-recursion is unaffected (a function calling itself
-stays within its own unit), and loops that do their work inline lose nothing.
 
 ## When to use `--eager`
 
@@ -58,32 +35,30 @@ stays within its own unit), and loops that do their work inline lose nothing.
 brass --eager app.cz
 ```
 
-`--eager` checks the whole program first (the same verdict as `brass check`),
-then compiles it as one optimized unit and runs it. The semantics are
-identical to the default run; only where time is spent differs.
+`--eager` checks and compiles the whole program before execution. This enables
+direct calls and cross-function inlining, at the cost of more start-up work.
+Program semantics are unchanged.
 
 Reach for it when:
 
-- the program is **compute-heavy and long-running**: seconds of runtime dwarf
-  the up-front compile, and the tightest loops get direct, inlinable calls;
-- you are **measuring performance**: an eager run also keeps first-call
-  compilation out of your timings;
-- you want the **whole-program verdict and the run** in one command.
+- the program is compute-heavy and long-running;
+- hot loops call small helper functions frequently;
+- you are benchmarking and want compilation outside the measured run;
+- you want a complete check and the run in one command.
 
-Stay with the default when start-up latency matters: short scripts,
-command-line tools, and large programs where any single run executes a small
-slice of the code.
+Stay with the default for scripts, command-line tools, I/O-bound programs, and
+large applications that use only a small part of their code in one run.
 
-## Concurrency
+## Caches
 
-`spawn` changes one thing: everything the spawned task could statically reach
-is compiled before the spawn runs, because worker threads never compile. Code
-only the main thread can reach stays on demand, so a spawning program still
-starts lazily.
+Cache files are an implementation aid, not build artifacts you need to
+manage. They are ignored when sources, dependencies, plugins, or the compiler
+change. Set `BRASS_CACHE=off` when diagnosing cache behavior or comparing cold
+runs. See [Performance and caching](/references/performance/) for cache kinds,
+validation, and timing logs.
 
 ## Measuring
 
-`BRASS_LOG='brass::perf=debug' brass app.cz` prints where the time went --
-per phase, per function, and (on warm runs) one line per first-call
-compilation. See [Performance & caching](/references/performance/) for the
-phase list and the caches in detail.
+`BRASS_LOG='brass::perf=debug' brass app.cz` prints phase totals and the
+slowest checked or compiled items. Measure before choosing `--eager`; most
+programs should keep the default.

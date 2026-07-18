@@ -177,7 +177,7 @@ is `0` (likewise every numeric width), `bool.default()` is `false`,
 (`let xs: T[] = []`).
 
 An *uncalled* member access `x.m` keeps its compile-time
-[member-presence meaning](./reflection#member-presence) rather than
+[member-presence meaning](/references/reflection/#member-presence-xm-without-a-call) rather than
 producing the method as a value. Every receiver supports the test (the
 primitive classes, records, and sums alike), and a declared method reads as
 present, so `if v.m { v.m() } else { ... }` dispatches on whether the
