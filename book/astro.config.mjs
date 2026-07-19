@@ -16,7 +16,7 @@ const brassGrammar = JSON.parse(
 
 // https://astro.build/config
 export default defineConfig({
-  site: "https://brass-lang.cz",
+  site: "https://brass-cz.org",
   integrations: [
     starlight({
       title: "Brass book",
