@@ -166,7 +166,7 @@ fun init_dir(path: Path, name: string) {
         manifest_path,
         "[package]
 name = \"{name}\"
-author = \"\"
+authors = \"\"
 license = \"MIT\"
 
 [dependencies]

@@ -10,7 +10,7 @@ type Manifest = {
 /** The `[package]` table. Every field is required. */
 type PackageInfo = {
     name: string
-    author: string
+    authors: string[]
     license: string
 }
 
@@ -43,16 +43,26 @@ const DEFAULT_REV = "HEAD"
  */
 fun Manifest.parse(s: string) -> Manifest! {
     const toml = TomlValue.parse(s)!
-    // A RECORD target decodes in one step: `into` walks PackageInfo's own fields
-    // and reads the table key of each name. (`PackageInfo.from(..)` is a
-    // different operation -- a structural conversion, which looks for those
-    // fields on the *value*; a TOML table carries them as entries, not fields.)
-    // The package's own name is deliberately not validated here: it never
-    // becomes an import segment (a depender names this package with its own
-    // dependency key), it only locates the entry file, so a file-name-ish
-    // name like `my-app` is legal in an existing manifest. `new`/`init`
-    // still insist on an identifier for the packages they scaffold.
-    const package: PackageInfo = toml.get("package")!.into()!
+    const package_raw = toml.get("package")!
+    const name: string = package_raw.get("name")!.into()!
+    const authors: string[] = match package_raw.get("authors")! {
+        String { value } => [value],
+        Array { value } => {
+            let authors = []
+            for value in value {
+                const author = value.as_string()!
+                authors.push(author)
+            }
+            authors
+        },
+        _ => error("Invalid value type in `package.authors`")!,
+    }
+    const license: string = package_raw.get("license")!.into()!
+    const package = PackageInfo {
+        name: name,
+        authors: authors,
+        license: license,
+    }
 
     let dependencies: Dependencies = HashMap.new()
     if _has(toml.keys()!, "dependencies") {
