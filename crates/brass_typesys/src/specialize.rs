@@ -321,6 +321,11 @@ impl Specializer<'_> {
                 Expr::Match(Box::new(scrut_e), arms, *span)
             }
             Expr::Block(b, span) => Expr::Block(self.block_in(b, binds), *span),
+            Expr::TypeTest(subject, te, span) => Expr::TypeTest(
+                Box::new(self.expr(subject, binds)),
+                self.subst_type(te),
+                *span,
+            ),
             Expr::If(c, t, els, span) => Expr::If(
                 Box::new(self.expr(c, binds)),
                 self.block_in(t, binds),

@@ -451,6 +451,7 @@ impl<'p, 'e> Walker<'p, 'e> {
                     self.require_init(id, *span);
                 }
             }
+            Expr::TypeTest(subject, _, _) => self.walk_expr(subject),
             Expr::Field(base, fname, span) => {
                 if let Expr::Ident(name, _) = &**base
                     && let Some(id) = self.lookup(name)
@@ -602,9 +603,10 @@ fn collect_idents(e: &Expr, out: &mut BTreeSet<String>) {
         Expr::Ident(name, _) => {
             out.insert(name.clone());
         }
-        Expr::Unary(_, inner, _) | Expr::ErrorProp(inner, _) | Expr::Closure(_, inner, _) => {
-            collect_idents(inner, out)
-        }
+        Expr::Unary(_, inner, _)
+        | Expr::ErrorProp(inner, _)
+        | Expr::Closure(_, inner, _)
+        | Expr::TypeTest(inner, _, _) => collect_idents(inner, out),
         Expr::Binary(_, l, r, _) | Expr::Index(l, r, _) | Expr::Range(l, r, _) => {
             collect_idents(l, out);
             collect_idents(r, out);

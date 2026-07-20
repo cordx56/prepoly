@@ -876,6 +876,53 @@ pub fn peel_modes(ty: &Type) -> &Type {
     }
 }
 
+/// The EXACT/WILDCARD core of the type test (`if v: T`): whether a concrete
+/// value type matches a pattern with `infer` holes left as `Type::Unknown`.
+///
+/// A hole matches any type; matching is otherwise exact -- no numeric
+/// widening, no nullable promotion, no structural subtyping. Passing-mode
+/// wrappers are looked through on both sides (a `ref(mut(T))` parameter still
+/// holds a `T` value); a slice pattern (`T[]`) also accepts a fixed-length
+/// array of a matching element, mirroring how annotations match values
+/// elsewhere.
+///
+/// This core alone is NOT the deciding predicate: type tests also accept the
+/// language's subtyping (structural records, declared sum subtypes), layered
+/// on in `brass_typesys::type_test_accepts` -- the one function the checker's
+/// arm selection and the back ends' branch folding must both call.
+pub fn type_test_matches(pattern: &Type, subject: &Type) -> bool {
+    let pattern = peel_modes(pattern);
+    let subject = peel_modes(subject);
+    match (pattern, subject) {
+        (Type::Unknown(_), _) => true,
+        (Type::Nullable(p), Type::Nullable(s)) => type_test_matches(p, s),
+        (Type::Slice(p), Type::Slice(s) | Type::Array(s, _)) => type_test_matches(p, s),
+        (Type::Array(p, n), Type::Array(s, m)) => n == m && type_test_matches(p, s),
+        (Type::Tuple(ps), Type::Tuple(ss)) => {
+            ps.len() == ss.len() && ps.iter().zip(ss).all(|(p, s)| type_test_matches(p, s))
+        }
+        (Type::Fun(pp, pr), Type::Fun(sp, sr)) => {
+            pp.len() == sp.len()
+                && pp.iter().zip(sp).all(|(p, s)| type_test_matches(p, s))
+                && type_test_matches(pr, sr)
+        }
+        (Type::Record(p), Type::Record(s)) | (Type::Sum(p), Type::Sum(s)) => {
+            // Same nominal (structural records also compare by name), and
+            // every substitution entry the pattern pins must match the
+            // instance's. A bare nominal pattern (empty substitution) accepts
+            // any instance of that nominal.
+            p.id == s.id
+                && (p.id >= 0 || p.name() == s.name())
+                && p.substitution.iter().all(|(k, pv)| {
+                    s.substitution
+                        .get(k)
+                        .is_some_and(|sv| type_test_matches(pv, sv))
+                })
+        }
+        _ => pattern == subject,
+    }
+}
+
 /// Split one caller-visible passing wrapper from its underlying value type.
 /// `const` describes the source binding rather than the callee convention and
 /// is therefore ignored. An open type has no fixed mode yet; callers that
@@ -1149,8 +1196,69 @@ mod tests {
 
     use super::{
         IntKind, NominalInfo, NominalType, Substitution, Type, collapse_nullable, mismatch_display,
-        resolve,
+        resolve, type_test_matches,
     };
+
+    /// A hole matches anything, a slice pattern accepts fixed arrays, and
+    /// matching stays exact everywhere else (no widening, no nullable
+    /// promotion) -- the properties the type-test fold relies on.
+    #[test]
+    fn type_test_matching_rules() {
+        let hole = Type::Unknown(super::INFER_VAR);
+        let int32 = Type::Int(IntKind::I32);
+        let int64 = Type::Int(IntKind::I64);
+        let int32s = Type::Slice(Box::new(int32.clone()));
+
+        // Bare hole and hole-elem slice.
+        assert!(type_test_matches(&hole, &Type::Str));
+        assert!(type_test_matches(&hole, &int32s));
+        let any_slice = Type::Slice(Box::new(hole.clone()));
+        assert!(type_test_matches(&any_slice, &int32s));
+        assert!(!type_test_matches(&any_slice, &Type::Str));
+
+        // Exactness: no widening, no nullable promotion.
+        assert!(!type_test_matches(&int64, &int32));
+        assert!(!type_test_matches(
+            &Type::Nullable(Box::new(int32.clone())),
+            &int32
+        ));
+
+        // Slice pattern accepts a fixed array; fixed lengths must agree.
+        assert!(type_test_matches(
+            &int32s,
+            &Type::Array(Box::new(int32.clone()), 3)
+        ));
+        assert!(!type_test_matches(
+            &Type::Array(Box::new(int32.clone()), 2),
+            &Type::Array(Box::new(int32.clone()), 3)
+        ));
+
+        // Passing modes are looked through on the subject.
+        assert!(type_test_matches(
+            &int32s,
+            &Type::Ref(Box::new(Type::Mut(Box::new(int32s.clone()))))
+        ));
+
+        // Nominals: same id, and pinned entries must match; a bare nominal
+        // pattern accepts any instance of that nominal.
+        let mut subst = Substitution::empty();
+        subst.insert("value", Type::Str);
+        let inst = Type::Record(NominalType::with_substitution(9, "Box", subst));
+        let bare = Type::Record(NominalType::new(9, "Box"));
+        assert!(type_test_matches(&bare, &inst));
+        let mut want = Substitution::empty();
+        want.insert("value", Type::Str);
+        let pinned = Type::Record(NominalType::with_substitution(9, "Box", want));
+        assert!(type_test_matches(&pinned, &inst));
+        let mut wrong = Substitution::empty();
+        wrong.insert("value", Type::Bool);
+        let mismatched = Type::Record(NominalType::with_substitution(9, "Box", wrong));
+        assert!(!type_test_matches(&mismatched, &inst));
+        assert!(!type_test_matches(
+            &Type::Record(NominalType::new(8, "Boy")),
+            &inst
+        ));
+    }
 
     #[test]
     fn resolves_sum_nominal_kind() {

@@ -1059,7 +1059,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             .iter()
             .map(|t| t.clone().unwrap_or(Type::Never))
             .collect();
-        let reachable = reachable_blocks(body, &probe);
+        let reachable = reachable_blocks(self.program, body, &probe);
         if let Some(e) = reachable
             .iter()
             .zip(&block_errors)
@@ -1149,7 +1149,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             && let Some(declared) = &ret
             && !matches!(declared, Type::Nullable(_))
         {
-            let reachable = reachable_blocks(body, &local_types);
+            let reachable = reachable_blocks(self.program, body, &local_types);
             for (i, block) in body.blocks.iter().enumerate() {
                 if reachable[i]
                     && let Terminator::Return(op) = &block.term
@@ -1186,7 +1186,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             body,
             &sym,
             &local_types,
-            &reachable_blocks(body, &local_types),
+            &reachable_blocks(self.program, body, &local_types),
         )?;
 
         // Validate what mutual recursion assumed about this instance while it
@@ -1679,6 +1679,9 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             // fully typed; nothing here depends on the operand being resolved
             // yet, so the result does not wait on it.
             Rvalue::TypeName(_) => Ok(Some(Type::Str)),
+            // A type test: always a bool; the answer is folded per instance
+            // from the operand's monomorphized type (see `fold`).
+            Rvalue::TypeTest(..) => Ok(Some(Type::Bool)),
             Rvalue::Bin(op, a, b) => {
                 if is_comparison(*op) || matches!(op, BinOp::And | BinOp::Or) {
                     Ok(Some(Type::Bool))

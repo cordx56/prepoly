@@ -273,7 +273,9 @@ impl ConstChecker<'_> {
 
     fn check_expr(&mut self, expr: &Expr, scopes: &mut ConstScopes) {
         match expr {
-            Expr::Unary(_, inner, _) | Expr::ErrorProp(inner, _) => self.check_expr(inner, scopes),
+            Expr::Unary(_, inner, _) | Expr::ErrorProp(inner, _) | Expr::TypeTest(inner, _, _) => {
+                self.check_expr(inner, scopes)
+            }
             Expr::Binary(_, left, right, _) | Expr::Range(left, right, _) => {
                 self.check_expr(left, scopes);
                 self.check_expr(right, scopes);

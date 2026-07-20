@@ -330,6 +330,20 @@ impl<'a> Checker<'a> {
     pub(super) fn expect_assignable(&mut self, got: &Type, want: &Type, span: brass_parser::Span) {
         let got = self.resolve(got);
         let want = self.resolve(want);
+        // A type-test probe hole takes the first concrete requirement the
+        // tested arm places on the subject. Assignability otherwise never
+        // pins a probed value, but the hole EXISTS to be pinned: it is what
+        // makes `if v: infer { to_bytes(v) }` read as "the type `to_bytes`
+        // accepts". Commit-and-accept; the whole probe is rolled back by the
+        // type-test checker afterwards.
+        if !self.type_test_holes.is_empty()
+            && let Type::Unknown(id) = &got
+            && self.type_test_holes.contains(id)
+            && brass_hir::is_fully_known(&want)
+            && self.solver.unify(&got, &want).is_ok()
+        {
+            return;
+        }
         // An unconstrained inference variable whose type cannot be inferred
         // reaching a concrete required position is an error rather than a silent
         // unification: a bare empty array carries no

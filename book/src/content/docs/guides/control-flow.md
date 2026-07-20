@@ -34,6 +34,74 @@ fun size_of(n) {
 }
 ```
 
+## Type tests: `if value: Type`
+
+An `if` condition can test a value's **type**: `if value: Type { ... }`. The
+test is answered at compile time, separately for each concrete type a generic
+function is called with -- there is nothing to check at run time. The first
+arm whose type matches is the one that is compiled; the arms that do not match
+are not even type-checked for that call, so each arm may use the value in ways
+that only make sense for its own type:
+
+```brass
+fun length(val) {
+    const bytes = if val: infer {
+        to_bytes(val)      // `infer` takes the type this arm needs: string
+    } else if val: uint8[] {
+        val                // already bytes
+    } else if val: infer[] {
+        val                // any other array; val keeps its own element type
+    } else {
+        return error("length: unsupported value")
+    }
+    return bytes.len()
+}
+
+match length("hello") {
+    Ok { value } => println("string: {value} bytes"),
+    Err { error } => println(error.display()),
+}
+match length([1, 2, 3]) {
+    Ok { value } => println("array: {value} elements"),
+    Err { error } => println(error.display()),
+}
+match length(true) {
+    Ok { value } => println("{value}"),
+    Err { error } => println("bool: unsupported"),
+}
+```
+
+A bare `infer` in the tested type is a hole filled by what the arm itself
+requires: `to_bytes` accepts a `string`, so the first arm selects exactly the
+string case. A hole nothing constrains matches any type -- `infer[]` reads as
+"any array".
+
+The test also accepts [structural subtyping](/guides/types/#structural-subtyping):
+a record matches any tested type whose fields and methods it satisfies, so a
+type test can dispatch on capability rather than on an exact name:
+
+```brass
+type Point = { x: int32, y: int32 }
+
+fun describe(v) -> string {
+    if v: anonymous { x: int32 } {
+        return "x = {v.x}"
+    } else if v: string {
+        return v
+    }
+    return "something else"
+}
+
+println(describe(Point { x: 7, y: 9 }))   // x = 7
+println(describe("plain text"))           // plain text
+println(describe(3.5))                    // something else
+```
+
+Matching never converts the value: an `int32` does not select an `int64` arm,
+a `T` does not select a `T?` arm, and inside the selected arm the value keeps
+its own concrete type. The exact matching rules are in the
+[type-system reference](/references/types/#type-tests).
+
 ## `while`
 
 Here is the Collatz step counter, where `while` runs as long as the condition holds:

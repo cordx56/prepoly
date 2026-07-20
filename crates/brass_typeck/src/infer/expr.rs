@@ -671,6 +671,19 @@ impl<'a> Checker<'a> {
             Expr::VariantLit(t, variant, fields, span) => {
                 self.check_variant_lit(t, variant, fields, *span, scopes)
             }
+            // A type test outside an `if` condition (the parser does not
+            // produce this; hand-built ASTs only): a plain bool value.
+            Expr::TypeTest(subject, _, _) => {
+                self.check_expr(subject, scopes);
+                Type::Bool
+            }
+            Expr::If(cond, then, els, span) if matches!(&**cond, Expr::TypeTest(..)) => {
+                let Expr::TypeTest(subject, te, tspan) = &**cond else {
+                    unreachable!("guarded by the arm pattern");
+                };
+                let _ = span;
+                self.check_type_test_if(subject, te, *tspan, then, els.as_deref(), scopes)
+            }
             Expr::If(cond, then, els, span) => {
                 let cond_ty = self.check_condition(cond, scopes);
                 let mut truth = cond_ty.static_truthiness();
@@ -833,6 +846,151 @@ impl<'a> Checker<'a> {
             });
         }
         self.fresh_unknown()
+    }
+
+    /// Type `if subject: T { then } else { els }` -- the compile-time
+    /// type-test dispatch. Each monomorphic instance decides the test
+    /// statically: the subject's resolved type either matches the annotation
+    /// (through [`brass_hir::type_test_matches`], the same predicate the back
+    /// ends fold the branch with) and the then-arm alone is checked live, or
+    /// it does not and the else-arm alone is. The unselected arm is walked
+    /// with its errors discarded and its `return`s isolated -- it is code this
+    /// instance never compiles.
+    ///
+    /// `infer` holes in the annotation mean "whatever the tested arm
+    /// requires": before deciding, the arm is probed once with the subject
+    /// bound to the freshened pattern, so a concrete requirement the arm
+    /// places on the subject (`to_bytes(v)` demanding `string`) pins the
+    /// hole; a hole nothing pins stays a wildcard that matches any type. The
+    /// probe is fully rolled back. The pinned pattern is recorded on the
+    /// `type_tests` channel for MIR (shared across instantiations, so a
+    /// disagreement is rejected).
+    ///
+    /// A subject whose type is still open (the definitional pass of a generic
+    /// body) selects nothing: every arm is walked speculatively with errors
+    /// discarded and constraints rolled back, and the `if` types as a fresh
+    /// variable. Each instantiation then decides and checks for real.
+    #[allow(clippy::too_many_arguments)]
+    fn check_type_test_if(
+        &mut self,
+        subject: &Expr,
+        te: &brass_parser::ast::TypeExpr,
+        test_span: brass_parser::Span,
+        then: &Block,
+        els: Option<&Expr>,
+        scopes: &mut ScopeStack,
+    ) -> Type {
+        let subject_ty = self.check_expr(subject, scopes);
+        let subject_ty = self.resolve(&subject_ty);
+        let pattern = match self.resolve_type(te) {
+            Ok(t) => t,
+            Err(message) => {
+                self.errors.push(TypeError {
+                    message,
+                    span: te.span(),
+                });
+                Type::Unknown(brass_hir::INFER_VAR)
+            }
+        };
+        // `resolve_type` already freshens each `infer` (and `typeof`) hole
+        // into its own inference variable; those variables ARE the holes the
+        // probe may pin. They are freshly minted for this annotation, so no
+        // outer binding shares them.
+        let hole_ids: Vec<u32> = self.solver.free_vars(&pattern).into_iter().collect();
+        // Probe the tested arm at the pattern to pin its holes. Also reused
+        // as the speculative then-walk when the subject is still open.
+        let snap = self.solver.snapshot();
+        let mark = self.errors.len();
+        let mut probe_scopes = scopes.clone();
+        if let Expr::Ident(name, _) = subject {
+            let mut frame: HashMap<String, Type> = HashMap::default();
+            frame.insert(name.clone(), pattern.clone());
+            probe_scopes.push(frame);
+        }
+        if !hole_ids.is_empty() {
+            self.type_test_holes.extend(hole_ids.iter().copied());
+        }
+        self.return_values.push(Vec::new());
+        self.check_branch(then, &mut probe_scopes, true);
+        self.return_values.pop();
+        for id in &hole_ids {
+            self.type_test_holes.remove(id);
+        }
+        let probed = self.resolve(&pattern);
+        self.errors.truncate(mark);
+        self.solver.rollback(snap);
+        self.static_divergence = false;
+        let pattern = wildcard_open_vars(&probed);
+
+        if brass_hir::is_fully_known(&subject_ty) {
+            self.record_type_test(test_span, &pattern);
+            let matched = brass_typesys::type_test_accepts(self.program, &pattern, &subject_ty);
+            // The dead arm is walked with its errors discarded but its
+            // `return`s still collected, exactly like a presence-dispatch
+            // `if`: the back end's fallible ABI is per FUNCTION (an
+            // `error(...)` in any arm makes every instance return a
+            // `Result`), so the instance's reconciled return must see the
+            // pruned arm's returns or the checked type and the compiled ABI
+            // would disagree.
+            let mut then_scopes = scopes.clone();
+            let chosen = if matched {
+                let then_ty = self.check_branch(then, &mut then_scopes, false);
+                if let Some(e) = els {
+                    self.check_branch_expr(e, scopes, true);
+                }
+                then_ty
+            } else {
+                self.check_branch(then, &mut then_scopes, true);
+                match els {
+                    Some(e) => self.check_branch_expr(e, scopes, false),
+                    None => Type::Void,
+                }
+            };
+            // A `Never`-typed selection diverges (its arm always leaves), so
+            // the rest of the enclosing block is unreachable for this
+            // instance. The syntactic always-returns probe cannot see through
+            // a statically-decided nested chain; the selected arm's type can.
+            self.static_divergence = matches!(self.resolve(&chosen), Type::Never);
+            chosen
+        } else {
+            let snap = self.solver.snapshot();
+            let mark = self.errors.len();
+            if let Some(e) = els {
+                self.return_values.push(Vec::new());
+                self.check_branch_expr(e, scopes, true);
+                self.return_values.pop();
+            }
+            self.errors.truncate(mark);
+            self.solver.rollback(snap);
+            self.static_divergence = false;
+            self.fresh_unknown()
+        }
+    }
+
+    /// Record a decided type test's pattern for MIR lowering, rejecting a
+    /// shared generic body whose instantiations pin a hole differently (one
+    /// lowering serves them all, so no single pattern would be right).
+    fn record_type_test(&mut self, span: brass_parser::Span, pattern: &Type) {
+        if self.type_test_poisoned.contains(&span) {
+            return;
+        }
+        match self.type_tests.get(&span) {
+            None => {
+                self.type_tests.insert(span, pattern.clone());
+            }
+            Some(prev) if prev == pattern => {}
+            Some(_) => {
+                self.type_tests.remove(&span);
+                self.type_test_poisoned.insert(span);
+                self.errors.push(TypeError {
+                    message: "this type test resolves its `infer` holes differently across \
+                              instantiations of this generic function; the shared lowering \
+                              can only fold one pattern (annotate the tested type)"
+                        .to_string(),
+                    span,
+                });
+            }
+        }
     }
 
     /// Type an `if` block arm, discarding its errors when `dead` (statically
@@ -1150,5 +1308,39 @@ impl<'a> Checker<'a> {
         } else {
             Some(elem_tys.iter().map(|t| self.resolve(t)).collect())
         }
+    }
+}
+
+/// Replace every still-open inference variable in a probed type-test pattern
+/// with the `infer` wildcard. A hole nothing pinned means "matches anything",
+/// and a leftover solver id would differ between instantiations (and between
+/// the checker and MIR), so the recorded pattern must carry none.
+fn wildcard_open_vars(ty: &Type) -> Type {
+    use brass_hir::{NominalType, Substitution};
+    match ty {
+        Type::Unknown(_) => Type::Unknown(brass_hir::INFER_VAR),
+        Type::Slice(e) => Type::Slice(Box::new(wildcard_open_vars(e))),
+        Type::Array(e, n) => Type::Array(Box::new(wildcard_open_vars(e)), *n),
+        Type::Nullable(e) => Type::Nullable(Box::new(wildcard_open_vars(e))),
+        Type::ConstOf(e) => Type::ConstOf(Box::new(wildcard_open_vars(e))),
+        Type::Mut(e) => Type::Mut(Box::new(wildcard_open_vars(e))),
+        Type::Ref(e) => Type::Ref(Box::new(wildcard_open_vars(e))),
+        Type::Fun(ps, r) => Type::Fun(
+            ps.iter().map(wildcard_open_vars).collect(),
+            Box::new(wildcard_open_vars(r)),
+        ),
+        Type::Tuple(es) => Type::Tuple(es.iter().map(wildcard_open_vars).collect()),
+        Type::Record(n) | Type::Sum(n) => {
+            let mut subst = Substitution::empty();
+            for (k, v) in n.substitution.iter() {
+                subst.insert(k, wildcard_open_vars(v));
+            }
+            let rebuilt = NominalType::with_substitution(n.id, n.name().to_string(), subst);
+            match ty {
+                Type::Record(_) => Type::Record(rebuilt),
+                _ => Type::Sum(rebuilt),
+            }
+        }
+        other => other.clone(),
     }
 }

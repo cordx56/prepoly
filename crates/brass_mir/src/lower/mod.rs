@@ -153,6 +153,13 @@ pub(crate) struct ProgramCtx<'p> {
     /// when lowering without a checked program (tests, deferred re-lowering),
     /// where a nullable `!` is therefore unsupported.
     null_props: &'p fxhash::FxHashSet<Span>,
+    /// Resolved type-test patterns (`if v: T`), keyed by the test's span: the
+    /// annotation with `infer` holes pinned by the tested arm or left as
+    /// wildcards. Embedded into the test's `Rvalue::TypeTest` so the back ends
+    /// fold the branch per monomorphized instance. A missing entry (lowering
+    /// without a checked program, or a body no instantiation ever decided)
+    /// falls back to the syntactic annotation with every hole a wildcard.
+    type_tests: &'p HashMap<Span, Type>,
     closures: RefCell<Vec<MirClosure>>,
     next_closure: Cell<u32>,
 }
@@ -171,6 +178,7 @@ impl<'p> ProgramCtx<'p> {
         type_names: &'p HashMap<Span, String>,
         typeof_types: &'p HashMap<Span, Type>,
         null_props: &'p fxhash::FxHashSet<Span>,
+        type_tests: &'p HashMap<Span, Type>,
     ) -> Self {
         ProgramCtx {
             program,
@@ -184,6 +192,7 @@ impl<'p> ProgramCtx<'p> {
             type_names,
             typeof_types,
             null_props,
+            type_tests,
             closures: RefCell::new(Vec::new()),
             next_closure: Cell::new(0),
         }
@@ -772,6 +781,7 @@ pub fn lower_body(
     let no_type_names = HashMap::default();
     let no_typeof_types = HashMap::default();
     let no_null_props = fxhash::FxHashSet::default();
+    let no_type_tests = HashMap::default();
     let tables = LowerTables::new(program);
     let ctx = ProgramCtx::new(
         program,
@@ -785,6 +795,7 @@ pub fn lower_body(
         &no_type_names,
         &no_typeof_types,
         &no_null_props,
+        &no_type_tests,
     );
     let body = lower_one(
         &ctx,
@@ -839,6 +850,7 @@ pub fn lower_program(program: &Program) -> MirProgram {
         &HashMap::default(),
         &HashMap::default(),
         &fxhash::FxHashSet::default(),
+        &HashMap::default(),
     )
 }
 
@@ -856,6 +868,7 @@ pub struct CheckerChannels<'a> {
     pub type_names: &'a HashMap<Span, String>,
     pub typeof_types: &'a HashMap<Span, Type>,
     pub null_props: &'a fxhash::FxHashSet<Span>,
+    pub type_tests: &'a HashMap<Span, Type>,
 }
 
 /// A partially lowered MIR program for the lazy pipeline. Methods and module
@@ -957,6 +970,7 @@ fn subset_ctx<'p>(
         channels.type_names,
         channels.typeof_types,
         channels.null_props,
+        channels.type_tests,
     );
     ctx.next_closure.set(closure_base);
     ctx
@@ -1077,6 +1091,7 @@ pub fn lower_program_with_types(
     type_names: &HashMap<Span, String>,
     typeof_types: &HashMap<Span, Type>,
     null_props: &fxhash::FxHashSet<Span>,
+    type_tests: &HashMap<Span, Type>,
 ) -> MirProgram {
     let tables = LowerTables::new(program);
     let ctx = ProgramCtx::new(
@@ -1091,6 +1106,7 @@ pub fn lower_program_with_types(
         type_names,
         typeof_types,
         null_props,
+        type_tests,
     );
     let mut out = MirProgram::default();
 

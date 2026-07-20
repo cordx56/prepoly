@@ -277,6 +277,7 @@ fn walk_subexprs(e: &Expr, f: &mut impl FnMut(&Expr)) {
             }
         }
         Expr::Block(b, _) => block_exprs(b, f),
+        Expr::TypeTest(subject, _, _) => f(subject),
         _ => {}
     }
 }

@@ -829,6 +829,25 @@ impl<'p> Hm<'p> {
                 }
             }
             Expr::If(cond, then, els, span) => {
+                // A type-test `if` selects one arm per monomorphic instance:
+                // its arms are alternative worlds, so this principled pass
+                // neither couples them through a join nor reports their
+                // errors -- the infer pass types the selected arm per
+                // instantiation and discards the rest. All constraints the
+                // arms produce are rolled back so an arm that only types for
+                // one instance cannot pin the subject for the others.
+                if matches!(&**cond, Expr::TypeTest(..)) {
+                    self.infer_expr(cond);
+                    let mark = self.errors.len();
+                    let snap = self.solver.snapshot();
+                    self.infer_block_value(then);
+                    if let Some(e) = els {
+                        self.infer_expr(e);
+                    }
+                    self.solver.rollback(snap);
+                    self.errors.truncate(mark);
+                    return self.solver.fresh(InferenceVarKind::Source);
+                }
                 // A condition may be a bool or a nullable (truthy = non-null), so
                 // it is inferred but not constrained to `bool`.
                 self.infer_expr(cond);
@@ -842,6 +861,15 @@ impl<'p> Hm<'p> {
                 }
             }
             Expr::Block(block, _) => self.infer_block_value(block),
+            // The subject of a type test is inferred for reference resolution
+            // only; the test constrains nothing (each instance decides it
+            // statically) and reads as a plain bool here.
+            Expr::TypeTest(subject, _, _) => {
+                let snap = self.solver.snapshot();
+                self.infer_expr(subject);
+                self.solver.rollback(snap);
+                Type::Bool
+            }
             // Record field access yields the field's declared type. A field on a
             // value whose type is not a known record stays open (a builtin like
             // `int32.from` is a `Field` on a type *name*); a field on a concrete

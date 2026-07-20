@@ -1,0 +1,10 @@
+fun f(v) -> string {
+    if v: string {
+        return v
+    }
+    return v
+}
+
+fun main() {
+    println(f(1))
+}

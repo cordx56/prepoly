@@ -254,6 +254,7 @@ fn collect_expr_bindings(e: &Expr, f: &mut impl FnMut(&str, Span)) {
                 collect_expr_bindings(v, f);
             }
         }
+        Expr::TypeTest(subject, _, _) => collect_expr_bindings(subject, f),
         _ => {}
     }
 }

@@ -229,6 +229,7 @@ fn scan_expr(e: &Expr, aliases: &mut HashSet<String>, found: &mut bool) {
             }
         }),
         Expr::Block(block, _) => scan_block(block, aliases, found),
+        Expr::TypeTest(subject, _, _) => scan_expr(subject, aliases, found),
         Expr::If(c, t, e, _) => {
             scan_expr(c, aliases, found);
             scan_block(t, aliases, found);
@@ -786,7 +787,10 @@ fn each_call<'a>(block: &'a Block, f: &mut impl FnMut(&'a str, Option<&'a Expr>,
                 walk_expr(callee, f);
                 args.iter().for_each(|a| walk_expr(&a.expr, f));
             }
-            Expr::Field(b, _, _) | Expr::Unary(_, b, _) | Expr::ErrorProp(b, _) => walk_expr(b, f),
+            Expr::Field(b, _, _)
+            | Expr::Unary(_, b, _)
+            | Expr::ErrorProp(b, _)
+            | Expr::TypeTest(b, _, _) => walk_expr(b, f),
             Expr::Index(b, i, _) | Expr::Range(b, i, _) | Expr::Binary(_, b, i, _) => {
                 walk_expr(b, f);
                 walk_expr(i, f);
@@ -1749,6 +1753,7 @@ fn guard_children(expr: &mut Expr, guards: &BTreeMap<String, BTreeSet<String>>) 
                 guard_stmt_accesses(s, guards);
             }
         }
+        Expr::TypeTest(subject, _, _) => guard_expr_accesses(subject, guards),
         Expr::If(c, t, e, _) => {
             guard_expr_accesses(c, guards);
             for s in &mut t.stmts {

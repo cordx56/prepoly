@@ -1,0 +1,15 @@
+fun put(m, v) {
+    if v: infer {
+        m.set("k", v)
+    }
+    return 0
+}
+
+fun main() {
+    let a = HashMap.new()
+    a.set("seed", 1)
+    let b = HashMap.new()
+    b.set("seed", "x")
+    put(a, 2)
+    put(b, "y")
+}

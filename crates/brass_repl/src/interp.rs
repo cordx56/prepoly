@@ -120,8 +120,12 @@ impl<'p, 'm> Interp<'p, 'm> {
                 Terminator::CondBranch { cond, then, els } => {
                     // Mirror the typed back end's fold, then fall back to a
                     // runtime truthiness test.
-                    block = match brass_engine::cond_static_truthiness(f.body, &f.local_types, cond)
-                    {
+                    block = match brass_engine::cond_static_truthiness(
+                        self.hir,
+                        f.body,
+                        &f.local_types,
+                        cond,
+                    ) {
                         Some(true) => *then,
                         Some(false) => *els,
                         None => {
@@ -259,6 +263,13 @@ impl<'p, 'm> Interp<'p, 'm> {
             Rvalue::TypeName(op) => Ok(Value::Str(
                 operand_type_of(op, &f.local_types).type_name().into(),
             )),
+            // A type test: a constant bool decided from the operand's
+            // per-instance type (the same predicate the checker folded with).
+            Rvalue::TypeTest(op, pattern) => Ok(Value::Bool(brass_typesys::type_test_accepts(
+                self.hir,
+                pattern,
+                &operand_type_of(op, &f.local_types),
+            ))),
             Rvalue::Bin(op, a, b) => {
                 let operand_ty = if is_comparison(*op) {
                     binary_operand_type(a, b, &f.local_types)

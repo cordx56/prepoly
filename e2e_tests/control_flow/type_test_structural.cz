@@ -1,0 +1,26 @@
+type Point = { x: int32, y: int32 }
+type Named = { name: string }
+type Dog = { name: string }
+fun Dog.speak(self) -> string {
+    return "woof {self.name}"
+}
+type Speaker = { speak(self) -> string }
+
+fun inspect(v) -> string {
+    if v: anonymous { x: int32 } {
+        return "has x {v.x}"
+    } else if v: Speaker {
+        return v.speak()
+    } else if v: Named {
+        return "named {v.name}"
+    } else {
+        return "other"
+    }
+}
+
+fun main() {
+    println(inspect(Point { x: 7, y: 9 }))
+    println(inspect(Dog { name: "rex" }))
+    println(inspect(Named { name: "plain" }))
+    println(inspect(3))
+}

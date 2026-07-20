@@ -359,6 +359,10 @@ pub struct Inference {
     /// keyed by the annotation's span; MIR seeds the slot from this (the type
     /// is not recoverable from a `null`/inferred initializer alone).
     pub typeof_types: HashMap<Span, Type>,
+    /// Resolved type-test patterns (`if v: T`), keyed by the test's span; MIR
+    /// lowering embeds each into the test's rvalue so monomorphization can
+    /// fold the branch per instance (see `Checker::type_tests`).
+    pub type_tests: HashMap<Span, Type>,
     /// Spans of `expr!` operators whose operand is a nullable rather than a
     /// `Result`: the value case unwraps, the null case propagates as
     /// `Result.Null`. MIR lowering emits the presence-test shape for these.
@@ -975,6 +979,7 @@ pub(crate) fn analyze_inner(
             type_names: checker.type_names,
             keyed_calls: checker.keyed_calls,
             typeof_types: checker.typeof_types,
+            type_tests: checker.type_tests,
             null_props: checker.null_props,
             function_returns,
             method_returns,
@@ -1210,6 +1215,25 @@ fn flush_delta(
     for span in poisoned {
         state.typeof_types.remove(&span);
         delta.typeof_types_removed.push(span);
+    }
+    // Type-test patterns follow the typeof discipline: last-write-wins values
+    // (a wildcard hole is a legitimate final value, so entries are emitted
+    // as-is, never withheld for openness), removals on poisoning.
+    for (span, t) in &checker.type_tests {
+        if state.type_tests.get(span) != Some(t) {
+            delta.type_tests.push((*span, t.clone()));
+            state.type_tests.insert(*span, t.clone());
+        }
+    }
+    let poisoned: Vec<Span> = state
+        .type_tests
+        .keys()
+        .filter(|s| !checker.type_tests.contains_key(*s))
+        .copied()
+        .collect();
+    for span in poisoned {
+        state.type_tests.remove(&span);
+        delta.type_tests_removed.push(span);
     }
     // Clean call-site elaborations can discover contracts for nested
     // unannotated callees before their dedicated body pass. Stream each new
@@ -1476,6 +1500,25 @@ struct Checker<'a> {
     /// ARM of such an `if` -- the back end folds the branch to a direct jump and
     /// never emits the fall-through either.
     static_divergence: bool,
+    /// Resolved patterns of checked type tests (`if v: T`), keyed by the test's
+    /// span: the annotation with each `infer` hole either pinned by the tested
+    /// arm's own requirements or left a wildcard. MIR lowering embeds the
+    /// pattern into the test's rvalue and monomorphization re-decides the match
+    /// per instance through the same `brass_hir::type_test_matches` the checker
+    /// folded with. Recorded only by a pass whose subject type is fully known
+    /// (an open definitional sighting is less information, not a decision), and
+    /// shared-body instantiations that resolve a hole differently are rejected.
+    type_tests: HashMap<Span, Type>,
+    /// Type-test spans whose cross-instantiation pattern conflict is already
+    /// reported; the entry is dropped and stays dropped.
+    type_test_poisoned: HashSet<Span>,
+    /// Hole variables of the type-test pattern currently being probed.
+    /// Assignability normally only probes (a polymorphic value checked at many
+    /// positions must not be pinned), but a probe hole EXISTS to be pinned by
+    /// the tested arm's requirements -- `if v: infer { to_bytes(v) }` means
+    /// "the type `to_bytes` accepts" -- so `expect_assignable` commits an
+    /// accepted hole-to-concrete flow while this set is non-empty.
+    type_test_holes: HashSet<u32>,
 }
 
 /// What a checked `expr!` propagates on failure: the null of a nullable
@@ -1555,6 +1598,9 @@ impl<'a> Checker<'a> {
             null_props: HashSet::default(),
             in_entry_main: false,
             static_divergence: false,
+            type_tests: HashMap::default(),
+            type_test_poisoned: HashSet::default(),
+            type_test_holes: HashSet::default(),
         }
     }
 

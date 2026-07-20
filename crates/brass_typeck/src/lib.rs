@@ -79,6 +79,10 @@ pub struct Analysis {
     /// Resolved binding types of `typeof`-bearing local annotations, keyed by
     /// the annotation span; MIR seeds the slot from this.
     pub typeof_types: fxhash::FxHashMap<Span, brass_hir::Type>,
+    /// Resolved patterns of type tests (`if v: T`), keyed by the test's span;
+    /// MIR lowering embeds each into the test's rvalue so monomorphization
+    /// folds the branch per instance.
+    pub type_tests: fxhash::FxHashMap<Span, brass_hir::Type>,
     /// Spans of `expr!` operators whose operand is a nullable rather than a
     /// `Result` (the null case propagates as `Result.Null`); MIR lowering
     /// emits the presence-test shape for exactly these spans.
@@ -227,6 +231,7 @@ fn analyze_impl(
         type_names: infer.type_names,
         keyed_calls: infer.keyed_calls,
         typeof_types: infer.typeof_types,
+        type_tests: infer.type_tests,
         null_props: infer.null_props,
         function_returns: infer.function_returns,
         method_returns: infer.method_returns,
@@ -652,6 +657,10 @@ fn collect_expr(expr: &Expr, out: &mut Vec<TypeExpr>) {
             }
         }
         Expr::Unary(_, inner, _) | Expr::ErrorProp(inner, _) => collect_expr(inner, out),
+        Expr::TypeTest(subject, te, _) => {
+            out.push(te.clone());
+            collect_expr(subject, out);
+        }
         Expr::Binary(_, left, right, _) | Expr::Range(left, right, _) => {
             collect_expr(left, out);
             collect_expr(right, out);

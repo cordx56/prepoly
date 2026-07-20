@@ -1,0 +1,14 @@
+fun main() {
+    let x = 42
+    if x: int32 {
+        println("int32")
+    } else {
+        println("other")
+    }
+    let s = "hi"
+    if s: int32 {
+        println("int32")
+    } else {
+        println("string {s}")
+    }
+}

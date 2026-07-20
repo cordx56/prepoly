@@ -1,0 +1,31 @@
+fun length(val) {
+    const bytes = if val: infer {
+        to_bytes(val)
+    } else if val: uint8[] {
+        val
+    } else if val: infer[] {
+        val
+    } else {
+        return error("unsupported")
+    }
+    return bytes.len()
+}
+
+fun main() {
+    match length("hello") {
+        Ok { value } => println("str {value}")
+        Err { error } => println("str err")
+    }
+    match length([1, 2, 3]) {
+        Ok { value } => println("ints {value}")
+        Err { error } => println("ints err")
+    }
+    match length(to_bytes("ab")) {
+        Ok { value } => println("bytes {value}")
+        Err { error } => println("bytes err")
+    }
+    match length(true) {
+        Ok { value } => println("bool {value}")
+        Err { error } => println("bool err")
+    }
+}

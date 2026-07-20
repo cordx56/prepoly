@@ -55,6 +55,7 @@ fn three_shapes_collapse_to_one_display_instance() {
         &analysis.type_names,
         &analysis.typeof_types,
         &analysis.null_props,
+        &analysis.type_tests,
     );
     let mono = monomorphize(&mir, &program).expect("monomorphize");
     let display_instances: Vec<&str> = mono

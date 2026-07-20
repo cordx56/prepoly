@@ -140,6 +140,7 @@ fn check_loop_control(stmts: &[Stmt], in_loop: bool, errors: &mut Vec<TypeError>
 /// call argument or an operand and slip past the guard.
 fn check_loop_control_expr(expr: &Expr, in_loop: bool, errors: &mut Vec<TypeError>) {
     match expr {
+        Expr::TypeTest(subject, _, _) => check_loop_control_expr(subject, in_loop, errors),
         Expr::If(cond, then, els, _) => {
             check_loop_control_expr(cond, in_loop, errors);
             check_loop_control(&then.stmts, in_loop, errors);
@@ -293,6 +294,7 @@ fn stmt_has_break(stmt: &Stmt) -> bool {
 /// return the loop does not actually guarantee.
 fn expr_has_break(expr: &Expr) -> bool {
     match expr {
+        Expr::TypeTest(subject, _, _) => expr_has_break(subject),
         Expr::If(cond, then, els, _) => {
             expr_has_break(cond)
                 || block_has_break(then)

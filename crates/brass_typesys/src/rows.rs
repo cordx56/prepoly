@@ -587,6 +587,8 @@ impl ParamScan<'_> {
             Expr::Unary(_, inner, _) | Expr::ErrorProp(inner, _) => {
                 self.walk_value(inner, active, forced)
             }
+            // A type test reads its subject; the annotation names no value.
+            Expr::TypeTest(subject, _, _) => self.walk_value(subject, active, None),
             Expr::Binary(_, a, b, _) | Expr::Range(a, b, _) => {
                 self.walk_value(a, active, None);
                 self.walk_value(b, active, None);
@@ -884,7 +886,10 @@ fn expr_mentions(e: &Expr, name: &str) -> bool {
 fn visit(e: &Expr, f: &mut impl FnMut(&Expr)) {
     f(e);
     match e {
-        Expr::Unary(_, a, _) | Expr::ErrorProp(a, _) | Expr::Field(a, _, _) => visit(a, f),
+        Expr::Unary(_, a, _)
+        | Expr::ErrorProp(a, _)
+        | Expr::Field(a, _, _)
+        | Expr::TypeTest(a, _, _) => visit(a, f),
         Expr::Binary(_, a, b, _) | Expr::Range(a, b, _) | Expr::Index(a, b, _) => {
             visit(a, f);
             visit(b, f);

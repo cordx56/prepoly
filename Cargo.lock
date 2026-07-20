@@ -378,6 +378,7 @@ dependencies = [
  "brass_mir",
  "brass_parser",
  "brass_plugin_host",
+ "brass_typesys",
  "brass_utils",
  "fxhash",
 ]

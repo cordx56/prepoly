@@ -475,6 +475,7 @@ fn walk_expr(e: &Expr, visit: &mut impl FnMut(&Expr)) {
             }
         }
         Expr::Block(b, _) => walk_block(b, visit),
+        Expr::TypeTest(subject, _, _) => walk_expr(subject, visit),
         _ => {}
     }
 }

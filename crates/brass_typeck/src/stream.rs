@@ -70,6 +70,10 @@ pub struct ChannelDelta {
     /// poisoned by disagreeing instantiations.
     pub typeof_types: Vec<(Span, Type)>,
     pub typeof_types_removed: Vec<Span>,
+    /// Resolved type-test patterns (same discipline as `typeof_types`; a
+    /// wildcard hole in a pattern is a final value, not missing information).
+    pub type_tests: Vec<(Span, Type)>,
+    pub type_tests_removed: Vec<Span>,
     /// Errors reported since the previous event, in report order (unsorted,
     /// possibly duplicated across re-checked bodies; the final `Analysis`
     /// carries the sorted, deduplicated set).
@@ -95,6 +99,8 @@ impl ChannelDelta {
             && self.type_names.is_empty()
             && self.typeof_types.is_empty()
             && self.typeof_types_removed.is_empty()
+            && self.type_tests.is_empty()
+            && self.type_tests_removed.is_empty()
             && self.errors.is_empty()
     }
 }
@@ -211,6 +217,7 @@ pub(crate) struct FlushState {
     pub(crate) sum_views: HashMap<Span, Type>,
     pub(crate) type_names: HashMap<Span, String>,
     pub(crate) typeof_types: HashMap<Span, Type>,
+    pub(crate) type_tests: HashMap<Span, Type>,
     pub(crate) instance_returns: HashMap<(String, Vec<Type>), Type>,
 }
 
@@ -240,6 +247,10 @@ pub struct StreamSnapshot {
     pub sum_views: Vec<(Span, Type)>,
     pub type_names: Vec<(Span, String)>,
     pub typeof_types: Vec<(Span, Type)>,
+    /// Settled type-test patterns (may be absent in snapshots written by
+    /// older builds; missing entries just re-derive on the next run).
+    #[serde(default)]
+    pub type_tests: Vec<(Span, Type)>,
 }
 
 impl FlushState {
@@ -290,6 +301,11 @@ impl FlushState {
                 .iter()
                 .map(|(s, t)| (*s, t.clone()))
                 .collect(),
+            type_tests: self
+                .type_tests
+                .iter()
+                .map(|(s, t)| (*s, t.clone()))
+                .collect(),
         }
     }
 
@@ -325,6 +341,11 @@ impl FlushState {
                 .collect(),
             typeof_types: snap
                 .typeof_types
+                .iter()
+                .map(|(s, t)| (*s, t.clone()))
+                .collect(),
+            type_tests: snap
+                .type_tests
                 .iter()
                 .map(|(s, t)| (*s, t.clone()))
                 .collect(),
@@ -616,6 +637,7 @@ mod tests {
         sum_views: HashMap<Span, Type>,
         type_names: HashMap<Span, String>,
         typeof_types: HashMap<Span, Type>,
+        type_tests: HashMap<Span, Type>,
         final_errors: Option<Vec<TypeError>>,
     }
 
@@ -646,6 +668,12 @@ mod tests {
             }
             for (s, t) in &d.typeof_types {
                 self.typeof_types.insert(*s, t.clone());
+            }
+            for s in &d.type_tests_removed {
+                self.type_tests.remove(s);
+            }
+            for (s, t) in &d.type_tests {
+                self.type_tests.insert(*s, t.clone());
             }
         }
     }
@@ -698,6 +726,7 @@ mod tests {
         assert_eq!(m.sum_views, eager.sum_views);
         assert_eq!(m.type_names, eager.type_names);
         assert_eq!(m.typeof_types, eager.typeof_types);
+        assert_eq!(m.type_tests, eager.type_tests);
     }
 
     #[test]

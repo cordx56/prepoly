@@ -520,6 +520,7 @@ fn execute(
     type_names: &HashMap<Span, String>,
     typeof_types: &HashMap<Span, brass_hir::Type>,
     null_props: &HashSet<Span>,
+    type_tests: &HashMap<Span, brass_hir::Type>,
     lazy: bool,
 ) -> Result<(), String> {
     install_jit_panic_guard();
@@ -536,6 +537,7 @@ fn execute(
                 type_names,
                 typeof_types,
                 null_props,
+                type_tests,
             },
         );
     }
@@ -550,6 +552,7 @@ fn execute(
         type_names,
         typeof_types,
         null_props,
+        type_tests,
     )
 }
 
@@ -568,6 +571,7 @@ fn execute(
     type_names: &HashMap<Span, String>,
     typeof_types: &HashMap<Span, brass_hir::Type>,
     null_props: &HashSet<Span>,
+    type_tests: &HashMap<Span, brass_hir::Type>,
     _lazy: bool,
 ) -> Result<(), String> {
     brass_repl::run(
@@ -581,6 +585,7 @@ fn execute(
         type_names,
         typeof_types,
         null_props,
+        type_tests,
         &mut io::stdout(),
     )
 }
@@ -599,6 +604,7 @@ fn execute_repl(
     type_names: &HashMap<Span, String>,
     typeof_types: &HashMap<Span, brass_hir::Type>,
     null_props: &HashSet<Span>,
+    type_tests: &HashMap<Span, brass_hir::Type>,
 ) -> Result<(), String> {
     brass_repl::run(
         program,
@@ -611,6 +617,7 @@ fn execute_repl(
         type_names,
         typeof_types,
         null_props,
+        type_tests,
         &mut io::stdout(),
     )
 }
@@ -645,6 +652,9 @@ struct Checked {
     /// Spans of `expr!` operators with a nullable operand (null propagates as
     /// `Result.Null`); MIR lowering emits the presence-test shape for these.
     null_props: HashSet<Span>,
+    /// Resolved type-test patterns (`if v: T`), keyed by the test's span; MIR
+    /// lowering embeds each into the test's rvalue.
+    type_tests: HashMap<Span, brass_hir::Type>,
 }
 
 /// Drive the front end on a source file, then act per `mode`. Front-end
@@ -692,6 +702,7 @@ fn drive(mode: Mode, file: &str) -> Result<(), u8> {
             &checked.type_names,
             &checked.typeof_types,
             &checked.null_props,
+            &checked.type_tests,
             lazy,
         )
         .map_err(|e| {
@@ -709,6 +720,7 @@ fn drive(mode: Mode, file: &str) -> Result<(), u8> {
             &checked.type_names,
             &checked.typeof_types,
             &checked.null_props,
+            &checked.type_tests,
         )
         .map_err(|e| {
             report_runtime_error(&e);
@@ -1019,6 +1031,7 @@ fn assemble_checked(analyzed: AnalyzedProgram) -> Result<Checked, Vec<String>> {
         type_names: c.type_names.into_iter().collect(),
         typeof_types: c.typeof_types.into_iter().collect(),
         null_props: c.null_props.into_iter().collect(),
+        type_tests: c.type_tests.into_iter().collect(),
     })
 }
 
@@ -1144,6 +1157,7 @@ struct MergedChannels {
     type_names: HashMap<Span, String>,
     typeof_types: HashMap<Span, brass_hir::Type>,
     null_props: HashSet<Span>,
+    type_tests: HashMap<Span, brass_hir::Type>,
 }
 
 #[cfg(jit_backend)]
@@ -1200,6 +1214,11 @@ impl MergedChannels {
                 .map(|(s, t)| (*s, t.clone()))
                 .collect(),
             null_props: snap.null_props.iter().copied().collect(),
+            type_tests: snap
+                .type_tests
+                .iter()
+                .map(|(s, t)| (*s, t.clone()))
+                .collect(),
         }
     }
 
@@ -1209,6 +1228,9 @@ impl MergedChannels {
         }
         for s in &d.typeof_types_removed {
             self.typeof_types.remove(s);
+        }
+        for s in &d.type_tests_removed {
+            self.type_tests.remove(s);
         }
         self.expr_types.extend(d.expr_types);
         for (symbol, args, ret) in d.instance_returns {
@@ -1220,6 +1242,7 @@ impl MergedChannels {
         self.fields_loops.extend(d.fields_loops);
         self.type_names.extend(d.type_names);
         self.typeof_types.extend(d.typeof_types);
+        self.type_tests.extend(d.type_tests);
         self.null_props.extend(d.null_props);
     }
 }
@@ -1426,7 +1449,9 @@ impl LazyState {
             || !d.sum_views.is_empty()
             || !d.type_names.is_empty()
             || !d.typeof_types.is_empty()
-            || !d.typeof_types_removed.is_empty();
+            || !d.typeof_types_removed.is_empty()
+            || !d.type_tests.is_empty()
+            || !d.type_tests_removed.is_empty();
     }
 
     fn pump_blocking(&mut self) {
@@ -1524,6 +1549,7 @@ impl LazyState {
             type_names: &self.merged.type_names,
             typeof_types: &self.merged.typeof_types,
             null_props: &self.merged.null_props,
+            type_tests: &self.merged.type_tests,
         }
     }
 }
@@ -2524,6 +2550,7 @@ fn run_fresh_eager(label: &str, src: &str, root: &Path) -> Result<(), u8> {
         &checked.type_names,
         &checked.typeof_types,
         &checked.null_props,
+        &checked.type_tests,
         false,
     )
     .map_err(|e| {
@@ -2643,6 +2670,7 @@ fn run_lazy(label: String, src: String, root: PathBuf) -> Result<(), u8> {
         &checked.type_names,
         &checked.typeof_types,
         &checked.null_props,
+        &checked.type_tests,
         false,
     )
     .map_err(|e| {
@@ -2999,6 +3027,7 @@ fn check_front(
         type_names: analysis.type_names.into_iter().collect(),
         typeof_types: analysis.typeof_types.into_iter().collect(),
         null_props: analysis.null_props.into_iter().collect(),
+        type_tests: analysis.type_tests.into_iter().collect(),
     };
     // A stopped (lazy-exit) analysis is INCOMPLETE: bodies past the stop
     // point were never checked, so caching it as a full verdict would replay
@@ -3537,6 +3566,7 @@ fn run_capture(defs: &[String], body: &[String], root: &Path) -> Result<String, 
         &checked.type_names,
         &checked.typeof_types,
         &checked.null_props,
+        &checked.type_tests,
         &mut buf,
     )?;
     Ok(String::from_utf8_lossy(&buf).into_owned())

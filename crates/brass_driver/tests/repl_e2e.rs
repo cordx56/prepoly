@@ -82,6 +82,12 @@ const PARITY_CASES: &[&str] = &[
     // record in another: the identity pass-through must balance ownership on
     // the typed back end (it crashed after the right output without it).
     "e2e_tests/structure/view_arg_nominal_instance.cz",
+    // A type-test if (`if v: T`) selects a different arm per instance; both
+    // back ends must fold every test through the same pattern predicate,
+    // structural-subtype acceptance included.
+    "e2e_tests/control_flow/type_test_dispatch.cz",
+    "e2e_tests/control_flow/type_test_chain.cz",
+    "e2e_tests/control_flow/type_test_structural.cz",
 ];
 
 #[test]

@@ -205,6 +205,10 @@ Notes:
 - **`if` / `else`** is an expression and yields a value; `else if` chains.
   The condition does not take a record literal directly (parenthesize if
   needed).
+- **Type test** `if expr: Type { ... }`: a colon after the condition
+  expression tests its static type (decided at compile time; see
+  [Type tests](/references/types/#type-tests)). The type is parsed like a
+  return type, so the following `{` always opens the arm's block.
 - **`if let`** `if let PATTERN = expr { ... } else { ... }` matches one
   pattern; on a nullable scrutinee, a bare name pattern binds the non-null
   value.

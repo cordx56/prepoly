@@ -1,0 +1,20 @@
+type Shape =
+    | Circle { r: int32 }
+    | Dot
+
+type Inked: Shape =
+    | Circle { r: int32 }
+    | Dot
+
+fun kind(v) -> string {
+    if v: Shape {
+        return "shape"
+    }
+    return "other"
+}
+
+fun main() {
+    println(kind(Shape.Circle { r: 1 }))
+    println(kind(Inked.Dot))
+    println(kind("s"))
+}

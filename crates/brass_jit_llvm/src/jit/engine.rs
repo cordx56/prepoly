@@ -28,6 +28,7 @@ pub fn run(
     type_names: &fxhash::FxHashMap<brass_hir::Span, String>,
     typeof_types: &fxhash::FxHashMap<brass_hir::Span, brass_hir::Type>,
     null_props: &fxhash::FxHashSet<brass_hir::Span>,
+    type_tests: &fxhash::FxHashMap<brass_hir::Span, brass_hir::Type>,
 ) -> Result<(), String> {
     let mir = lower_checked(
         program,
@@ -41,6 +42,7 @@ pub fn run(
             type_names,
             typeof_types,
             null_props,
+            type_tests,
         },
     );
     let t = std::time::Instant::now();
@@ -133,6 +135,7 @@ fn lower_checked(
         channels.type_names,
         channels.typeof_types,
         channels.null_props,
+        channels.type_tests,
     );
     tracing::debug!(
         target: "brass::perf",

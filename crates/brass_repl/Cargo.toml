@@ -12,6 +12,8 @@ brass_parser.workspace = true
 brass_hir.workspace = true
 brass_mir.workspace = true
 brass_engine.workspace = true
+# Shares the type-test acceptance predicate with the checker and the JIT.
+brass_typesys.workspace = true
 # The driver-published program argument vector the `_argv` builtin answers with.
 brass_utils.workspace = true
 # Native-plugin dispatch; self-stubbing on wasm, where the interpreter

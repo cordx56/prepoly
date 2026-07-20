@@ -804,7 +804,7 @@ pub trait Codegen {
         // emit -- a bare `null` narrowed to `never` -- so it is skipped, its
         // block terminated as `unreachable` to stay well-formed. The matching
         // `CondBranch` folds to a direct jump (see `codegen_terminator`).
-        let reachable = crate::mono::reachable_blocks(f.body, &f.local_types);
+        let reachable = crate::mono::reachable_blocks(program.hir, f.body, &f.local_types);
         for (i, live) in reachable.iter().enumerate() {
             let id = BlockId(i as u32);
             if *live {
@@ -1085,7 +1085,8 @@ pub trait Codegen {
                 // A statically-known condition folds to a direct jump, leaving the
                 // dead arm (skipped in `codegen_function`) without a predecessor.
                 let cty = operand_type_of(cond, &f.local_types);
-                match crate::mono::cond_static_truthiness(f.body, &f.local_types, cond) {
+                match crate::mono::cond_static_truthiness(program.hir, f.body, &f.local_types, cond)
+                {
                     Some(true) => self.emit_goto(*then),
                     Some(false) => self.emit_goto(*els),
                     // A bool branches directly; any other (runtime) type is reduced
@@ -1119,6 +1120,19 @@ pub trait Codegen {
             Rvalue::TypeName(op) => {
                 let name = operand_type_of(op, &f.local_types).type_name();
                 self.const_str(&name)
+            }
+            // A type test: a constant bool decided from the operand's
+            // monomorphized type -- the same predicate the checker folded the
+            // branch with, so the emitted constant always agrees with the arm
+            // that was type-checked (branch folding usually prunes the test's
+            // CondBranch outright; the constant covers any other use).
+            Rvalue::TypeTest(op, pattern) => {
+                let matched = brass_typesys::type_test_accepts(
+                    program.hir,
+                    pattern,
+                    &operand_type_of(op, &f.local_types),
+                );
+                self.const_bool(matched)
             }
             Rvalue::Bin(op, a, b) => {
                 // Comparisons yield bool but operate on the operands' type;

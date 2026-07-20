@@ -356,6 +356,10 @@ impl Rewriter<'_> {
                     self.expr(fe);
                 }
             }
+            Expr::TypeTest(subject, te, _) => {
+                self.expr(subject);
+                self.ty(te);
+            }
             Expr::If(cond, then, els, _) => {
                 self.expr(cond);
                 self.block(then);

@@ -126,6 +126,7 @@ fn collect_expr_refs(
                 out.push((name.clone(), *span));
             }
         }
+        Expr::TypeTest(subject, _, _) => collect_expr_refs(subject, globals, bound, out),
         Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::Null(_) | Expr::SelfExpr(_) => {}
         Expr::Str(segs, _) => {
             for seg in segs {

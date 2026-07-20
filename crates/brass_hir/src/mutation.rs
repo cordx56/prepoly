@@ -729,9 +729,10 @@ fn scan_expr(expr: &Expr, roots: &Roots, sink: &mut impl PlaceSink) -> bool {
             }
             scan_expr(callee, roots, sink) || args.iter().any(|a| scan_expr(&a.expr, roots, sink))
         }
-        Expr::Unary(_, inner, _) | Expr::ErrorProp(inner, _) | Expr::Field(inner, _, _) => {
-            scan_expr(inner, roots, sink)
-        }
+        Expr::Unary(_, inner, _)
+        | Expr::ErrorProp(inner, _)
+        | Expr::Field(inner, _, _)
+        | Expr::TypeTest(inner, _, _) => scan_expr(inner, roots, sink),
         Expr::Binary(_, left, right, _) | Expr::Range(left, right, _) => {
             scan_expr(left, roots, sink) || scan_expr(right, roots, sink)
         }

@@ -164,6 +164,9 @@ impl<'a> Printer<'a> {
             Expr::VariantLit(t, v, fields, _) => {
                 self.type_lit_flat(&format!("{t}.{v}"), fields, ns)?
             }
+            Expr::TypeTest(subject, te, _) => {
+                format!("{}: {}", self.flat_expr(subject, ns)?, self.type_flat(te))
+            }
             Expr::If(..) | Expr::IfLet(..) | Expr::Match(..) | Expr::Block(..) => return None,
         })
     }

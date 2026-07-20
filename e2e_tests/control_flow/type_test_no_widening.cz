@@ -1,0 +1,16 @@
+fun width(v) -> string {
+    if v: int32 {
+        return "int32"
+    } else if v: int64 {
+        return "int64"
+    } else if v: int32? {
+        return "nullable"
+    }
+    return "other"
+}
+
+fun main() {
+    println(width(1))
+    println(width(9999999999))
+    println(width(1.5))
+}

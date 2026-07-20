@@ -1,0 +1,1 @@
+this type test resolves its `infer` holes differently across instantiations

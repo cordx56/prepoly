@@ -1267,7 +1267,15 @@ impl Parser {
             let hi = els.as_ref().map(|e| e.span()).unwrap_or(then.span);
             Ok(Expr::IfLet(pat, Box::new(scrut), then, els, lo.merge(hi)))
         } else {
-            let cond = self.parse_cond()?;
+            let mut cond = self.parse_cond()?;
+            // `if subject: Type { ... }` -- a compile-time type test. The type
+            // is parsed brace-gated (like a return type) so the `{` opens the
+            // arm's block rather than a `Base { .. }` refinement.
+            if self.eat(TokenKind::Colon) {
+                let te = self.parse_return_type()?;
+                let span = cond.span().merge(te.span());
+                cond = Expr::TypeTest(Box::new(cond), te, span);
+            }
             let then = self.parse_block()?;
             let els = self.parse_else()?;
             let hi = els.as_ref().map(|e| e.span()).unwrap_or(then.span);

@@ -9,6 +9,7 @@
 
 use std::fmt;
 
+use brass_hir::Type;
 use brass_parser::ast::{BinOp, UnaryOp};
 
 use crate::ids::{ClosureId, LocalId};
@@ -172,6 +173,13 @@ pub enum Rvalue {
     /// runtime -- only its type -- but the operand expression is still
     /// evaluated for its effects like any other argument.
     TypeName(Operand),
+    /// A type test (`if v: T`): whether the operand's monomorphized type
+    /// matches the checker-resolved pattern (`brass_hir::type_test_matches`;
+    /// `Unknown` positions are `infer` wildcards). Like `TypeName`, nothing is
+    /// baked per instance: each back end folds it to a constant bool from the
+    /// operand's own type, and branch folding prunes the untaken arm, so the
+    /// test never exists at runtime.
+    TypeTest(Operand, Type),
 }
 
 impl fmt::Display for Literal {
@@ -270,6 +278,7 @@ impl fmt::Display for Rvalue {
                 write!(f, "{id}[{}]", join_operands(captures))
             }
             Rvalue::TypeName(op) => write!(f, "typename {op}"),
+            Rvalue::TypeTest(op, pattern) => write!(f, "typetest {op}: {}", pattern.display()),
         }
     }
 }

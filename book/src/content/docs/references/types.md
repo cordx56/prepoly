@@ -252,6 +252,71 @@ own: without it, `return value` would be checked against the `string` return wit
 `is_<type>` method, so the presence test doubles as a type test (see
 [the reflection reference](/references/reflection/#member-presence-xm-without-a-call)).
 
+## Type tests
+
+`if value: Type { ... } else ...` tests the **static type** of `value`. The
+test is decided entirely at compile time, per monomorphic instance of the
+enclosing function: the subject's concrete type either satisfies the tested
+type or it does not, the selected arm alone is type-checked and compiled, and
+the unselected arm is pruned exactly like the dead arm of a
+[member-presence test](#absent-fields-in-conditions). Nothing is tested at
+run time, and `else if` chains dispatch on the first satisfied test.
+
+A type satisfies the test when it is:
+
+- **the tested type itself** (representation-exact: `int32` does not satisfy
+  an `int64` test and `T` does not satisfy a `T?` test -- matching never
+  converts), or
+- **a subtype of it**: a record that
+  [structurally satisfies](#structural-subtyping) the tested type's fields
+  and methods (`anonymous { ... }` and interface-style record types both
+  work), or a sum that [declares the tested sum as a
+  parent](/references/syntax-sugar/#declared-sum-subtyping). A `T[]` test
+  also accepts a fixed-length `T[n]`.
+
+Inside the selected arm the subject keeps its **own** type -- the test never
+reinterprets or rebuilds the value. (Passing the subject onward from the arm
+goes through the ordinary flow rules, views and rebuilds included.)
+
+`infer` in the tested type is a hole:
+
+- A hole constrained by the arm's own use of the subject takes that type:
+  in `if v: infer { to_bytes(v) }` the hole reads as `string`, because that
+  is what `to_bytes` accepts. The pinned type must come out the same for
+  every instantiation of the enclosing function -- a test whose holes resolve
+  differently per call site is a compile error asking for an annotation.
+- A hole nothing constrains matches any type: `infer` alone matches
+  everything, `infer[]` matches any array.
+
+Two consequences of the per-instance decision:
+
+- Inside a generic (unannotated) function, nothing is decided at the
+  definition; each call site's instantiation selects and checks its own arm.
+  An arm no instantiation selects is never fully checked, like any other
+  statically dead code.
+- Fallibility stays a property of the whole function: an `error(...)` in any
+  arm -- selected or not -- makes every instance of the function return a
+  `Result`.
+
+```
+fun length(val) {
+    const bytes = if val: infer {         // string (to_bytes pins the hole)
+        to_bytes(val)
+    } else if val: uint8[] {              // exact match, beats infer[]
+        val
+    } else if val: infer[] {              // any other array
+        val
+    } else {
+        return error("unsupported")
+    }
+    return bytes.len()
+}
+```
+
+`length("hi")` compiles the first arm only, `length(to_bytes("hi"))` the
+second, `length([1, 2, 3])` the third, and `length(true)` the `else` -- each
+instance prunes the rest.
+
 ## Interfaces
 
 `type B: A = ...` requires `B` to provide every member of `A`, checked at

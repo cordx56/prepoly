@@ -49,7 +49,7 @@ use brass_parser::Span;
 
 /// Bumped whenever the payload layout changes, so an old file is discarded by
 /// the header check instead of misread by postcard (which carries no schema).
-pub const FORMAT_VERSION: u16 = 4;
+pub const FORMAT_VERSION: u16 = 5;
 
 /// Leading magic, so a foreign file is rejected before any decoding.
 const MAGIC: &[u8; 8] = b"PPCACHE\0";
@@ -310,6 +310,7 @@ pub struct Channels {
     pub type_names: Vec<(Span, String)>,
     pub typeof_types: Vec<(Span, Type)>,
     pub null_props: Vec<Span>,
+    pub type_tests: Vec<(Span, Type)>,
 }
 
 /// Everything a `.czcache` stores.

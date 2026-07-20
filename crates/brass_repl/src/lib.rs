@@ -37,6 +37,7 @@ pub fn run(
     type_names: &fxhash::FxHashMap<brass_hir::Span, String>,
     typeof_types: &fxhash::FxHashMap<brass_hir::Span, brass_hir::Type>,
     null_props: &fxhash::FxHashSet<brass_hir::Span>,
+    type_tests: &fxhash::FxHashMap<brass_hir::Span, brass_hir::Type>,
     out: &mut dyn Write,
 ) -> Result<(), String> {
     let mir = brass_mir::lower_program_with_types(
@@ -50,6 +51,7 @@ pub fn run(
         type_names,
         typeof_types,
         null_props,
+        type_tests,
     );
     let mono = brass_engine::monomorphize(&mir, program)
         .map_err(|e| format!("typed lowering failed: {e}"))?;

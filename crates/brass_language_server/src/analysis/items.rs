@@ -501,6 +501,10 @@ fn refs_expr(e: &Expr, out: &mut HashSet<String>) {
                 refs_expr(v, out);
             }
         }
+        Expr::TypeTest(subject, ty, _) => {
+            refs_expr(subject, out);
+            refs_type(ty, out);
+        }
         Expr::If(cond, then, els, _) => {
             refs_expr(cond, out);
             refs_block(then, out);

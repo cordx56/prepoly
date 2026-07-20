@@ -153,6 +153,9 @@ impl<'a> Checker<'a> {
                 .cloned()
                 .unwrap_or_else(|| self.fresh_unknown()),
             Expr::Unary(_, inner, _) => self.infer_expr_light(inner, env, props),
+            // A type test is a compile-time bool; the light pass never folds
+            // on it (the full check decides which arm is live per instance).
+            Expr::TypeTest(..) => Type::Bool,
             Expr::Binary(op, left, right, _) => {
                 let left = self.infer_expr_light(left, env, props);
                 let right = self.infer_expr_light(right, env, props);

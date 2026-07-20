@@ -114,6 +114,34 @@ impl<'a, 'p> FnLower<'a, 'p> {
             Expr::Range(lo, hi, span) => self.lower_range(lo, hi, *span),
             Expr::TypeLit(name, fields, span) => self.lower_record(name, fields, *span),
             Expr::VariantLit(ty, variant, fields, _) => self.lower_variant(ty, variant, fields),
+            // A type test folds to a constant bool per monomorphized instance
+            // (the back ends match the operand's type against the pattern);
+            // the subject is still evaluated like any operand. The pattern is
+            // the checker-resolved channel entry; a body no instantiation
+            // ever decided falls back to the syntactic annotation with every
+            // hole a wildcard -- such a body is never monomorphized, the
+            // fallback only keeps the shared lowering total.
+            Expr::TypeTest(subject, te, span) => {
+                let subj = self.lower_expr(subject);
+                let pattern = self.ctx.type_tests.get(span).cloned().unwrap_or_else(|| {
+                    let program = self.ctx.program;
+                    brass_hir::resolve(te, |n| {
+                        program
+                            .resolve_type(&self.module, n)
+                            .map(|info| match &info.kind {
+                                brass_hir::TypeKind::Record { .. } => {
+                                    brass_hir::NominalInfo::record(info.id)
+                                }
+                                brass_hir::TypeKind::Sum { .. } => {
+                                    brass_hir::NominalInfo::sum(info.id)
+                                }
+                            })
+                    })
+                    .unwrap_or(Type::Unknown(brass_hir::INFER_VAR))
+                });
+                self.b
+                    .emit_known(Rvalue::TypeTest(subj, pattern), Type::Bool)
+            }
             Expr::If(cond, then, els, _) => self.lower_if(cond, then, els.as_deref()),
             Expr::IfLet(pat, scrut, then, els, _) => {
                 self.lower_iflet(pat, scrut, then, els.as_deref())

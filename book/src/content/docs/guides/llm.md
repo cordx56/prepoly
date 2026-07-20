@@ -176,6 +176,29 @@ bindings, and `_`. `if let pattern = value` selects one pattern. A conditional
 can also probe structural member presence: `if value.method { ... }` asks at
 compile time whether that type provides the member.
 
+`if value: Type { ... } else ...` is a compile-time type test, decided per
+call site of the enclosing generic function; only the selected arm is checked
+and compiled. Matching accepts the exact type or a subtype (structural record
+satisfaction, declared sum parents); it never converts (`int32` fails an
+`int64` test, `T` fails a `T?` test). `infer` in the tested type is a hole:
+pinned by what the arm itself requires, otherwise matching anything
+(`infer[]` = any array). Inside the arm the value keeps its own type.
+
+```brass norun
+fun length(val) {
+    const bytes = if val: infer {          // string: to_bytes pins the hole
+        to_bytes(val)
+    } else if val: uint8[] {
+        val
+    } else if val: infer[] {
+        val
+    } else {
+        return error("unsupported")
+    }
+    return bytes.len()
+}
+```
+
 ## Error handling
 
 - `Result` has `Ok { value }` and `Err { error }` variants. Standard failures

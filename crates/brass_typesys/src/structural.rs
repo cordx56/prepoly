@@ -20,6 +20,31 @@ pub fn types_invariant(program: &Program, a: &Type, b: &Type) -> bool {
     types_compatible(program, a, b) && types_compatible(program, b, a)
 }
 
+/// Whether a value of type `subject` satisfies the type test `if v: pattern`.
+///
+/// The exact/wildcard core decides first (`brass_hir::type_test_matches`:
+/// `infer` holes match anything, everything else representation-exact); what
+/// the core refuses is then accepted when the value is USABLE where the
+/// tested type is required per the language's subtyping
+/// ([`types_compatible`]) -- a record that structurally satisfies the
+/// pattern's fields and methods, a declared sum subtype flowing to its
+/// parent, function subtyping. Conversions stay excluded: no numeric
+/// widening and no `T` -> `T?` promotion, so `if v: int64` does not select
+/// an `int32` value.
+///
+/// Subtype acceptance is sound here where blind structural flow would not
+/// be, because a type test never reinterprets the value: the selected arm
+/// keeps reading the subject at its OWN monomorphized type, and any flow of
+/// the subject inside the arm goes through the ordinary checked flow sites
+/// (which insert their views/rebuilds as usual).
+///
+/// This is THE deciding predicate for type tests: the checker's arm
+/// selection and the back ends' branch folding both call it, so the checked
+/// arm and the compiled arm always agree.
+pub fn type_test_accepts(program: &Program, pattern: &Type, subject: &Type) -> bool {
+    brass_hir::type_test_matches(pattern, subject) || types_compatible(program, subject, pattern)
+}
+
 /// Whether a value of `have` can be used where `want` is required.
 pub fn types_compatible(program: &Program, have: &Type, want: &Type) -> bool {
     // Two instances of the SAME `Result` declaration compare by payloads; an

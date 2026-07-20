@@ -23,6 +23,6 @@ pub use rows::{
 pub use specialize::{Generated, KeyedNeed, mangled_name, specialize_all};
 pub use structural::{
     function_part_compatible, record_satisfies, record_satisfies_fields, signature_satisfies,
-    types_compatible, types_invariant,
+    type_test_accepts, types_compatible, types_invariant,
 };
 pub use valueflow::{flow_probe, flow_unify, strip_nullable};

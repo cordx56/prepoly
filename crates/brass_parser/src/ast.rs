@@ -352,6 +352,12 @@ pub enum Expr {
     If(Box<Expr>, Block, Option<Box<Expr>>, Span),
     /// `if let pattern = expr { ... } else { ... }`.
     IfLet(Pattern, Box<Expr>, Block, Option<Box<Expr>>, Span),
+    /// `subject: Type` in `if`-condition position: a compile-time type test.
+    /// The test never runs at runtime -- each monomorphic instance decides it
+    /// statically from the subject's type (`infer` holes in the annotation
+    /// match any type), and only the selected arm is type-checked and
+    /// compiled.
+    TypeTest(Box<Expr>, TypeExpr, Span),
     Match(Box<Expr>, Vec<MatchArm>, Span),
     Block(Block, Span),
 }
@@ -379,6 +385,7 @@ impl Expr {
             | Expr::VariantLit(_, _, _, s)
             | Expr::If(_, _, _, s)
             | Expr::IfLet(_, _, _, _, s)
+            | Expr::TypeTest(_, _, s)
             | Expr::Match(_, _, s)
             | Expr::Block(_, s) => *s,
         }

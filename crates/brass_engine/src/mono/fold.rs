@@ -12,7 +12,7 @@ use super::*;
 /// contain (e.g. `a * 2` where `a` is a bare `null`) -- while monomorphization
 /// still types both arms so a fallible callable's `Result` payloads infer from
 /// whichever arm supplies each.
-pub fn reachable_blocks(body: &MirBody, local_types: &[Type]) -> Vec<bool> {
+pub fn reachable_blocks(program: &Program, body: &MirBody, local_types: &[Type]) -> Vec<bool> {
     let mut reached = vec![false; body.blocks.len()];
     let mut stack = vec![body.entry];
     while let Some(id) = stack.pop() {
@@ -22,7 +22,7 @@ pub fn reachable_blocks(body: &MirBody, local_types: &[Type]) -> Vec<bool> {
         match &body.block(id).term {
             Terminator::Goto(b) => stack.push(*b),
             Terminator::CondBranch { cond, then, els } => {
-                match cond_static_truthiness(body, local_types, cond) {
+                match cond_static_truthiness(program, body, local_types, cond) {
                     Some(true) => stack.push(*then),
                     Some(false) => stack.push(*els),
                     None => {
@@ -67,6 +67,7 @@ pub fn locals_only_in_dead_blocks(body: &MirBody, reachable: &[bool]) -> Vec<boo
 /// path). The front end now rejects such programs; nothing here may prune a
 /// runtime-reachable arm.
 pub fn cond_static_truthiness(
+    program: &Program,
     body: &MirBody,
     local_types: &[Type],
     cond: &Operand,
@@ -82,7 +83,37 @@ pub fn cond_static_truthiness(
             _ => Some(true),
         };
     }
+    // A type test (`if v: T`) always folds: the subject's monomorphized type
+    // either satisfies the checker-resolved pattern or it does not -- through
+    // the same `brass_typesys::type_test_accepts` (exact/wildcard core plus
+    // structural subtyping) the checker selected the arm with, so the pruned
+    // arm is exactly the unchecked one.
+    if let Some((subj, pattern)) = type_test_of(body, cond) {
+        return Some(brass_typesys::type_test_accepts(
+            program,
+            pattern,
+            &operand_type_of(subj, local_types),
+        ));
+    }
     operand_type_of(cond, local_types).static_truthiness()
+}
+
+/// If `cond` is the result of an `Rvalue::TypeTest` assignment (a type-test
+/// `if` condition), the tested operand and the pattern.
+fn type_test_of<'b>(body: &'b MirBody, cond: &Operand) -> Option<(&'b Operand, &'b Type)> {
+    let Operand::Local(id) = cond else {
+        return None;
+    };
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let MirStmt::Assign(dest, Rvalue::TypeTest(subj, pattern)) = stmt
+                && dest == id
+            {
+                return Some((subj, pattern));
+            }
+        }
+    }
+    None
 }
 
 /// If `cond` is the result of the `__present` builtin (the `if let` presence

@@ -544,6 +544,8 @@ impl BodyTyper {
             Rvalue::Closure { .. } => self.fresh(),
             // `typeof(x)` is a string constant; the operand only donates its type.
             Rvalue::TypeName(_) => Type::Str,
+            // A type test folds to a constant bool per instance.
+            Rvalue::TypeTest(..) => Type::Bool,
         }
     }
 

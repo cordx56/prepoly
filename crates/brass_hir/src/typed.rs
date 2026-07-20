@@ -110,6 +110,9 @@ impl TypedExprKind {
             },
             Expr::If(..) => Self::If,
             Expr::IfLet(..) => Self::IfLet,
+            // A type test is decided at compile time; its value is a constant
+            // bool for the deciding instance.
+            Expr::TypeTest(..) => Self::Bool,
             Expr::Match(..) => Self::Match,
             Expr::Block(..) => Self::Block,
         }

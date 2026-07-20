@@ -246,6 +246,11 @@ impl Expander<'_> {
                 els.as_ref().map(|e| Box::new(self.expr(e))),
                 self.span(*span),
             ),
+            Expr::TypeTest(subject, te, span) => Expr::TypeTest(
+                Box::new(self.expr(subject)),
+                self.type_expr(te),
+                self.span(*span),
+            ),
             Expr::Match(scrut, arms, span) => Expr::Match(
                 Box::new(self.expr(scrut)),
                 arms.iter()

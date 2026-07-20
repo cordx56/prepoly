@@ -1,0 +1,18 @@
+fun describe(v) -> string {
+    if v: string {
+        return "string"
+    } else if v: int32 {
+        return "int32"
+    } else if v: infer[] {
+        return "array"
+    } else {
+        return "other"
+    }
+}
+
+fun main() {
+    println(describe("x"))
+    println(describe(1))
+    println(describe([1.5, 2.5]))
+    println(describe(1.5))
+}
