@@ -172,7 +172,8 @@ license = \"MIT\"
 
 [dependencies]
 # mylib = \{ git = \"https://github.com/user/mylib\", rev = \"<rev>\" \}
-# mylib = \{ path = \"../mylib\" \}",
+# mylib = \{ path = \"../mylib\" \}
+",
     )!
 
     write_file(source_path, "println(\"Hello, {name}!\")")!

@@ -51,6 +51,15 @@ HOST_TUPLE="$(print_host_tuple)"
 # main
 #
 dest="$HOME/.brass"
+if ls "$dest" > /dev/null 2>&1; then
+    echo -n "$dest is already exists! Would you like to delete it? [Y/n]: "
+    read delete_exists < /dev/tty
+    if [ "$(echo "$delete_exists" | awk '{ print tolower($0) }')" = "y" ]; then
+        rm -rf "$dest"
+    else
+        exit 1
+    fi
+fi
 mkdir -p "$dest"
 tar_file="brass-$HOST_TUPLE.tar.gz"
 if [ "$BRASS_VERSION" = "latest" ]; then
@@ -60,7 +69,12 @@ else
 fi
 download_dir="$(mktemp -d)"
 trap 'rm -rf "$download_dir"' 0
+echo
+echo "Downloading toolchain..."
 curl -fSL "$url" -o "$download_dir/$tar_file"
+echo
+echo "Extracting toolchain..."
 tar -xzf "$download_dir/$tar_file" -C "$dest"
 
+echo
 echo 'Add $HOME/.brass/bin to your PATH to complete the installation.'

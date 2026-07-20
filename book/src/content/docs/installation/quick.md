@@ -6,7 +6,7 @@ description: "Download and install the Brass toolchain."
 Install the Brass toolchain by running the command below:
 
 ```bash
-curl -fSL https://raw.githubusercontent.com/brass-cz/brass/refs/heads/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/brass-cz/brass/refs/heads/main/scripts/install.sh | sh
 ```
 
 The installer downloads the latest release by default; set `BRASS_VERSION` to

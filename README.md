@@ -25,7 +25,7 @@ program at native speed; an **interpreter** backs the REPL and WebAssembly.
 Quick start:
 
 ```bash
-curl -fSL https://raw.githubusercontent.com/brass-cz/brass/refs/heads/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/brass-cz/brass/refs/heads/main/scripts/install.sh | sh
 ```
 
 ## Features
