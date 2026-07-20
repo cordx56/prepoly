@@ -28,7 +28,7 @@ type Dependency =
     // Reserved for future resolvers. `Manifest.parse` currently rejects both
     // forms so an unsupported dependency cannot survive until execution.
     | Registry { version: string }
-    | Tarball { tarball: string }
+    | Tarball { tarball: string, hash: string }
     | Git { git: string, rev: string }
     | Path { path: Path }
 
@@ -112,28 +112,26 @@ fun _dependency(entry: TomlValue) -> Dependency! {
     const keys = entry.keys()!
     const has_git = _has(keys, "git")
     const has_path = _has(keys, "path")
-    if has_git == has_path {
-        return error("a dependency needs exactly one of `git` or `path`")
-    }
-    if has_git {
-        for key in keys {
-            if key != "git" && key != "rev" {
-                return error("a Git dependency has an unsupported key `{key}`")
-            }
-        }
+    const has_tarball = _has(keys, "tarball") && _has(keys, "hash")
+    if has_git && !has_path && !has_tarball {
         const rev = if _has(keys, "rev") {
             entry.get("rev")!.as_string()!
         } else {
             DEFAULT_REV
         }
         return Dependency.Git { git: entry.get("git")!.as_string()!, rev: rev }
-    }
-    for key in keys {
-        if key != "path" {
-            return error("a path dependency has an unsupported key `{key}`")
+    } else if has_path && !has_git && !has_tarball {
+        return Dependency.Path {
+            path: Path.parse(entry.get("path")!.as_string()!),
         }
+    } else if has_tarball && !has_git && !has_path {
+        return Dependency.Tarball {
+            tarball: entry.get("tarball")!.as_string()!,
+            hash: entry.get("hash")!.as_string()!,
+        }
+    } else {
+        return error("invalid dependency format")
     }
-    return Dependency.Path { path: Path.parse(entry.get("path")!.as_string()!) }
 }
 
 // `TomlValue.get` reports a missing key as an error rather than null, so an

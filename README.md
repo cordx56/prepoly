@@ -28,6 +28,17 @@ Quick start:
 curl -fsSL https://raw.githubusercontent.com/brass-cz/brass/refs/heads/main/scripts/install.sh | sh
 ```
 
+Then,
+
+```bash
+export PATH="$HOME/.brass/bin:$PATH"
+# Create new package
+czpm new hello-world
+cd hello-world
+# Run
+czpm run
+```
+
 ## Features
 
 - **Type inference everywhere.** Flexible inference means most code needs

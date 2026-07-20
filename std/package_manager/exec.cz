@@ -65,7 +65,14 @@ fun main() {
     } else if Path.parse("{name}.cz").is_file() {
         Path.parse("{name}.cz")
     } else {
-        return error("failed to find {name}: {name} or {name}.cz not found")
+        const name = name.replace("-", "_")
+        if Path.parse(name).is_file() {
+            Path.parse(name)
+        } else if Path.parse("{name}.cz").is_file() {
+            Path.parse("{name}.cz")
+        } else {
+            return error("failed to find {name}: {name} or {name}.cz not found")
+        }
     }
     const files = list_files(Path.parse("."))!.filter(
         (v) -> v.to_string().ends_with(".cz"),
@@ -173,6 +180,7 @@ license = \"MIT\"
 [dependencies]
 # mylib = \{ git = \"https://github.com/user/mylib\", rev = \"<rev>\" \}
 # mylib = \{ path = \"../mylib\" \}
+# mylib = \{ tarball = \"http:///github.com/...\", hash = \"<hash>\" \}
 ",
     )!
 

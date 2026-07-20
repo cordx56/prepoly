@@ -1,7 +1,8 @@
-import std.process.{ Command }
+import std.process.{ Command, Stdio }
 import std.path.Path
 import std.fs.{ read_file, create_dir, remove_dir }
 import std.hash.{ sha256, hex }
+import std.http.fetch
 
 import manifest.{ Manifest, Dependency, Dependencies }
 
@@ -31,6 +32,9 @@ fun _resolve_deps(
             Path { path } => {
                 base.join(path).canonicalize()!
             },
+            Tarball { tarball, hash } => {
+                download_and_extract_tarball(tarball, hash)!
+            },
             _ => {
                 return error("unsupported dependency source")
             },
@@ -59,9 +63,13 @@ fun _resolve_deps(
     return
 }
 
+fun packages_dir() {
+    return Path.home()!.join(".brass").join("packages")
+}
+
 /** Clone `repo` at `rev` into the package cache and return its directory. */
 fun git_clone(repo: string, rev: string) {
-    const pkgs = Path.home()!.join(".brass").join("packages").join("git")
+    const pkgs = packages_dir()!.join("git")
     // A digest keeps arbitrary repository URLs and revision names out of path
     // components, while making the same source/revision reuse one checkout.
     const key = hex(sha256(to_bytes("{repo}\n{rev}")))
@@ -95,6 +103,37 @@ fun git_clone(repo: string, rev: string) {
         return error(
             "failed to check out `{rev}` from `{repo}`: exit code {code}",
         )
+    }
+    return path
+}
+
+fun download_and_extract_tarball(url: string, hash: string) {
+    const path = packages_dir()!.join("tarball").join(hash)
+    if path.is_dir() {
+        return path
+    } else {
+        create_dir(path)!
+    }
+    const downloaded = fetch(url)!
+    const downloaded_hash = hex(sha256(downloaded.body))
+    if downloaded_hash != hash {
+        error(
+            "Downloaded tarball hash `{downloaded_hash}` is differ from expected one `{hash}`",
+        )!
+    }
+    let cmd = Command.new("tar")
+    cmd.args(["xz", "-C", path.to_string()])
+    cmd.stdin(Stdio.Pipe)
+    const child = cmd.spawn()!
+    let tar_in = child.stdin()!
+    tar_in.write(downloaded.body)!
+    tar_in.close()!
+    const code = child.wait()!
+    if code != 0 {
+        if path.is_dir() {
+            remove_dir(path)!
+        }
+        error("failed to extract downloaded tarball")!
     }
     return path
 }
