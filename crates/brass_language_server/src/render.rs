@@ -243,56 +243,14 @@ pub fn render_type_def_with(
     substitution: &Substitution,
     resolved_methods: &HashMap<String, CallableSignature>,
 ) -> String {
-    let mut namer = UnknownNamer::default();
     match &info.kind {
-        TypeKind::Record { fields, methods } => {
-            for (name, var) in &info.slots {
-                namer.fix(*var, format!("Self.{name}"));
-            }
-            // The substitution is keyed by field, with any slot pins embedded in
-            // the field types; recover each slot's own type by matching the
-            // declared field types -- which contain the slot variables -- against
-            // the instance's structurally.
-            let slot_vars: Vec<u32> = info.slots.iter().map(|(_, v)| *v).collect();
-            let mut pins: BTreeMap<u32, Type> = BTreeMap::new();
-            for f in fields {
-                if let (Some(declared), Some(actual)) =
-                    (f.resolved_ty.as_ref(), substitution.get(&f.name))
-                {
-                    match_type_vars(declared, actual, &slot_vars, &mut pins);
-                }
-            }
-            let mut body = String::new();
-            for (name, var) in info.slots.iter().filter(|(n, _)| is_public_member(n)) {
-                let line = match pins.get(var) {
-                    Some(t) if !t.is_unknown() => format!("{name}: {}", render_type(t, &mut namer)),
-                    _ => format!("type {name}"),
-                };
-                body.push_str(&format!("    {line}\n"));
-            }
-            for f in fields.iter().filter(|f| is_public_member(&f.name)) {
-                let resolved = substitution.get(&f.name).or(f.resolved_ty.as_ref());
-                let line = match resolved {
-                    Some(t) => format!("{}: {}", f.name, render_type(t, &mut namer)),
-                    None => f.name.clone(),
-                };
-                body.push_str(&format!("    {line}\n"));
-            }
-            let mut names: Vec<&String> = methods.keys().filter(|n| is_public_member(n)).collect();
-            names.sort();
-            for name in names {
-                let sig = resolved_methods
-                    .get(name.as_str())
-                    .unwrap_or(&methods[name].signature);
-                // A child namer keeps slot variables rendering as `Self.<slot>`
-                // inside method types while each method numbers the variables
-                // its scheme leaves open from `unknown_0`.
-                let line = render_signature_into(sig, &[], None, None, &mut namer.fresh_child());
-                body.push_str(&format!("    {line}\n"));
-            }
-            format!("type {} = {{\n{body}}}", info.name)
-        }
+        TypeKind::Record { .. } => format!(
+            "type {} = {{\n{}}}",
+            info.name,
+            record_def_body(info, substitution, resolved_methods)
+        ),
         TypeKind::Sum { variants } => {
+            let mut namer = UnknownNamer::default();
             let body = variants
                 .iter()
                 .filter(|v| is_public_member(&v.name))
@@ -302,6 +260,82 @@ pub fn render_type_def_with(
             format!("type {} =\n{body}", info.name)
         }
     }
+}
+
+/// Render a `type Alias = Base { ... }` view: the alias name, the record it
+/// resolves to, and that record's member list with the types the alias pins --
+/// so hovering an alias shows the base type and how its type slots are filled.
+/// Only meaningful for a record base; the caller falls back to a plain
+/// `type Alias = <type>` line otherwise.
+pub fn render_alias_def(
+    alias: &str,
+    info: &TypeInfo,
+    substitution: &Substitution,
+    resolved_methods: &HashMap<String, CallableSignature>,
+) -> String {
+    format!(
+        "type {alias} = {} {{\n{}}}",
+        info.name,
+        record_def_body(info, substitution, resolved_methods)
+    )
+}
+
+/// The member lines of a record's definition view (slots, then fields, then
+/// methods, four-space indented, one per line), shared by the type-definition
+/// and alias hovers. See [`render_type_def_with`] for the display rules.
+fn record_def_body(
+    info: &TypeInfo,
+    substitution: &Substitution,
+    resolved_methods: &HashMap<String, CallableSignature>,
+) -> String {
+    let TypeKind::Record { fields, methods } = &info.kind else {
+        return String::new();
+    };
+    let mut namer = UnknownNamer::default();
+    for (name, var) in &info.slots {
+        namer.fix(*var, format!("Self.{name}"));
+    }
+    // The substitution is keyed by field, with any slot pins embedded in
+    // the field types; recover each slot's own type by matching the
+    // declared field types -- which contain the slot variables -- against
+    // the instance's structurally.
+    let slot_vars: Vec<u32> = info.slots.iter().map(|(_, v)| *v).collect();
+    let mut pins: BTreeMap<u32, Type> = BTreeMap::new();
+    for f in fields {
+        if let (Some(declared), Some(actual)) = (f.resolved_ty.as_ref(), substitution.get(&f.name))
+        {
+            match_type_vars(declared, actual, &slot_vars, &mut pins);
+        }
+    }
+    let mut body = String::new();
+    for (name, var) in info.slots.iter().filter(|(n, _)| is_public_member(n)) {
+        let line = match pins.get(var) {
+            Some(t) if !t.is_unknown() => format!("{name}: {}", render_type(t, &mut namer)),
+            _ => format!("type {name}"),
+        };
+        body.push_str(&format!("    {line}\n"));
+    }
+    for f in fields.iter().filter(|f| is_public_member(&f.name)) {
+        let resolved = substitution.get(&f.name).or(f.resolved_ty.as_ref());
+        let line = match resolved {
+            Some(t) => format!("{}: {}", f.name, render_type(t, &mut namer)),
+            None => f.name.clone(),
+        };
+        body.push_str(&format!("    {line}\n"));
+    }
+    let mut names: Vec<&String> = methods.keys().filter(|n| is_public_member(n)).collect();
+    names.sort();
+    for name in names {
+        let sig = resolved_methods
+            .get(name.as_str())
+            .unwrap_or(&methods[name].signature);
+        // A child namer keeps slot variables rendering as `Self.<slot>`
+        // inside method types while each method numbers the variables
+        // its scheme leaves open from `unknown_0`.
+        let line = render_signature_into(sig, &[], None, None, &mut namer.fresh_child());
+        body.push_str(&format!("    {line}\n"));
+    }
+    body
 }
 
 /// Whether a field/method/variant name is part of a type's public surface. A

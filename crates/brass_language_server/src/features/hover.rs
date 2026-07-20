@@ -22,7 +22,8 @@ use crate::analysis::FullAnalysis;
 use crate::document::Document;
 use crate::features::nav;
 use crate::render::{
-    UnknownNamer, match_type_vars, render_signature_into, render_type, render_type_def_with,
+    UnknownNamer, match_type_vars, render_alias_def, render_signature_into, render_type,
+    render_type_def_with,
 };
 
 /// Build the hover response for `pos` in `doc`, using the full analysis.
@@ -52,6 +53,15 @@ pub fn hover(doc: &Document, full: &FullAnalysis, pos: Position) -> Option<Hover
     // and a free `request`, and the declaration showed the free one's signature
     // and doc comment.
     if let Some(h) = method_decl_hover(doc, full, local, global) {
+        return Some(h);
+    }
+
+    // The cursor on the method name in a TYPE-qualified access (`HashMap.new()`,
+    // `Alias.method(..)`). The receiver is a type name, not a value, so
+    // `method_hover` finds no receiver expression there and the position used to
+    // fall through to the enclosing call -- showing the call's RESULT type
+    // instead of the method's own signature.
+    if let Some(h) = type_method_hover(doc, full, local, global) {
         return Some(h);
     }
 
@@ -105,6 +115,9 @@ pub fn hover(doc: &Document, full: &FullAnalysis, pos: Position) -> Option<Hover
         if let Some(t) = full.program.resolve_type(&module, &name) {
             return Some(type_decl_hover(full, t, Some(doc.range_of(span))));
         }
+        if let Some(alias) = resolve_type_alias(full, &module, &name) {
+            return Some(alias_hover(full, &name, alias, Some(doc.range_of(span))));
+        }
     }
 
     // A compound expression with nothing more specific under the cursor.
@@ -127,6 +140,52 @@ fn type_decl_hover(full: &FullAnalysis, t: &TypeInfo, range: Option<Range>) -> H
     markup_with_doc(
         render_type_def_with(t, &empty, &resolved),
         t.doc.as_deref(),
+        range,
+    )
+}
+
+/// The `type Alias = ..` binding `name` resolves to as seen from `module`,
+/// through the same rename-aware lookup the checker uses (an alias is not a
+/// nominal, so it is absent from `Program::types`).
+fn resolve_type_alias<'a>(
+    full: &'a FullAnalysis,
+    module: &[String],
+    name: &str,
+) -> Option<&'a brass_hir::TypeAlias> {
+    brass_hir::resolve_qualified(
+        &full.program.type_aliases,
+        &full.program.import_origins,
+        &full.program.import_renames,
+        module,
+        name,
+    )
+}
+
+/// Hover for a type-alias name. An alias of a nominal record (usually a
+/// refinement, `type Counts = HashMap { key: string, value: int64 }`) shows the
+/// base type's definition view under a `type Alias = Base { ... }` header, with
+/// the slot and field types the alias pins resolved -- so the alias's hover says
+/// both what it aliases and what the type slots hold. Any other target shows as
+/// a one-line `type Alias = <type>`.
+fn alias_hover(
+    full: &FullAnalysis,
+    name: &str,
+    alias: &brass_hir::TypeAlias,
+    range: Option<Range>,
+) -> Hover {
+    if let Type::Record(n) = &alias.ty
+        && let Some(info) = full.program.type_by_id(n.id)
+    {
+        let resolved = typedef_method_signatures(full, info, &n.substitution);
+        return markup_with_doc(
+            render_alias_def(name, info, &n.substitution, &resolved),
+            info.doc.as_deref(),
+            range,
+        );
+    }
+    let mut namer = UnknownNamer::default();
+    markup(
+        format!("type {name} = {}", render_type(&alias.ty, &mut namer)),
         range,
     )
 }
@@ -282,6 +341,66 @@ fn method_decl_hover(
     // No call and no instance: the declaration's own view, with the type's slots
     // left open, matching what the type-definition hover shows for the same method.
     method_signature_hover(doc, full, &recv_ty, &name, None, None, span)
+}
+
+/// Hover for the method name in a TYPE-qualified access (`HashMap.new()`):
+/// the method's signature. The receiver before the `.` must be a lone
+/// identifier naming a nominal type or a type alias -- a chained or
+/// parenthesized receiver is a value, already served by [`method_hover`]. An
+/// alias receiver resolves methods against the concrete instance the alias
+/// names, so its pinned slot types show in the parameters and return.
+fn type_method_hover(
+    doc: &Document,
+    full: &FullAnalysis,
+    local: usize,
+    global: usize,
+) -> Option<Hover> {
+    let (name, span) = nav::ident_at(&doc.text, local)?;
+    let bytes = doc.text.as_bytes();
+    if span.lo == 0 || bytes.get(span.lo - 1) != Some(&b'.') {
+        return None;
+    }
+    let dot = span.lo - 1;
+    let mut start = dot;
+    while start > 0 && is_ident_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    if start == dot {
+        return None;
+    }
+    if let Some(prev) = start.checked_sub(1) {
+        let b = bytes[prev];
+        if is_ident_byte(b) || b == b'.' || b == b')' || b == b']' {
+            return None;
+        }
+    }
+    let tname = &doc.text[start..dot];
+    let module = vec!["main".to_string()];
+    let recv_ty = if let Some(info) = full.program.resolve_type(&module, tname) {
+        info.type_ref()
+    } else {
+        resolve_type_alias(full, &module, tname)?.ty.clone()
+    };
+    // Specialize from the enclosing call when the cursor sits in one: its
+    // inferred result fills a return the scheme leaves open (a constructor's
+    // `new()` shows the instance it builds here).
+    let (call_span, ret) = enclosing_call(full, global)
+        .map(|e| (Some(e.span), Some(e.ty.clone())))
+        .unwrap_or((None, None));
+    let call_args = call_span.and_then(|s| nav::call_args_at_span(full, s));
+    method_signature_hover(
+        doc,
+        full,
+        &recv_ty,
+        &name,
+        call_args.as_deref(),
+        ret.as_ref(),
+        span,
+    )
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Render the signature of method `name` on `recv_ty`, optionally specialized to a

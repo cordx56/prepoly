@@ -217,12 +217,14 @@ fn git_dependencies_clone_and_checkout_in_the_cache() {
         std::fs::read_to_string(&manifest_path).expect("read protected manifest"),
         "sentinel\n"
     );
-    let invalid = czpm(&["new", "bad-name"]);
+    // Hyphens are legal in package names (`bad-name` scaffolds fine, and the
+    // hyphenated package below runs); a leading digit is not.
+    let invalid = czpm(&["new", "1bad"]);
     assert!(
         !invalid.status.success(),
         "invalid package name was accepted"
     );
-    assert!(!scaffold.join("bad-name").exists());
+    assert!(!scaffold.join("1bad").exists());
 
     // A package's own name is not an import segment (a depender names the
     // package with its own dependency key), so a hyphenated name still runs,

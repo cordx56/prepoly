@@ -70,7 +70,7 @@ fun Manifest.parse(s: string) -> Manifest! {
         const table = toml.get("dependencies")!
         // `keys` rejects a non-table, so `dependencies = 3` is an error here.
         for name in table.keys()! {
-            if !valid_package_name(name)! {
+            if !valid_dependency_name(name)! {
                 return error(
                     "dependency name `{name}` is not a legal identifier",
                 )
@@ -81,18 +81,25 @@ fun Manifest.parse(s: string) -> Manifest! {
     return Manifest { package: package, dependencies: dependencies }
 }
 
-/** Whether `name` can be used as a package's leading import segment. */
+/**
+ * Whether `name` is a legal name for a package itself. A package's own name
+ * is never an import segment (a depender reaches it by its dependency key),
+ * so hyphens are allowed: a letter first, letters/digits/`-`/`_` after, and
+ * not ending in a separator.
+ */
 fun valid_package_name(name: string) {
-    const regex = Regex.new("^[a-zA-Z][a-zA-Z\\-_]*[a-zA-Z]$")!
-    if regex.is_match(name) {
-        return true
-    } else {
-        return false
-    }
+    const regex = Regex.new("^[a-zA-Z]([a-zA-Z0-9\\-_]*[a-zA-Z0-9])?$")!
+    return regex.is_match(name)
 }
 
-fun _identifier_start(b: uint8) -> bool {
-    return b >= 65 && b <= 90 || b >= 97 && b <= 122 || b == 95
+/**
+ * Whether `name` can be used as a dependency key. Dependency names ARE the
+ * leading import segment of the depending code, so they stay identifier-only
+ * (no hyphens).
+ */
+fun valid_dependency_name(name: string) {
+    const regex = Regex.new("^[a-zA-Z_][a-zA-Z0-9_]*$")!
+    return regex.is_match(name)
 }
 
 /**

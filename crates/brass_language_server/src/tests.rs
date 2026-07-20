@@ -728,6 +728,46 @@ fn hover_record_instance_shows_pinned_type_slots() {
     );
 }
 
+/// Hovering a type-alias name (at the declaration and at a use site) shows the
+/// base type the alias resolves to and the slot/field types it pins, not
+/// nothing or a bare expression type.
+#[test]
+fn hover_type_alias_shows_base_and_pinned_slots() {
+    let src = "type Counts = HashMap { key: string, value: int64 }\n\nfun main() {\n    let m: Counts = HashMap.new()\n    m.set(\"a\", 1)\n    println(m.get(\"a\"))\n}\n";
+    let full = full_analysis(src);
+    for last in [false, true] {
+        let (doc, pos) = position(src, "Counts", last);
+        let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover the alias"));
+        assert!(
+            text.contains("type Counts = HashMap {"),
+            "alias header names the base: {text}"
+        );
+        assert!(
+            text.contains("key: string") && text.contains("value: int64"),
+            "the pinned slots are shown: {text}"
+        );
+    }
+}
+
+/// Hovering the method name in a TYPE-qualified call (`HashMap.new()`) shows
+/// the method's signature, not the call's result type (the receiver is a type
+/// name, so there is no receiver expression for the value-method path).
+#[test]
+fn hover_type_qualified_method_shows_signature() {
+    let src = "fun main() {\n    let m = HashMap.new()\n    m.set(\"a\", 1)\n}\n";
+    let full = full_analysis(src);
+    let (doc, pos) = position(src, "new", false);
+    let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover the static method"));
+    assert!(
+        text.contains("fun new("),
+        "the method's signature is shown: {text}"
+    );
+    assert!(
+        !text.contains("type HashMap = {"),
+        "not the record definition view: {text}"
+    );
+}
+
 /// Hovering a type name hides its `_`-prefixed implementation members and shows
 /// its open type slots as declared.
 #[test]
@@ -934,6 +974,28 @@ fn completion_offers_imported_names() {
     assert!(sqrt.documentation.is_some(), "stdlib doc carried");
 }
 
+/// A dotted import without braces also offers the parent module's public
+/// names directly (`import math.pow` is a single-name import), with the
+/// resolved signature carried, alongside any deeper path segments.
+#[test]
+fn completion_offers_direct_import_names() {
+    let src = "import math.";
+    let analyzer = DocAnalyzer::new(path());
+    let doc = Document::new(src.to_string(), 1);
+    let items = completion::completion(&doc, &analyzer, &path(), doc.position_at(src.len()));
+    let labels = labels(&items);
+    assert!(
+        labels.iter().any(|l| l == "pow"),
+        "math's public functions offered without braces: {labels:?}"
+    );
+    let pow = items.iter().find(|i| i.label == "pow").expect("pow item");
+    assert!(
+        pow.detail.as_deref().unwrap_or("").contains("fun pow("),
+        "signature detail: {:?}",
+        pow.detail
+    );
+}
+
 /// Under the `core` namespace every embedded module completes (`import
 /// core.|` offers `collections` and `math` alike), and the brace list of a
 /// core module offers its public types with their docs.
@@ -1018,6 +1080,13 @@ fn completion_offers_include_and_package_modules() {
     assert!(
         nested.contains(&"vec".to_string()),
         "nested include module: {nested:?}"
+    );
+    // The same position offers the parent module's own exports, for a direct
+    // single-name import (`import geometry.origin`) -- served by the textual
+    // fallback here, since the analyzer's environment knows no include roots.
+    assert!(
+        nested.contains(&"origin".to_string()),
+        "direct import name: {nested:?}"
     );
 
     // Brace list: the include module's public names are offered (through the

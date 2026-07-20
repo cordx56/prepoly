@@ -1,12 +1,14 @@
 //! Completion.
 //!
 //! Three contexts are handled. Inside an `import` statement the cursor is offered
-//! module path segments (`import math.|`) and, within the brace list, the public
-//! names a module exports (`import math.{ |`); the context is recovered textually
-//! from the current line (so it works while the line does not yet parse), and the
-//! candidates come from the loader's search roots -- prelude, nested std, files
-//! next to the document, include paths, and declared packages -- with the brace
-//! names carrying the signatures and docs of the analyzed module.
+//! module path segments plus the parent module's public names (`import math.|`
+//! completes both submodules and a direct single-name import) and, within the
+//! brace list, the public names a module exports (`import math.{ |`); the context
+//! is recovered textually from the current line (so it works while the line does
+//! not yet parse), and the candidates come from the loader's search roots --
+//! prelude, nested std, files next to the document, include paths, and declared
+//! packages -- with the exported names carrying the signatures and docs of the
+//! analyzed module.
 //! After a `.` (`a.|`) the cursor is offered the members reachable on the
 //! receiver -- a record's fields, a record's or a sum's INSTANCE methods, and the
 //! built-in and stdlib methods for the receiver's kind -- or, when the receiver is
@@ -77,7 +79,17 @@ pub(crate) fn completion_with(
                 import_name_items(&module, &prefix, analyzer, doc_path, search)
             }
             ImportContext::Path { parents, prefix } => {
-                import_path_items(&parents, &prefix, doc_path, search)
+                // A dotted import can name one export directly (`import
+                // math.pow` is `import math.{ pow }`), so a segment position
+                // under a module also offers that module's public names,
+                // alongside the deeper path segments.
+                let mut items = import_path_items(&parents, &prefix, doc_path, search);
+                if !parents.is_empty() {
+                    items.extend(import_name_items(
+                        &parents, &prefix, analyzer, doc_path, search,
+                    ));
+                }
+                dedup_by_label(items)
             }
         };
     }

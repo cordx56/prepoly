@@ -145,12 +145,13 @@ fun init_dir(path: Path, name: string) {
         create_dir(path)!
     }
 
+    const replaced = name.replace("-", "_")
     const manifest_path = path.join("package.toml")
-    const source_path = path.join("{name}.cz")
-    const module_path = path.join(name)
+    const source_path = path.join("{replaced}.cz")
+    const module_path = path.join(replaced)
     if manifest_path.exists() || source_path.exists() {
         return error(
-            "cannot initialize package: package.toml or {name}.cz already exists",
+            "cannot initialize package: package.toml or {replaced}.cz already exists",
         )
     }
     if module_path.exists() && !module_path.is_dir() {
