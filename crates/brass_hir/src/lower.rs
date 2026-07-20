@@ -522,7 +522,7 @@ fn split_members(
                     });
                     continue;
                 }
-                // A `slot: type` field is a type parameter, not a value field: it
+                // A `type slot` member is a type parameter, not a value field: it
                 // is recorded as a slot (no runtime storage) rather than in
                 // `fields`, so it is excluded from layout, construction, and
                 // reflection automatically.
@@ -1113,12 +1113,13 @@ mod tests {
 
     #[test]
     fn type_slots_are_kept_out_of_the_value_fields() {
-        // `key`/`value: type` are slots (type parameters), not value fields; a
-        // real field expresses its type over them with `Self.slot`.
+        // `type key`/`type value` are slots (type parameters), not value
+        // fields; a real field expresses its type over them with `Self.slot`.
+        // `value` uses the older `value: type` spelling, still accepted.
         let program = lower_program(&[(
             &["main"],
             "type _E = {\n key\n value\n }\n\
-             type Box = {\n key: type\n value: type\n \
+             type Box = {\n type key\n value: type\n \
              arr: _E { key: Self.key, value: Self.value }?[]\n n: int64\n }\n",
         )]);
         let info = program.types.get("Box").expect("Box exists");

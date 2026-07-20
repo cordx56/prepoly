@@ -21,11 +21,11 @@ fi
 #
 czpm_path="$tmp/bin/czpm"
 cat << CZPM > "$czpm_path"
-#!/usr/bin/env -S brass --
+#!/usr/bin/env brass
 
 import std.package_manager.exec.main
 
-main()
+main()!
 CZPM
 chmod +x "$czpm_path"
 

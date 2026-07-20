@@ -1,7 +1,7 @@
 //! Resolution of record type declarations that use type SLOTS, `Self.field`
 //! references, and `Base { .. }` refinements.
 //!
-//! A record may declare type parameters as `slot: type` fields (see
+//! A record may declare type parameters as `type slot` members (see
 //! [`TypeInfo::slots`]). Each slot is given an inference variable; another
 //! field expresses its type over the slots with `Self.slot`
 //! (`entries: _Entry { key: Self.key }?[]`). A refinement -- an inline

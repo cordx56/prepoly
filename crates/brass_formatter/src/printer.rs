@@ -302,8 +302,10 @@ impl<'a> Printer<'a> {
     fn member(&mut self, m: &Member) {
         match m {
             // A field's type gets the refinement/anonymous breaking rules; a
-            // method signature is always one line.
+            // method signature is always one line. A type slot prints in the
+            // canonical `type name` form (normalizing the older `name: type`).
             Member::Field(f) => match &f.ty {
+                Some(TypeExpr::TypeSlot(_)) => self.line(&format!("type {}", f.name)),
                 Some(ty) => self.type_lines(format!("{}: ", f.name), ty, ""),
                 None => self.line(&f.name.clone()),
             },
@@ -317,6 +319,7 @@ impl<'a> Printer<'a> {
     fn member_flat(&self, m: &Member) -> String {
         match m {
             Member::Field(f) => match &f.ty {
+                Some(TypeExpr::TypeSlot(_)) => format!("type {}", f.name),
                 Some(ty) => format!("{}: {}", f.name, self.type_flat(ty)),
                 None => f.name.clone(),
             },

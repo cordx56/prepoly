@@ -58,6 +58,30 @@ mod tests {
     }
 
     #[test]
+    fn type_slot_spellings_are_equivalent() {
+        // `type slot` and the older `slot: type` declare the same type slot:
+        // a field whose type is `TypeExpr::TypeSlot`.
+        let m = module("type Box = {\n    type key\n    value: type\n    data: Self.key[]\n}\n");
+        let TopLevel::Type(t) = &m.items[0] else {
+            panic!("expected a type");
+        };
+        let TypeBody::Record(members) = &t.body else {
+            panic!("expected a record");
+        };
+        for (i, name) in [(0, "key"), (1, "value")] {
+            let Member::Field(f) = &members[i] else {
+                panic!("expected a field");
+            };
+            assert_eq!(f.name, name);
+            assert!(
+                matches!(f.ty, Some(TypeExpr::TypeSlot(_))),
+                "{name} is a slot: {:?}",
+                f.ty
+            );
+        }
+    }
+
+    #[test]
     fn in_type_method_body_is_rejected() {
         // A method body inside the type body is no longer accepted; it must be
         // `fun T.m(...)`.

@@ -449,7 +449,7 @@ impl<'a> Checker<'a> {
     /// parameter takes its own variable, and each field is the scheme's field type
     /// over them. `None` when `ty` is not a record with a scheme.
     ///
-    /// Restricted to a record with declared type SLOTS (`key: type`). Those are the
+    /// Restricted to a record with declared type SLOTS (`type key`). Those are the
     /// witness-free containers whose element types a use has to pin, and whose
     /// constructor the light pass gets wrong. Every other record's fields are
     /// whatever its constructor built, and the scheme's view of them -- a

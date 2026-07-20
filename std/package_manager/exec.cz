@@ -23,7 +23,7 @@ fun main() {
         }
 
         const name = args[2]
-        if !valid_package_name(name) {
+        if !valid_package_name(name)! {
             return error("package name `{name}` is not a legal identifier")
         }
         const path = current.join(name)
@@ -138,7 +138,7 @@ Usage:
 }
 
 fun init_dir(path: Path, name: string) {
-    if !valid_package_name(name) {
+    if !valid_package_name(name)! {
         return error("package name `{name}` is not a legal identifier")
     }
     if !path.is_dir() {
@@ -175,6 +175,8 @@ license = \"MIT\"
     )!
 
     write_file(source_path, "println(\"Hello, {name}!\")")!
+
+    write_file(path.join(".gitignore"), "*.czcache")
 
     // Sub-modules live under the package's identifier-shaped directory.
     println("Package {name} created at {path.to_string()}!")

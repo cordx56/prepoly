@@ -1,6 +1,6 @@
-// Type slots (`key`/`value: type`): a record's type parameters with no runtime
-// storage. `slots_arr` expresses its element type over them via `Self.key` /
-// `Self.value`, so storing an `_Entry` pins the key/value types. The container
+// Type slots (`type key`/`type value`): a record's type parameters with no
+// runtime storage. `slots_arr` expresses its element type over them via
+// `Self.key` / `Self.value`, so storing an `_Entry` pins the key/value types. The container
 // stays witness-free -- `Box.new()` takes no arguments and no sample values --
 // and the slots never appear in the layout, in `fields()`, or in construction.
 
@@ -10,8 +10,8 @@ type _Entry = {
 }
 
 type Box = {
-    key: type
-    value: type
+    type key
+    type value
     slots_arr: _Entry { key: Self.key, value: Self.value }?[]
     count: int64
 }

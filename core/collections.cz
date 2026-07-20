@@ -34,8 +34,8 @@ type HashMap = {
     // parameters the fields below are expressed over. A refinement pins them,
     // so `type StringCount = HashMap { key: string, value: int32 }` is a fully
     // concrete instance, and a bare `HashMap.new()` leaves them to inference.
-    key: type
-    value: type
+    type key
+    type value
     // Slot arrays, parallel and `_cap`-long. `_entries[i]` is meaningful only
     // when `_states[i]` is `_FULL`. A slot is `_EMPTY` (never used), `_FULL`
     // (holds a live pair), or `_TOMB` (deleted -- probing passes through it,

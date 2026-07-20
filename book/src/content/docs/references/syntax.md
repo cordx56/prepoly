@@ -314,8 +314,9 @@ type Alias = Base { field: T, ... }     // refinement alias (see below)
 ```
 
 A member is either a **field** (`name` or `name: Type`, the annotation is
-optional), a **type slot** (`name: type`, a type parameter with no storage,
-see [Type slots](/references/types/#type-slots-and-refinements)), or a **method
+optional), a **type slot** (`type name`, a type parameter with no storage,
+see [Type slots](/references/types/#type-slots-and-refinements); the older
+spelling `name: type` is also accepted), or a **method
 signature** (`name(params) -> Ret` with no body). A method body inside a `type`
 block is a parse error: implementations go outside the type, as `fun T.m(...)`,
 in the same module. Members are separated by commas or newlines.

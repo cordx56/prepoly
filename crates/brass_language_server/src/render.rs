@@ -226,8 +226,8 @@ pub fn render_signature_into(
 /// while a bare type-name hover passes an empty substitution and shows the
 /// declaration.
 ///
-/// Type slots (`slot: type` type parameters) are listed first: as the declared
-/// `slot: type` marker when open, or as `slot: <concrete>` when the instance has
+/// Type slots (`type slot` type parameters) are listed first: as the declared
+/// `type slot` marker when open, or as `slot: <concrete>` when the instance has
 /// pinned them. A slot variable occurring in a field's or method's type renders
 /// as `Self.<slot>`, as the declaration wrote it.
 ///
@@ -266,7 +266,7 @@ pub fn render_type_def_with(
             for (name, var) in info.slots.iter().filter(|(n, _)| is_public_member(n)) {
                 let line = match pins.get(var) {
                     Some(t) if !t.is_unknown() => format!("{name}: {}", render_type(t, &mut namer)),
-                    _ => format!("{name}: type"),
+                    _ => format!("type {name}"),
                 };
                 body.push_str(&format!("    {line}\n"));
             }

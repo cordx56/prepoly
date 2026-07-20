@@ -693,16 +693,17 @@ fn hover_record_instance_shows_resolved_public_members() {
     );
 }
 
-/// Hovering the name of a record with `slot: type` type parameters lists the
-/// slots ahead of the fields, as declared: the slot as `slot: type` and a field
-/// written over it as `Self.slot`, not as an anonymous `unknown_N`.
+/// Hovering the name of a record with `type slot` type parameters lists the
+/// slots ahead of the fields: the slot as `type slot` and a field written over
+/// it as `Self.slot`, not as an anonymous `unknown_N`. The source uses the
+/// older `slot: type` spelling; the hover normalizes to the canonical form.
 #[test]
 fn hover_type_name_shows_type_slots() {
     let src = "type Box = {\n    item: type\n    data: Self.item[]\n}\n\nfun Box.new(seed) {\n    let arr = [seed]\n    return Self { data: arr }\n}\n\nfun main() {\n    let boxed = Box.new(42)\n    println(boxed.data[0])\n}\n";
     let full = full_analysis(src);
     let (doc, pos) = position(src, "Box", false);
     let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover the type name"));
-    assert!(text.contains("item: type"), "the slot is listed: {text}");
+    assert!(text.contains("type item"), "the slot is listed: {text}");
     assert!(
         text.contains("data: Self.item[]"),
         "a field over the slot renders it by name: {text}"
@@ -713,7 +714,7 @@ fn hover_type_name_shows_type_slots() {
 /// type this instance carries, recovered from the instance's field types.
 #[test]
 fn hover_record_instance_shows_pinned_type_slots() {
-    let src = "type Box = {\n    item: type\n    data: Self.item[]\n}\n\nfun Box.new(seed) {\n    let arr = [seed]\n    return Self { data: arr }\n}\n\nfun main() {\n    let boxed = Box.new(42)\n    println(boxed.data[0])\n}\n";
+    let src = "type Box = {\n    type item\n    data: Self.item[]\n}\n\nfun Box.new(seed) {\n    let arr = [seed]\n    return Self { data: arr }\n}\n\nfun main() {\n    let boxed = Box.new(42)\n    println(boxed.data[0])\n}\n";
     let full = full_analysis(src);
     let (doc, pos) = position(src, "boxed = Box.new", false);
     let text = hover_text(&hover::hover(&doc, &full, pos).expect("hover the instance"));
@@ -742,7 +743,7 @@ fn hover_type_name_hides_internal_members() {
         "set must be expressed over the slots: {text}"
     );
     assert!(
-        text.contains("key: type") && text.contains("value: type"),
+        text.contains("type key") && text.contains("type value"),
         "the open slots are shown as declared: {text}"
     );
     assert!(

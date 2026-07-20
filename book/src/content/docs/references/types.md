@@ -415,11 +415,12 @@ There is **no explicit type-parameter syntax** (`<T>` does not exist).
 
 ### Type slots and refinements
 
-A record can name its type parameters as **slots** (fields declared with the
-`type` keyword as their type) and refer to them elsewhere with `Self.slot`. A
+A record can name its type parameters as **slots** (members declared with the
+`type` keyword, `type slot`) and refer to them elsewhere with `Self.slot`. A
 slot has no runtime storage: it never appears in the layout, in `fields()`, or
 in a construction literal. It only names a type another field is expressed
-over.
+over. (The older spelling `slot: type` -- the `type` keyword as the member's
+declared type -- is also accepted.)
 
 ```brass
 type _Entry = {
@@ -428,8 +429,8 @@ type _Entry = {
 }
 
 type Map = {
-    key: type            // type slots: the key/value types, no storage
-    value: type
+    type key             // type slots: the key/value types, no storage
+    type value
     entries: _Entry { key: Self.key, value: Self.value }?[]
     count: int64
 }

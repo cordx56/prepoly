@@ -131,17 +131,17 @@ fn git_dependencies_clone_and_checkout_in_the_cache() {
     std::fs::create_dir_all(&inner).expect("create nested dependency");
     std::fs::write(
         path_root.join("package.toml"),
-        "[package]\nname = \"root\"\nauthor = \"\"\nlicense = \"MIT\"\n\n[dependencies]\nouter = { path = \"../path-outer\" }\n",
+        "[package]\nname = \"root\"\nauthors = \"\"\nlicense = \"MIT\"\n\n[dependencies]\nouter = { path = \"../path-outer\" }\n",
     )
     .expect("write root manifest");
     std::fs::write(
         outer.join("package.toml"),
-        "[package]\nname = \"outer\"\nauthor = \"\"\nlicense = \"MIT\"\n\n[dependencies]\ninner = { path = \"nested\" }\n",
+        "[package]\nname = \"outer\"\nauthors = \"\"\nlicense = \"MIT\"\n\n[dependencies]\ninner = { path = \"nested\" }\n",
     )
     .expect("write outer manifest");
     std::fs::write(
         inner.join("package.toml"),
-        "[package]\nname = \"inner\"\nauthor = \"\"\nlicense = \"MIT\"\n\n[dependencies]\n",
+        "[package]\nname = \"inner\"\nauthors = \"\"\nlicense = \"MIT\"\n\n[dependencies]\n",
     )
     .expect("write inner manifest");
     let resolver = path_root.join("resolve_paths.cz");
@@ -231,7 +231,7 @@ fn git_dependencies_clone_and_checkout_in_the_cache() {
     std::fs::create_dir_all(&hyphen).expect("create hyphenated package");
     std::fs::write(
         hyphen.join("package.toml"),
-        "[package]\nname = \"my-app\"\nauthor = \"\"\nlicense = \"MIT\"\n\n[dependencies]\n",
+        "[package]\nname = \"my-app\"\nauthors = \"\"\nlicense = \"MIT\"\n\n[dependencies]\n",
     )
     .expect("write hyphenated manifest");
     std::fs::write(hyphen.join("my-app.cz"), "println(\"hyphen ok\")\n")
@@ -269,7 +269,7 @@ fn git_dependencies_clone_and_checkout_in_the_cache() {
     // wrapper rather than being replaced by it.
     std::fs::write(
         hyphen.join("package.toml"),
-        "[package]\nname = \"my-app\"\nauthor = \"\"\nlicense = \"MIT\"\n\n[dependencies]\nbad-dep = { path = \"nowhere\" }\n",
+        "[package]\nname = \"my-app\"\nauthors = \"\"\nlicense = \"MIT\"\n\n[dependencies]\nbad-dep = { path = \"nowhere\" }\n",
     )
     .expect("write bad-dependency manifest");
     let refused = Command::new(env!("CARGO_BIN_EXE_brass"))

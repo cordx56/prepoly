@@ -232,7 +232,7 @@ pub struct TypeInfo {
     /// same type name is defined in several modules, so both coexist with
     /// distinct symbols and method-dispatch keys.
     pub symbol: String,
-    /// Type slots (fields declared `slot: type`): a record's type parameters,
+    /// Type slots (members declared `type slot`): a record's type parameters,
     /// each paired with the inference variable that stands for it. A slot has no
     /// runtime storage (it is not in `fields`); its variable appears in the other
     /// fields' resolved types wherever they wrote `Self.slot`, and a refinement

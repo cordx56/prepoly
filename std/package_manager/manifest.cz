@@ -1,5 +1,6 @@
 import std.data.toml.TomlValue
 import std.path.Path
+import std.regex.Regex
 
 /** A parsed `package.toml`. */
 type Manifest = {
@@ -69,7 +70,7 @@ fun Manifest.parse(s: string) -> Manifest! {
         const table = toml.get("dependencies")!
         // `keys` rejects a non-table, so `dependencies = 3` is an error here.
         for name in table.keys()! {
-            if !valid_package_name(name) {
+            if !valid_package_name(name)! {
                 return error(
                     "dependency name `{name}` is not a legal identifier",
                 )
@@ -81,17 +82,13 @@ fun Manifest.parse(s: string) -> Manifest! {
 }
 
 /** Whether `name` can be used as a package's leading import segment. */
-fun valid_package_name(name: string) -> bool {
-    const bytes = to_bytes(name)
-    if len(bytes) == 0 || !_identifier_start(bytes[0]) {
+fun valid_package_name(name: string) {
+    const regex = Regex.new("^[a-zA-Z][a-zA-Z\\-_]*[a-zA-Z]$")!
+    if regex.is_match(name) {
+        return true
+    } else {
         return false
     }
-    for b in bytes.slice(1, len(bytes)) {
-        if !_identifier_start(b) && !(b >= 48 && b <= 57) {
-            return false
-        }
-    }
-    return true
 }
 
 fun _identifier_start(b: uint8) -> bool {

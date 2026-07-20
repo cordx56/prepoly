@@ -1,6 +1,9 @@
 // A refinement may pin a type slot to anything, but a real field that already
 // has a concrete type may only be refined to that same type. `count` is declared
 // `int64`, so refining it to `string` is rejected.
+//
+// The slots intentionally use the older `name: type` spelling, which stays
+// accepted alongside the canonical `type name` form.
 
 type Box = {
     key: type

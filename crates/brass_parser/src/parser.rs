@@ -525,6 +525,19 @@ impl Parser {
     }
 
     fn parse_member(&mut self) -> PResult<Member> {
+        // `type name` declares a type SLOT: a type parameter of the enclosing
+        // record with no runtime storage. The older spelling `name: type` is
+        // still accepted below (the `type` keyword in type position parses to
+        // `TypeExpr::TypeSlot`); both forms produce the same AST.
+        if self.at_p(TokenKind::Type) {
+            let kw = self.bump().span;
+            let (name, nspan) = self.ident()?;
+            return Ok(Member::Field(Field {
+                name,
+                ty: Some(TypeExpr::TypeSlot(kw)),
+                span: kw.merge(nspan),
+            }));
+        }
         let (name, lo) = self.ident()?;
         if self.at_p(TokenKind::LParen) {
             // Method: name(params) [-> type] block

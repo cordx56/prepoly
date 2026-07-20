@@ -480,10 +480,11 @@ pub enum TypeExpr {
     /// `e`. The checker resolves it by tying the annotation to `e`'s inferred
     /// type; `e` is type-checked but never evaluated at runtime.
     TypeOf(Box<Expr>, Span),
-    /// The `type` keyword as a field's declared type: a TYPE SLOT, a
-    /// type-parameter of the enclosing record with no runtime storage. It is
-    /// filled by a refinement (`Base { slot: T }`) or inferred from use; it
-    /// cannot be read or written as a value.
+    /// A TYPE SLOT: a type-parameter of the enclosing record with no runtime
+    /// storage, declared `type slot` (or with the older spelling `slot: type`,
+    /// the `type` keyword in type position). It is filled by a refinement
+    /// (`Base { slot: T }`) or inferred from use; it cannot be read or written
+    /// as a value.
     TypeSlot(Span),
     /// `Self.field` in type position: the type of the enclosing type's field
     /// named `field` (usually a `type` slot). Lets one field's type be expressed

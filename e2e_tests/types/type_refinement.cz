@@ -15,8 +15,8 @@ type _Entry = {
 }
 
 type Box = {
-    key: type
-    value: type
+    type key
+    type value
     slots_arr: _Entry { key: Self.key, value: Self.value }?[]
     count: int64
 }
