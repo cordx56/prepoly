@@ -85,8 +85,16 @@ impl<'a> Checker<'a> {
             }
         }
         let type_name = self.resolve_self_name(qualifier);
-        let symbol = self.resolve_type_symbol(&type_name)?;
-        let info = self.program.types.get(&symbol)?;
+        // A type-ALIAS qualifier (`type Names = Stack { .. }`; `Names.new()`)
+        // answers with its TARGET's declaration: the alias is not a nominal of
+        // its own and declares no methods, so the lookup follows it.
+        let info = match self.resolve_type_symbol(&type_name) {
+            Some(symbol) => self.program.types.get(&symbol)?,
+            None => self
+                .program
+                .resolve_type_or_alias(&self.current_module, &type_name)?,
+        };
+        let symbol = info.symbol.clone();
         match &info.kind {
             TypeKind::Record { methods, .. } => {
                 let method = methods.get(method)?;

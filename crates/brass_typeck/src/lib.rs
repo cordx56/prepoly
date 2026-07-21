@@ -1528,6 +1528,75 @@ mod tests {
     }
 
     #[test]
+    fn alias_static_call_resolves_the_target_type() {
+        // A static call through a `type Alias = Target` binding dispatches on
+        // the target: the result is a `Widget`, so binding it to a string is
+        // the target type's mismatch (the call used to type as a silent open
+        // unknown that unified with anything and failed only in the back end).
+        let e = errs(
+            "type Widget = {\n    n: int64\n}\nfun Widget.new(n: int64) {\n    return Self { n: n }\n}\ntype B = Widget\nfun main() {\n    let s: string = B.new(3)\n}\n",
+        );
+        assert!(
+            e.iter()
+                .any(|m| m.contains("cannot use `Widget` where `string` is required")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn alias_static_call_resolves_across_modules_and_renames() {
+        // The serv-style re-export chain: a module imports a type under a
+        // rename, aliases it, and a third module imports the alias and calls a
+        // static through it. The mismatch against the TARGET type proves the
+        // whole chain resolved.
+        let e = module_errs(&[
+            (
+                &["lower"],
+                "type Widget = {\n    n: int64\n}\nfun Widget.new(n: int64) {\n    return Self { n: n }\n}\n",
+            ),
+            (&["mid"], "import lower.{ Widget as W }\n\ntype Alias = W\n"),
+            (
+                &["main"],
+                "import mid.{ Alias }\n\nfun main() {\n    let s: string = Alias.new(3)\n}\n",
+            ),
+        ]);
+        assert!(
+            e.iter()
+                .any(|m| m.contains("cannot use `Widget` where `string` is required")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn unresolvable_static_call_is_reported() {
+        // A static call nothing declares must be a check error, not a silent
+        // open unknown that only the back end trips over.
+        let e = errs(
+            "type Widget = {\n    n: int64\n}\nfun Widget.new(n: int64) {\n    return Self { n: n }\n}\nfun main() {\n    println(Widget.nope(3))\n}\n",
+        );
+        assert!(
+            e.iter()
+                .any(|m| m.contains("`Widget` has no static method `nope`")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn refinement_alias_static_call_pins_slots() {
+        // `Names.new()` builds the instance the refinement alias pins, exactly
+        // like the annotated `let s: Names = Stack.new()` form: a later store
+        // of the wrong element type is rejected.
+        let e = errs(
+            "type Stack = {\n    type item\n    items: Self.item[]\n}\nfun Stack.new() {\n    return Self { items: [] }\n}\nfun Stack.add(self, v) {\n    self.items.push(v)\n}\ntype Names = Stack { item: string }\nfun main() {\n    let s = Names.new()\n    s.add(1)\n}\n",
+        );
+        assert!(
+            e.iter()
+                .any(|m| m.contains("cannot use `int32` where `string` is required")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
     fn interface_unknown_field_is_constrained_at_call_site() {
         let e = errs(
             "type Container = {\n    value\n}\ntype IntBox: Container = {\n    value: int32\n}\nfun get(c: Container) -> string {\n    return c.value\n}\nfun main() {\n    let box = IntBox { value: 1 }\n    let value = get(box)\n}\n",

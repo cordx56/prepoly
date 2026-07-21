@@ -275,6 +275,19 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let ret = self.check_static_call(&qualifier, method, args, span, scopes);
+                // A REFINEMENT-alias qualifier carries pinned slot types
+                // (`type Names = Stack { item: string }`); flow them into the
+                // call's result so `Names.new()` builds the pinned instance,
+                // exactly as the annotated form `let s: Names = Stack.new()`
+                // does. A plain alias (empty substitution) pins nothing.
+                if let Expr::Ident(alias_name, _) = &**base
+                    && self.lookup(scopes, alias_name).is_none()
+                    && let Some(alias_ty) = self.resolve_alias(alias_name)
+                    && matches!(&alias_ty, Type::Record(n) if !n.substitution.is_empty())
+                    && self.can_unify(&ret, &alias_ty)
+                {
+                    let _ = self.solver.unify(&ret, &alias_ty);
+                }
                 self.invalidate_narrowed_after_call(scopes);
                 return ret;
             }
@@ -998,6 +1011,19 @@ impl<'a> Checker<'a> {
         args.iter().for_each(|a| {
             self.check_expr(&a.expr, scopes);
         });
+        // Nothing resolved the call: not a record/sum method (through the
+        // qualifier or a type alias of it), not a primitive static, not a
+        // structural `from`. Deferring silently left the result an open
+        // unknown -- `check` stayed green and the back end failed at run time
+        // with an unrelated-looking lowering error -- so report it here. An
+        // empty qualifier is `Self` outside any type; the resolution error is
+        // reported elsewhere.
+        if !qualifier.is_empty() {
+            self.errors.push(TypeError {
+                message: format!("`{qualifier}` has no static method `{method}`"),
+                span,
+            });
+        }
         self.fresh_unknown()
     }
 

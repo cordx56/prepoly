@@ -397,10 +397,12 @@ impl<'p> ProgramCtx<'p> {
     fn is_type_word_in(&self, module: &[String], name: &str) -> bool {
         // Module-aware for every form of the name: bare (which alone misses a
         // type whose symbol went module-qualified because another module declares
-        // the same name -- e.g. an alias of it), dotted markers, and renames.
+        // the same name -- e.g. an alias of it), dotted markers, renames, and
+        // `type Alias = <nominal>` bindings (a static call through an alias
+        // dispatches on the alias's target).
         // Locals shadowing a type name are already excluded by the caller.
         self.program.types.contains_key(name)
-            || self.program.resolve_type(module, name).is_some()
+            || self.program.resolve_type_or_alias(module, name).is_some()
             || name == "Self"
             || brass_hir::IntKind::from_name(name).is_some()
             || matches!(name, "float32" | "float64" | "string" | "bool")
@@ -434,7 +436,7 @@ impl<'p> ProgramCtx<'p> {
     /// declaration order, or `None` if `ty` is not a record. Used to desugar
     /// `T.from(v)` into a record built from `v`'s fields.
     fn record_field_names(&self, module: &[String], ty: &str) -> Option<Vec<String>> {
-        let info = self.program.resolve_type(module, ty)?;
+        let info = self.program.resolve_type_or_alias(module, ty)?;
         match &info.kind {
             TypeKind::Record { fields, .. } => {
                 Some(fields.iter().map(|f| f.name.clone()).collect())
@@ -444,10 +446,11 @@ impl<'p> ProgramCtx<'p> {
     }
 
     /// The dispatch key for a static call `ty.method(...)`: a user type's unique
-    /// symbol, or the primitive type word unchanged (matches codegen).
+    /// symbol (an alias qualifier dispatches on its target type), or the
+    /// primitive type word unchanged (matches codegen).
     fn static_qualifier(&self, module: &[String], ty: &str) -> String {
         self.program
-            .resolve_type(module, ty)
+            .resolve_type_or_alias(module, ty)
             .map(|t| t.symbol.clone())
             .unwrap_or_else(|| ty.to_string())
     }

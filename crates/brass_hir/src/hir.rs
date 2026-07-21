@@ -482,6 +482,29 @@ impl Program {
         )
     }
 
+    /// [`Self::resolve_type`], additionally seeing through a `type Alias =
+    /// <nominal>` binding: an alias is not a nominal of its own and declares no
+    /// methods, so a use that needs the underlying declaration -- a static
+    /// method call's receiver, MIR call dispatch -- follows the alias to its
+    /// target record/sum. A non-nominal alias target (e.g. `type Ints =
+    /// int32[]`) yields `None`.
+    pub fn resolve_type_or_alias(&self, module: &[String], name: &str) -> Option<&TypeInfo> {
+        if let Some(v) = self.resolve_type(module, name) {
+            return Some(v);
+        }
+        let alias = resolve_qualified(
+            &self.type_aliases,
+            &self.import_origins,
+            &self.import_renames,
+            module,
+            name,
+        )?;
+        match &alias.ty {
+            Type::Record(n) | Type::Sum(n) => self.type_by_id(n.id),
+            _ => None,
+        }
+    }
+
     /// The `Result` instance the fallibility sugar (`T!`, `error(..)`, an
     /// inferred fallible return, Ok-wrapping) builds in `module`'s scope: the
     /// prelude's Result, or the module's shadowing `type Result` sum. A

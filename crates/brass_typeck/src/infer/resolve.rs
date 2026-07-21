@@ -181,7 +181,7 @@ impl<'a> Checker<'a> {
     /// The target type of a `type Alias = ..` declaration named `name`, as seen
     /// from the current module, with any `infer` slot freshened so distinct uses
     /// do not share a variable.
-    fn resolve_alias(&mut self, name: &str) -> Option<Type> {
+    pub(super) fn resolve_alias(&mut self, name: &str) -> Option<Type> {
         let alias = brass_hir::resolve_qualified(
             &self.program.type_aliases,
             &self.program.import_origins,
