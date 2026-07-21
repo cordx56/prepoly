@@ -339,6 +339,36 @@ impl<'a> Checker<'a> {
                 // `a.func(4)` calls the closure the field holds.
                 if let Some(fty) = self.field_value_type(record, method) {
                     let resolved = self.resolve(&fty);
+                    // An interface-style member takes the enclosing type as its
+                    // FIRST parameter (`b: (Self) -> string`); calling it as
+                    // `a.b(..)` binds the receiver to that parameter
+                    // implicitly, like a method call -- so a protocol record's
+                    // members are callable through a value annotated with the
+                    // protocol, and each instantiation dispatches to the
+                    // concrete type's own method.
+                    if let Type::Fun(params, ret) = &resolved
+                        && params.len() == args.len() + 1
+                        && params.first().is_some_and(|first| {
+                            let first = self.resolve(first);
+                            // The declaration may keep the receiver parameter
+                            // as the abstract `Self` or resolve it to the
+                            // enclosing nominal; both bind the receiver.
+                            matches!(first, Type::SelfType)
+                                || crate::structural::types_compatible(
+                                    self.program,
+                                    &peeled_recv,
+                                    &first,
+                                )
+                        })
+                    {
+                        let (params, ret) = (params.clone(), (**ret).clone());
+                        self.record_expr_type(callee, &fty);
+                        for (a, want) in args.iter().zip(params[1..].iter()) {
+                            self.check_expr_against(&a.expr, want, scopes);
+                        }
+                        self.invalidate_narrowed_after_call(scopes);
+                        return ret;
+                    }
                     if matches!(resolved, Type::Fun(..) | Type::Unknown(_)) {
                         self.record_expr_type(callee, &fty);
                         let ret = self.apply_callable(fty, args, span, scopes);

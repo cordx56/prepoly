@@ -312,3 +312,20 @@ fun HashMap.clear(self) {
     self._count = zero
     self._tombs = zero
 }
+
+/**
+ * Render the map JSON-style for `"{m}"` interpolation and `println` (the
+ * `Display` protocol): one `"key": value` line per pair, both sides in their
+ * `debug` form, so string keys and values are quoted. Iteration order is the
+ * map's own (unspecified). An empty map renders as `{}`.
+ */
+fun HashMap.display(self) -> string {
+    if self.is_empty() {
+        return "\{}"
+    }
+    let lines = []
+    for [key, value] in self.pairs() {
+        lines.push("    {key.debug()}: {value.debug()}")
+    }
+    return "\{\n{lines.join(",\n")}\n}"
+}

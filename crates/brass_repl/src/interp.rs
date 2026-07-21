@@ -614,6 +614,13 @@ impl<'p, 'm> Interp<'p, 'm> {
                     msym
                 } else if let Some(psym) = prim_method_instance(self.program, name, &arg_types) {
                     psym
+                } else if name == "debug" {
+                    // The built-in `debug`: a receiver with neither a user nor
+                    // a core primitive `debug` renders through the traditional
+                    // formatter, exactly like a `"{v}"` segment.
+                    let v = self.eval_operand(f, frame, &args[0], &arg_types[0])?;
+                    let hir = self.hir;
+                    return Ok(Value::str(format_value(hir, &v, &arg_types[0])?));
                 } else {
                     instance_symbol(name, &arg_types)
                 }
@@ -737,6 +744,14 @@ impl<'p, 'm> Interp<'p, 'm> {
             "to_string" => {
                 let ty = operand_type_of(&args[0], &f.local_types);
                 let v = self.eval_operand(f, frame, &args[0], &ty)?;
+                // A `"{v}"` segment routes to the USER `display` instance the
+                // monomorphizer created when the value's type declares one.
+                let program = self.program;
+                if let Some(inst) =
+                    program.lookup(&method_symbol("display", std::slice::from_ref(&ty)))
+                {
+                    return self.run_instance(inst, vec![v], &[]);
+                }
                 let hir = self.hir;
                 Ok(Value::str(format_value(hir, &v, &ty)?))
             }
@@ -971,8 +986,15 @@ impl<'p, 'm> Interp<'p, 'm> {
             Some(op) => {
                 let ty = operand_type_of(op, &f.local_types);
                 let v = self.eval_operand(f, frame, op, &ty)?;
+                let program = self.program;
                 if matches!(ty, Type::Str) {
                     v.as_str().to_string()
+                } else if let Some(inst) =
+                    program.lookup(&method_symbol("display", std::slice::from_ref(&ty)))
+                {
+                    // Like a `"{v}"` segment, `print`/`println` prefer the USER
+                    // `display` method when the value's type declares one.
+                    self.run_instance(inst, vec![v], &[])?.as_str().to_string()
                 } else {
                     let hir = self.hir;
                     format_value(hir, &v, &ty)?

@@ -1,0 +1,57 @@
+// The value-to-text protocols (core/show.cz). Every type satisfies `Debug`:
+// primitives via core's methods (`string.debug` is the quoted form), all other
+// types via the built-in traditional renderer. Only primitives (and types that
+// declare their own `display`) satisfy `Display`; a `"{v}"` segment and
+// `print`/`println` prefer `display` and fall back to `debug`, and
+// `"{v.debug()}"` forces the debug form.
+
+type Point = {
+    x: int32
+    y: int32
+}
+
+type Temp = {
+    celsius: float64
+}
+
+fun Temp.display(self) -> string {
+    return "{self.celsius}C"
+}
+
+// `"{v}"` inside a generic body routes per instantiation: `display` when the
+// concrete type declares one, the debug rendering otherwise.
+fun show_any(v) {
+    return "{v}"
+}
+
+fun main() {
+    // Primitives: debug == display, except string's debug is quoted.
+    println(1.debug())
+    println(1.display())
+    println("a".debug())
+    println("a".display())
+    println(true.debug())
+    println(2.5.display())
+
+    // A record without `display` interpolates through the built-in debug.
+    let p = Point { x: 1, y: 2 }
+    println("{p}")
+
+    // A user `display` wins in interpolation and in `println`; `.debug()`
+    // still reaches the traditional form.
+    let t = Temp { celsius: 21.5 }
+    println("{t}")
+    println(t)
+    println(t.debug())
+
+    println(show_any(t))
+    println(show_any(3))
+    println(show_any("s"))
+
+    // HashMap implements `display`: JSON-style, both sides in debug form.
+    let m = HashMap.new()
+    m.set("apple", 1)
+    println(m)
+    let empty: HashMap { key: string, value: int32 } = HashMap.new()
+    println(empty)
+}

@@ -3,12 +3,4 @@ hi
 42.0
 {"x":1.0,"y":[2.0,3.0]}
 Aki 30 Tokyo 100
-error: Error {
-    value: "missing field 'age'",
-    location: Location {
-        file: "std/data/json.cz",
-        line: 76,
-        col: 20,
-    },
-    frames: [],
-}
+error: [std/data/json.cz:76:20] unhandled error: missing field 'age'

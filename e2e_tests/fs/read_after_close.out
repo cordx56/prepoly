@@ -1,10 +1,2 @@
-read after close: Error {
-    value: "file is closed",
-    location: Location {
-        file: "<plugin:std.libfs>",
-        line: 17,
-        col: 12,
-    },
-    frames: [],
-}
+read after close: [<plugin:std.libfs>:17:12] unhandled error: file is closed
 double close ok

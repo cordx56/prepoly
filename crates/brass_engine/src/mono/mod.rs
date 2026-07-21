@@ -1694,7 +1694,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             // `print`/`println` are intercepted as typed I/O rather than
             // instantiating the stdlib's Value-based bodies.
             Rvalue::Call(Callee::Free(base), args) if base == "print" || base == "println" => {
-                self.io_call_type(args, local_types)
+                self.io_call_type(args, cur_sym, cur_ret, local_types)
             }
             Rvalue::Call(Callee::Free(base), args) => {
                 let Some(arg_types) = self.arg_types(args, local_types)? else {
@@ -1832,8 +1832,29 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                 "_flush" => Ok(Some(Type::Void)),
                 // `to_string` only has a typed conversion for scalars/strings;
                 // other arguments fall back so formatting stays correct.
+                // A value whose type declares a USER `display` method renders
+                // through it instead (`"{v}"` prefers `display` over the
+                // built-in `debug` rendering); the instance is created here so
+                // the back ends can route the call to it.
                 "to_string" => match args.first() {
                     Some(op) => match self.operand_type(op, local_types)? {
+                        Some(t) if self.display_method_declared(&t) => {
+                            match self.method_call_type(
+                                "display",
+                                args,
+                                cur_sym,
+                                cur_ret,
+                                local_types,
+                            )? {
+                                None => Ok(None),
+                                Some(Type::Str) => Ok(Some(Type::Str)),
+                                Some(other) => Err(format!(
+                                    "`display` on `{}` must return `string`, found `{}`",
+                                    t.display(),
+                                    other.display()
+                                )),
+                            }
+                        }
                         Some(t) if is_printable(&t) => Ok(Some(Type::Str)),
                         Some(t) => Err(format!(
                             "to_string of `{}` is unsupported on the typed backend",
@@ -1843,7 +1864,7 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                     },
                     None => Ok(Some(Type::Str)),
                 },
-                "print" | "println" => self.io_call_type(args, local_types),
+                "print" | "println" => self.io_call_type(args, cur_sym, cur_ret, local_types),
                 // `spawn(f)` runs `f` on a thread and yields nothing. `with(obj,
                 // f)` acquires `obj` and yields `f`'s result (its closure return).
                 "spawn" => Ok(Some(Type::Void)),
@@ -2135,6 +2156,21 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
             let sym = sym.clone();
             return self.resolve_free(cur_sym, cur_ret, &sym, arg_types);
         }
+        // The built-in `debug`: every remaining receiver renders through the
+        // runtime's traditional formatter (the same code a `"{v}"` segment
+        // emits), so every type satisfies the `Debug` protocol. Core's
+        // primitive implementations and a user-declared `debug` were consulted
+        // above and win.
+        if name == "debug" && arg_types.len() == 1 {
+            return if is_printable(&arg_types[0]) {
+                Ok(Some(Type::Str))
+            } else {
+                Err(format!(
+                    "debug of `{}` is unsupported on the typed backend",
+                    arg_types[0].display()
+                ))
+            };
+        }
         Err(format!(
             "no method `{name}` for `{}`",
             arg_types[0].display()
@@ -2395,13 +2431,29 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
     /// Type a `print`/`println` call: void, accepted only for a printable
     /// (scalar or string) argument so its output matches the boxed path.
     fn io_call_type(
-        &self,
+        &mut self,
         args: &[Operand],
+        cur_sym: &str,
+        cur_ret: &Option<Type>,
         local_types: &[Option<Type>],
     ) -> Result<Option<Type>, String> {
         match args.first() {
             None => Ok(Some(Type::Void)),
             Some(op) => match self.operand_type(op, local_types)? {
+                // `print`/`println` render like a `"{v}"` segment: a USER
+                // `display` method wins. Instantiate it here so the back ends
+                // can route the conversion to it.
+                Some(t) if self.display_method_declared(&t) => {
+                    match self.method_call_type("display", args, cur_sym, cur_ret, local_types)? {
+                        None => Ok(None),
+                        Some(Type::Str) => Ok(Some(Type::Void)),
+                        Some(other) => Err(format!(
+                            "`display` on `{}` must return `string`, found `{}`",
+                            t.display(),
+                            other.display()
+                        )),
+                    }
+                }
                 Some(t) if is_printable(&t) => Ok(Some(Type::Void)),
                 Some(t) => Err(format!(
                     "print of `{}` is unsupported on the typed backend",
@@ -2410,6 +2462,20 @@ impl<'m, 'p> Monomorphizer<'m, 'p> {
                 None => Ok(None),
             },
         }
+    }
+
+    /// Whether `t` is a nominal whose declaration carries a USER `display`
+    /// method -- the `Display` protocol. `"{v}"` interpolation and
+    /// `print`/`println` prefer it over the built-in `debug` rendering.
+    fn display_method_declared(&self, t: &Type) -> bool {
+        let (Type::Record(n) | Type::Sum(n)) = t else {
+            return false;
+        };
+        let Some(info) = self.program.type_by_id(n.id) else {
+            return false;
+        };
+        self.by_method
+            .contains_key(&(info.symbol.as_str(), "display"))
     }
 
     /// Concrete types of every argument operand, or `None` if one is not yet

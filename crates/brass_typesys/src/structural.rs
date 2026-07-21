@@ -120,8 +120,101 @@ pub fn types_compatible(program: &Program, have: &Type, want: &Type) -> bool {
             record_satisfies(program, sub, sup).is_empty()
         }
         (Type::Sum(a), Type::Sum(b)) => sum_assignable(program, a, b),
+        // A NON-record value can still satisfy a PROTOCOL record -- one whose
+        // every member is function-typed -- when each member is provided by a
+        // method: the built-in `debug` (every type renders itself, so any
+        // value satisfies `Debug`) or a core primitive method (`1` and `"a"`
+        // satisfy `Display` through `int32.display`/`string.display`).
+        (have, Type::Record(sup)) if !matches!(have, Type::Record(_)) => {
+            protocol_satisfied_by_methods(program, have, sup)
+        }
         _ => have == want,
     }
+}
+
+/// Whether every member the protocol record `sup` requires is function-typed
+/// and provided on `have` by a method ([`member_provided_by_method`]). A
+/// record with any stored data field is not a protocol a non-record value can
+/// satisfy, and an empty record constrains nothing but is not satisfied
+/// either (a memberless annotation should not accept every scalar).
+fn protocol_satisfied_by_methods(program: &Program, have: &Type, sup: &NominalType) -> bool {
+    let fields = record_fields(program, sup);
+    let methods = declared_methods(program, sup);
+    let member_count = fields.len() + methods.map_or(0, |m| m.len());
+    if member_count == 0 {
+        return false;
+    }
+    fields.iter().all(|f| {
+        f.ty.as_ref()
+            .is_some_and(|w| member_provided_by_method(program, have, &f.name, w))
+    }) && methods.is_none_or(|methods| {
+        methods.iter().all(|(name, m)| {
+            let params: Vec<Type> = m
+                .signature
+                .params
+                .iter()
+                .map(|p| p.resolved_ty.clone().unwrap_or(Type::Void))
+                .collect();
+            let ret = m
+                .signature
+                .ret_ty
+                .clone()
+                .unwrap_or(Type::Unknown(u32::MAX));
+            member_provided_by_method(program, have, name, &Type::Fun(params, Box::new(ret)))
+        })
+    })
+}
+
+/// Whether a FUNCTION-typed interface member (`debug: (Self) -> string` on a
+/// protocol record, its first parameter the receiver) is provided on `have`
+/// by a METHOD rather than a stored field:
+/// - the built-in `debug` -- every type renders itself, so a one-parameter
+///   `debug` returning `string` is always satisfied;
+/// - a method the nominal declares, with the same parameter count and a
+///   compatible return;
+/// - a core primitive/array method on `have`'s class (`fun string.display`).
+pub fn member_provided_by_method(program: &Program, have: &Type, name: &str, want: &Type) -> bool {
+    let Type::Fun(params, ret) = want else {
+        return false;
+    };
+    let ret_compatible = |have_annotated: bool, have_ret: Option<&Type>| {
+        annotated_type_satisfies(program, have_annotated, have_ret, true, Some(ret))
+    };
+    // A nullable narrows before any method call, and a closure has no
+    // rendering; neither carries the built-in `debug`.
+    let debuggable = !matches!(
+        have,
+        Type::Nullable(_) | Type::Void | Type::Never | Type::Fun(..)
+    );
+    if name == "debug"
+        && debuggable
+        && params.len() == 1
+        && matches!(**ret, Type::Str | Type::Unknown(_))
+    {
+        return true;
+    }
+    if let Type::Record(n) | Type::Sum(n) = have
+        && let Some(info) = program.type_by_id(n.id)
+    {
+        let found = match &info.kind {
+            TypeKind::Record { methods, .. } => methods.get(name),
+            TypeKind::Sum { variants } => variants.iter().find_map(|v| v.methods.get(name)),
+        };
+        if let Some(m) = found {
+            return m.signature.params.len() == params.len()
+                && ret_compatible(m.signature.ret.is_some(), m.signature.ret_ty.as_ref());
+        }
+    }
+    if let Some(class) = have.primitive_class()
+        && let Some(sym) = program
+            .primitive_methods
+            .get(&(class.to_string(), name.to_string()))
+        && let Some(f) = program.functions.get(sym)
+    {
+        return f.signature.params.len() == params.len()
+            && ret_compatible(f.signature.ret.is_some(), f.signature.ret_ty.as_ref());
+    }
+    false
 }
 
 /// Function subtyping may reverse the value-type direction of a parameter, but
@@ -369,13 +462,15 @@ fn annotated_type_relates(
 /// so it is checked field by field instead of slipping through as compatible with
 /// everything. Returns the list of incompatible members.
 pub fn record_satisfies(program: &Program, sub: &NominalType, sup: &NominalType) -> Vec<String> {
-    let mut issues = record_satisfies_fields(program, sub, sup);
+    let mut issues = satisfies_fields(program, sub, sup, true);
     // Only a named record declares methods; a structural record requires and
-    // provides none.
+    // provides none. A required method named `debug` with a receiver-only
+    // signature is the built-in renderer, satisfied by every type.
     if let Some(want_methods) = declared_methods(program, sup) {
         let have_methods = declared_methods(program, sub);
         for (name, want) in want_methods {
             match have_methods.and_then(|m| m.get(name)) {
+                None if name == "debug" && want.signature.params.len() == 1 => {}
                 None => issues.push(format!("method `{name}`")),
                 Some(have) => {
                     if !signature_satisfies(program, &have.signature, &want.signature) {
@@ -405,11 +500,36 @@ pub fn record_satisfies_fields(
     sub: &NominalType,
     sup: &NominalType,
 ) -> Vec<String> {
+    satisfies_fields(program, sub, sup, false)
+}
+
+/// [`record_satisfies_fields`] with the protocol-member fallback: when
+/// `method_fallback` is set, a field `sub` lacks is still satisfied if it is
+/// function-typed and provided by a METHOD ([`member_provided_by_method`]) --
+/// the built-in `debug`, a declared method, or a primitive method. The
+/// anonymous-value method-resolution path keeps the strict field-only check
+/// (a structural value borrows the candidate's methods, so a candidate's
+/// protocol field must not select it).
+fn satisfies_fields(
+    program: &Program,
+    sub: &NominalType,
+    sup: &NominalType,
+    method_fallback: bool,
+) -> Vec<String> {
     let mut issues = Vec::new();
+    let have_ty = Type::Record(sub.clone());
     let have_fields = record_fields(program, sub);
     for want in record_fields(program, sup) {
         match have_fields.iter().find(|h| h.name == want.name) {
-            None => issues.push(format!("field `{}`", want.name)),
+            None => {
+                let provided = method_fallback
+                    && want.ty.as_ref().is_some_and(|w| {
+                        member_provided_by_method(program, &have_ty, &want.name, w)
+                    });
+                if !provided {
+                    issues.push(format!("field `{}`", want.name));
+                }
+            }
             Some(have) => {
                 // Fields are mutable, so they are invariant: a covariant field
                 // would let writes through one alias install a value the other

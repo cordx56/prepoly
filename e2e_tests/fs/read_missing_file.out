@@ -1,10 +1,2 @@
-error: Error {
-    value: "/nonexistent/brass_missing.txt: No such file or directory (os error 2)",
-    location: Location {
-        file: "<plugin:std.libfs>",
-        line: 49,
-        col: 12,
-    },
-    frames: [],
-}
+error: [<plugin:std.libfs>:49:12] unhandled error: /nonexistent/brass_missing.txt: No such file or directory (os error 2)
 still running

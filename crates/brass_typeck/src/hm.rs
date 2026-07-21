@@ -1822,6 +1822,17 @@ impl<'p> Hm<'p> {
                 // documented numeric-flow rule); the top-level path already
                 // accepts this, so the in-function pass must too.
                 (Type::Float(_), true) => {}
+                // A literal constrained to a PROTOCOL record its numeric type
+                // satisfies through methods (`debug_it(1)` with a `Debug`
+                // parameter) stays a plain number: the flow site accepted it
+                // structurally, and this pass's binding of the literal's
+                // variable to the record is only its own bookkeeping.
+                (other, _)
+                    if brass_typesys::structural::types_compatible(
+                        self.program,
+                        &default,
+                        other,
+                    ) => {}
                 (other, true) => self.errors.push(TypeError {
                     message: format!(
                         "integer literal used where `{}` is required",

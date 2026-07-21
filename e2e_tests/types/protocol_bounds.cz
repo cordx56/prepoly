@@ -1,0 +1,61 @@
+// Protocol-typed parameters. Every type satisfies `Debug` (the built-in
+// renderer provides the member), so a `Debug`-annotated parameter accepts any
+// value. `Display` is satisfied by the primitives and by types declaring
+// their own `display`. More generally, a function-typed interface member
+// whose first parameter is the receiver (`b: (Self) -> string`) is provided
+// by a METHOD of the same name, and calling it through the interface binds
+// the receiver implicitly.
+
+type Temp = {
+    celsius: float64
+}
+
+fun Temp.display(self) -> string {
+    return "{self.celsius}C"
+}
+
+type Plain = {
+    n: int32
+}
+
+fun debug_it(v: Debug) {
+    println(v.debug())
+}
+
+fun show(v: Display) {
+    println(v.display())
+}
+
+// Declared conformance holds for any type.
+type Tagged: Debug = {
+    tag: string
+}
+
+// A custom protocol: `b`'s receiver-typed member is provided by `B.b`.
+type A = {
+    a
+    b: (Self) -> string
+}
+type B = {
+    a
+}
+fun B.b(self) {
+    return self.a
+}
+
+fun f(a: A) {
+    println(a.b())
+}
+
+fun main() {
+    debug_it(1)
+    debug_it("s")
+    debug_it([1, 2])
+    debug_it(Plain { n: 7 })
+    debug_it(Temp { celsius: 1.5 })
+    show("a")
+    show(2)
+    show(Temp { celsius: 21.5 })
+    debug_it(Tagged { tag: "t" })
+    f(B { a: "s" })
+}

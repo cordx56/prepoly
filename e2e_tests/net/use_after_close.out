@@ -1,20 +1,4 @@
 read after close errs
-addr after close: Error {
-    value: "socket is closed",
-    location: Location {
-        file: "<plugin:std.libnet>",
-        line: 65,
-        col: 12,
-    },
-    frames: [],
-}
-accept after close: Error {
-    value: "socket is closed",
-    location: Location {
-        file: "<plugin:std.libnet>",
-        line: 27,
-        col: 12,
-    },
-    frames: [],
-}
+addr after close: [<plugin:std.libnet>:65:12] unhandled error: socket is closed
+accept after close: [<plugin:std.libnet>:27:12] unhandled error: socket is closed
 done

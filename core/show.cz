@@ -1,0 +1,129 @@
+// Value-to-text protocols. Every type satisfies `Debug`: primitives implement
+// `debug` here, and every other type falls back to the compiler's built-in
+// renderer (the traditional record/sum/array display), so `v.debug()` works on
+// any value. Only primitives implement `Display` out of the box; a user type
+// satisfies it by declaring its own `fun T.display(self) -> string`. String
+// interpolation (`"{v}"`, and `print`/`println`) prefers `display` when the
+// value's type implements it and falls back to `debug` otherwise; write
+// `"{v.debug()}"` to force the debug form.
+
+/**
+ * The rendering every type satisfies: `debug` returns the value's canonical
+ * text form. The primitives implement it in this module (a string debugs
+ * QUOTED: `"a".debug()` is `"\"a\""`); every other type falls back to the
+ * compiler's built-in renderer, so `v.debug()` works on any value. A `"{v}"`
+ * segment and `print`/`println` use it when the type declares no `display`;
+ * `"{v.debug()}"` forces this form.
+ */
+type Debug = {
+    debug: (Self) -> string
+}
+
+/**
+ * The preferred human-readable rendering. Out of the box only the primitives
+ * satisfy it (a string displays UNQUOTED); any other type opts in by
+ * declaring `fun T.display(self) -> string`, which `"{v}"` interpolation and
+ * `print`/`println` then use instead of `debug`.
+ */
+type Display = {
+    display: (Self) -> string
+}
+
+// `debug` and `display` agree on every primitive except `string`, whose
+// debug form is quoted (`"a".debug() == "\"a\""`, `"a".display() == "a"`).
+
+fun string.debug(self) -> string {
+    return "\"{self}\""
+}
+
+fun string.display(self) -> string {
+    return self
+}
+
+fun bool.debug(self) -> string {
+    return string.from(self)
+}
+
+fun bool.display(self) -> string {
+    return string.from(self)
+}
+
+fun int8.debug(self) -> string {
+    return string.from(self)
+}
+
+fun int8.display(self) -> string {
+    return string.from(self)
+}
+
+fun int16.debug(self) -> string {
+    return string.from(self)
+}
+
+fun int16.display(self) -> string {
+    return string.from(self)
+}
+
+fun int32.debug(self) -> string {
+    return string.from(self)
+}
+
+fun int32.display(self) -> string {
+    return string.from(self)
+}
+
+fun int64.debug(self) -> string {
+    return string.from(self)
+}
+
+fun int64.display(self) -> string {
+    return string.from(self)
+}
+
+fun uint8.debug(self) -> string {
+    return string.from(self)
+}
+
+fun uint8.display(self) -> string {
+    return string.from(self)
+}
+
+fun uint16.debug(self) -> string {
+    return string.from(self)
+}
+
+fun uint16.display(self) -> string {
+    return string.from(self)
+}
+
+fun uint32.debug(self) -> string {
+    return string.from(self)
+}
+
+fun uint32.display(self) -> string {
+    return string.from(self)
+}
+
+fun uint64.debug(self) -> string {
+    return string.from(self)
+}
+
+fun uint64.display(self) -> string {
+    return string.from(self)
+}
+
+fun float32.debug(self) -> string {
+    return string.from(self)
+}
+
+fun float32.display(self) -> string {
+    return string.from(self)
+}
+
+fun float64.debug(self) -> string {
+    return string.from(self)
+}
+
+fun float64.display(self) -> string {
+    return string.from(self)
+}

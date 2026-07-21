@@ -1979,6 +1979,15 @@ pub trait Codegen {
                 let v = self.codegen_operand(program, f, op, &ty);
                 if matches!(ty, Type::Str) {
                     v
+                } else if let Some(inst) =
+                    program.lookup(&method_symbol("display", std::slice::from_ref(&ty)))
+                {
+                    // Like a `"{v}"` segment, `print`/`println` prefer the USER
+                    // `display` method when the value's type declares one (the
+                    // monomorphizer created the instance).
+                    let symbol = inst.symbol.clone();
+                    let ret = inst.ret.clone();
+                    self.call(&symbol, &[v], &ret)
                 } else {
                     self.to_string(v, &ty)
                 }
@@ -2170,6 +2179,11 @@ fn classify_call<'c>(
                 msym
             } else if let Some(psym) = prim_method_instance(program, name, arg_types) {
                 psym
+            } else if name == "debug" {
+                // The built-in `debug`: a receiver with neither a user nor a
+                // core primitive `debug` renders through the runtime's
+                // traditional formatter, exactly like a `"{v}"` segment.
+                return CallKind::Builtin("to_string");
             } else {
                 instance_symbol(name, arg_types)
             };
@@ -2186,6 +2200,17 @@ fn classify_call<'c>(
         }
         Callee::Free(base) if base == "print" || base == "println" => CallKind::Io(base),
         Callee::Free(base) => CallKind::Instance(instance_symbol(base, arg_types)),
+        // A `to_string` segment (`"{v}"`) routes to the USER `display`
+        // instance the monomorphizer created when the value's type declares
+        // one; everything else keeps the built-in renderer.
+        Callee::Builtin(name) if name == "to_string" => {
+            let dsym = method_symbol("display", arg_types);
+            if program.lookup(&dsym).is_some() {
+                CallKind::Instance(dsym)
+            } else {
+                CallKind::Builtin(name)
+            }
+        }
         Callee::Builtin(name) => CallKind::Builtin(name),
         Callee::Indirect(op) => CallKind::Indirect(op),
     }

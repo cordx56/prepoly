@@ -2,13 +2,5 @@
 boxed
 7
 t
-err: Error {
-    value: "negative",
-    location: Location {
-        file: "e2e_tests/types/method_declared_fallible_wraps_ok.cz",
-        line: 60,
-        col: 16,
-    },
-    frames: [],
-}
+err: [e2e_tests/types/method_declared_fallible_wraps_ok.cz:60:16] unhandled error: negative
 3

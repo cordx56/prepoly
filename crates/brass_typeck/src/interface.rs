@@ -211,13 +211,30 @@ fn report(
 ) {
     for ifld in ifields {
         match fields.iter().find(|f| f.name == ifld.name) {
-            None if report_missing => errors.push(TypeError {
-                message: format!(
-                    "`{who}` does not satisfy `{iface}`: missing field `{}`",
-                    ifld.name
-                ),
-                span,
-            }),
+            None if report_missing => {
+                // A function-typed interface member may be provided by a
+                // METHOD instead of a stored field: the built-in `debug`
+                // (every type renders itself) or a declared method of the
+                // same arity. `type A: Debug` holds for any record.
+                let provided = match ifld.resolved_ty.as_ref() {
+                    Some(brass_hir::Type::Fun(params, _)) => {
+                        (ifld.name == "debug" && params.len() == 1)
+                            || methods
+                                .get(&ifld.name)
+                                .is_some_and(|m| m.signature.params.len() == params.len())
+                    }
+                    _ => false,
+                };
+                if !provided {
+                    errors.push(TypeError {
+                        message: format!(
+                            "`{who}` does not satisfy `{iface}`: missing field `{}`",
+                            ifld.name
+                        ),
+                        span,
+                    });
+                }
+            }
             None => {}
             Some(have) => {
                 if ifld.ty.is_some()
@@ -248,6 +265,9 @@ fn report(
     }
     for (mname, m) in imethods {
         match methods.get(mname) {
+            // A receiver-only `debug` requirement is the built-in renderer,
+            // satisfied by every type.
+            None if mname == "debug" && m.signature.params.len() == 1 => {}
             None => errors.push(TypeError {
                 message: format!("`{who}` does not satisfy `{iface}`: missing method `{mname}`"),
                 span,

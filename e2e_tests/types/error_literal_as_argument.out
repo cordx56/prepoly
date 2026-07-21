@@ -1,12 +1,4 @@
 -1
-err: Error {
-    value: "nope",
-    location: Location {
-        file: "e2e_tests/types/error_literal_as_argument.cz",
-        line: 36,
-        col: 22,
-    },
-    frames: [],
-}
+err: [e2e_tests/types/error_literal_as_argument.cz:36:22] unhandled error: nope
 -2
 7

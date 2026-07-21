@@ -1,10 +1,2 @@
 ok 7
-err Error {
-    value: -3,
-    location: Location {
-        file: "e2e_tests/types/fallible_bang.cz",
-        line: 5,
-        col: 9,
-    },
-    frames: [],
-}
+err [e2e_tests/types/fallible_bang.cz:5:9] unhandled error: -3

@@ -1,12 +1,4 @@
 100
 102
 1
-err: Error {
-    value: "duplicate key 'a'",
-    location: Location {
-        file: "e2e_tests/types/refinement_alias_in_signature.cz",
-        line: 26,
-        col: 16,
-    },
-    frames: [],
-}
+err: [e2e_tests/types/refinement_alias_in_signature.cz:26:16] unhandled error: duplicate key 'a'

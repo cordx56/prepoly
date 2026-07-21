@@ -1,0 +1,16 @@
+1
+"s"
+[1, 2]
+Plain {
+    n: 7,
+}
+Temp {
+    celsius: 1.5,
+}
+a
+2
+21.5C
+Tagged {
+    tag: "t",
+}
+s

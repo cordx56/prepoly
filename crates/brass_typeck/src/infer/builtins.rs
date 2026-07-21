@@ -602,7 +602,65 @@ impl<'a> Checker<'a> {
         scopes: &mut ScopeStack,
         span: brass_parser::Span,
     ) -> Option<Type> {
+        if let Some(ret) = self.debug_method_type(recv_ty, method, args, scopes, span) {
+            return Some(ret);
+        }
         self.array_method_type(recv_ty, method, args, scopes, span)
+    }
+
+    /// The built-in `debug` renderer: every value can `v.debug()` itself into a
+    /// string (every type satisfies the `Debug` protocol). The scalar
+    /// primitives implement `debug` in core (`fun string.debug` carries the
+    /// quoting) and a user type may declare its own, so this claims the name
+    /// only for the REMAINING receivers -- records/sums without a user `debug`,
+    /// arrays, tuples, and still-open generics -- whose rendering is the
+    /// runtime's traditional one (exactly what `"{v}"` interpolation emits).
+    fn debug_method_type(
+        &mut self,
+        recv_ty: &Type,
+        method: &str,
+        args: &[Arg],
+        scopes: &mut ScopeStack,
+        span: brass_parser::Span,
+    ) -> Option<Type> {
+        if method != "debug" {
+            return None;
+        }
+        let base = brass_hir::peel_modes(&self.resolve(recv_ty)).clone();
+        // A nullable receiver narrows first, like any other method call.
+        if matches!(base, Type::Nullable(_)) {
+            return None;
+        }
+        // Scalars dispatch to core's primitive methods.
+        if let Some(class) = base.primitive_class()
+            && class != "array"
+        {
+            return None;
+        }
+        // A user-declared `debug` wins over the built-in renderer.
+        if let Type::Record(n) | Type::Sum(n) = &base
+            && let Some(info) = self.program.type_by_id(n.id)
+        {
+            let declared = match &info.kind {
+                TypeKind::Record { methods, .. } => methods.contains_key("debug"),
+                TypeKind::Sum { variants } => {
+                    variants.iter().any(|v| v.methods.contains_key("debug"))
+                }
+            };
+            if declared {
+                return None;
+            }
+        }
+        args.iter().for_each(|arg| {
+            self.check_expr(&arg.expr, scopes);
+        });
+        if !args.is_empty() {
+            self.errors.push(TypeError {
+                message: format!("`debug` takes no arguments, found {}", args.len()),
+                span,
+            });
+        }
+        Some(Type::Str)
     }
 
     /// Type the builtin collection methods so their element types are enforced:

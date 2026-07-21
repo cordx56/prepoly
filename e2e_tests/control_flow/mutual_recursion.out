@@ -4,12 +4,4 @@ true
 20
 leaf
 2
-err Error {
-    value: "too deep",
-    location: Location {
-        file: "e2e_tests/control_flow/mutual_recursion.cz",
-        line: 57,
-        col: 16,
-    },
-    frames: [],
-}
+err [e2e_tests/control_flow/mutual_recursion.cz:57:16] unhandled error: too deep

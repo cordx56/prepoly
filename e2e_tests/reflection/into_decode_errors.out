@@ -1,28 +1,4 @@
 ok: 1 2
-err: Error {
-    value: "missing field 'y'",
-    location: Location {
-        file: "e2e_tests/reflection/into_decode_errors.cz",
-        line: 13,
-        col: 20,
-    },
-    frames: [],
-}
-err: Error {
-    value: "cannot decode this value as `Point`",
-    location: Location {
-        file: "<unknown>",
-        line: 0,
-        col: 0,
-    },
-    frames: [],
-}
-err: Error {
-    value: "cannot decode this value as `int64`",
-    location: Location {
-        file: "<unknown>",
-        line: 0,
-        col: 0,
-    },
-    frames: [],
-}
+err: [e2e_tests/reflection/into_decode_errors.cz:13:20] unhandled error: missing field 'y'
+err: [<unknown>:0:0] unhandled error: cannot decode this value as `Point`
+err: [<unknown>:0:0] unhandled error: cannot decode this value as `int64`

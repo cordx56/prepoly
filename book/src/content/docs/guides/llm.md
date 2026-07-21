@@ -210,8 +210,9 @@ fun length(val) {
 - `result.context(message)` adds trace context only on failure.
 - At top level or in `main`, an unhandled `!` prints the error and exits
   non-zero.
-- When matching a standard error, print `error.display()` or inspect
-  `error.value`; interpolating `{error}` prints the record representation.
+- When matching a standard error, inspect `error.value`; interpolating
+  `{error}` renders through `Error`'s `display` (the trace form). Use
+  `{error.debug()}` for the raw record representation.
 
 ```brass
 fun load_number(text: string) -> int32! {
@@ -240,6 +241,12 @@ match load_number("12") {
   direct indexing or public substring operation; use `chars`, `split`,
   `find`, or `replace`.
 - `print` and `println` take one value. Use interpolation for several values.
+- Every value has `v.debug() -> string`, its canonical rendering (`Debug`
+  protocol; a string debugs quoted: `"a".debug()` is `"\"a\""`). Primitives
+  also have `v.display()` (a string displays unquoted). `"{v}"` and
+  `print`/`println` render through a type's own `display` method when it
+  declares one, else through `debug`; `"{v.debug()}"` forces the debug form.
+  `HashMap` declares `display`: JSON-style `"key": value` lines.
 
 ## Reflection and definite assignment
 

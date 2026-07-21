@@ -1501,6 +1501,66 @@ mod tests {
     }
 
     #[test]
+    fn debug_protocol_accepts_every_type() {
+        // Every type satisfies `Debug` (the built-in renderer provides the
+        // member), so a `Debug`-annotated parameter takes records, scalars,
+        // and literals alike, and `type T: Debug` conformance holds.
+        let e = errs(
+            "type Debug = {\n    debug: (Self) -> string\n}\ntype Plain: Debug = {\n    n: int32\n}\nfun debug_it(v: Debug) {\n    println(v.debug())\n}\nfun main() {\n    debug_it(Plain { n: 1 })\n    debug_it(1)\n    debug_it(\"s\")\n}\n",
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn display_protocol_rejects_types_without_display() {
+        let e = errs(
+            "type Display = {\n    display: (Self) -> string\n}\ntype Plain = {\n    n: int32\n}\nfun show(v: Display) {\n    println(v.display())\n}\nfun main() {\n    show(Plain { n: 1 })\n}\n",
+        );
+        assert!(
+            e.iter()
+                .any(|m| m.contains("cannot use `Plain` where `Display` is required")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn method_provides_function_typed_interface_member() {
+        // A `b: (Self) -> string` member is provided by a declared method
+        // `fun B.b(self)`, and calling `a.b()` through the interface binds
+        // the receiver implicitly.
+        let e = errs(
+            "type A = {\n    a\n    b: (Self) -> string\n}\ntype B = {\n    a\n}\nfun B.b(self) {\n    return self.a\n}\nfun f(a: A) {\n    println(a.b())\n}\nfun main() {\n    f(B { a: \"s\" })\n}\n",
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn builtin_debug_types_as_string() {
+        // Every type satisfies `Debug`: a record without a user `debug` gets
+        // the built-in renderer, typed `string` (the mismatch against int32
+        // proves the call resolved rather than deferring open).
+        let e = errs(
+            "type Point = {\n    x: int32\n}\nfun main() {\n    let p = Point { x: 1 }\n    let n: int32 = p.debug()\n}\n",
+        );
+        assert!(
+            e.iter()
+                .any(|m| m.contains("cannot use `string` where `int32` is required")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn builtin_debug_rejects_arguments() {
+        let e = errs(
+            "type Point = {\n    x: int32\n}\nfun main() {\n    let p = Point { x: 1 }\n    println(p.debug(1))\n}\n",
+        );
+        assert!(
+            e.iter().any(|m| m.contains("`debug` takes no arguments")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
     fn slotted_record_instances_are_independent() {
         // Two literals of a slotted record pin their slots independently: each
         // literal (and each field access on it) takes its own instantiation of
